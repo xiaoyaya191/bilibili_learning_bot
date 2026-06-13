@@ -12606,42 +12606,48 @@ def _scan_knowledge_base_md_files():
 
 
 # Agent模式可用工具的常量定义
-AGENT_TOOLS_HELP = """你拥有以下工具能力，在回复中使用 [TOOL:工具名] 参数 的格式来调用：
+AGENT_TOOLS_HELP = """你拥有以下工具能力，在回复中使用 [TOOL:工具名] 参数 的格式来调用。可以同时调用多个工具：
 
-1. [TOOL:search_knowledge] 搜索词
+1. [TOOL:fetch_subtitles]
+   获取视频的AI字幕/CC字幕文本（仅获取字幕，不做AI分析）。
+   **是视频内容分析的第一步，拿到字幕后才能判断后续操作。**
+
+2. [TOOL:search_knowledge] 搜索词
    在知识库中搜索相关内容，返回匹配的文件路径和摘要
    
-2. [TOOL:read_file] 相对路径
+3. [TOOL:read_file] 相对路径
    读取知识库中的指定文件内容，路径相对于 KnowledgeBase/ 目录
    例: [TOOL:read_file] 科技/AI工具/video_creation/[BVxxx] - 标题.md
 
-3. [TOOL:list_files] 可选分类路径
+4. [TOOL:list_files] 可选分类路径
    列出知识库文件，不传参数=列出全部，传路径=列出子目录
    例: [TOOL:list_files] 科技
 
-4. [TOOL:delete_file] 相对路径
+5. [TOOL:delete_file] 相对路径
    删除知识库中的指定文件（需确认，会提示用户）
 
-5. [TOOL:update_file] 相对路径
+6. [TOOL:update_file] 相对路径
    ---新内容---
    替换/更新知识库文件的全部内容（需确认）
    例: [TOOL:update_file] 科技/AI工具/[BVxxx] - 标题.md
    ---
    新的完整Markdown内容...
 
-6. [TOOL:analyze_video]
+7. [TOOL:analyze_video]
    触发完整的视频分析：封面+字幕/ASR/视觉帧+评论+弹幕 → AI决策 → 学习归档
+   **仅在已拿到字幕且确实需要深度分析时使用。**
 
-7. [TOOL:quick_preview]
-   只看标题/简介/评论/弹幕，不做完整视频分析，快速了解视频内容
+8. [TOOL:quick_preview]
+   只看标题/简介/评论/弹幕，不做完整视频分析，快速了解视频热度/反馈
+   **不获取视频字幕/内容！想分析内容先调用 fetch_subtitles。**
 
 [DONE] 完成任务后输出此标记结束对话
 
 工作流程：
-- 先了解用户意图，可以多轮提问缩小目标
-- 如需参考已有知识，先搜索/读取知识库
-- 对比新旧知识后决定分析策略（完整/快速/跳过）
-- 分析完成后建议文件操作（更新/删除/保留）"""
+- 用户提到"字幕"/"内容"/"分析视频/总结"等 → 第一步必须先 [TOOL:fetch_subtitles]
+- 用户只要热度/评论反馈 → 可以用 [TOOL:quick_preview]
+- 拿到字幕后，按用户要求分析/总结/归档
+- 可一次调用多个工具以提高效率"""
 
 
 async def _agent_video_analysis(brain, bvid, title, up_name, video_url, aid=0):
@@ -12696,7 +12702,7 @@ async def _agent_video_analysis(brain, bvid, title, up_name, video_url, aid=0):
 2. 先理解用户意图，可以反问缩小目标
 3. 善用搜索/读取知识库，对比已有知识
 4. 文件操作(update/delete)前要说明理由并等待用户确认
-5. 每次回复只能调用一个工具，收到结果后再决定下一步
+5. 可以同时调用多个工具，尤其 fetch_subtitles+search_knowledge 可并行
 6. 任务完成或用户满意时输出 [DONE]"""},
     ]
 
@@ -12913,6 +12919,37 @@ async def _agent_video_analysis(brain, bvid, title, up_name, video_url, aid=0):
         except Exception as e:
             return f"写入失败: {e}"
 
+    async def _agent_fetch_subtitles():
+        """获取视频字幕（AI字幕优先，CC字幕备选），缓存结果供后续分析复用"""
+        print(f"\n{Fore.CYAN}[Agent] 获取视频字幕...{Style.RESET_ALL}")
+        # 已缓存则直接返回
+        if analysis_cache.get("subtitle_text"):
+            cached_len = len(analysis_cache["subtitle_text"])
+            print(f"{Fore.GREEN}[Agent] 使用缓存字幕 ({cached_len}字){Style.RESET_ALL}")
+            return analysis_cache["subtitle_text"]
+
+        subtitle_text = ""
+        try:
+            # 优先直接获取B站AI/CC字幕（快，不走LLM）
+            subs = await brain.fetch_bilibili_subtitles(bvid)
+            if subs and len(subs) > 100:
+                subtitle_text = subs
+                print(f"{Fore.GREEN}[Agent] 获取到B站字幕 ({len(subs)}字){Style.RESET_ALL}")
+            else:
+                # 字幕不足，走完整管道（可能触发ASR下载）
+                print(f"{Fore.YELLOW}[Agent] B站字幕不足({len(subs) if subs else 0}字)，尝试完整视频理解...{Style.RESET_ALL}")
+                success, st = await brain.understand_video_for_decision(bvid, title=title)
+                if success and st:
+                    subtitle_text = st
+        except Exception as e:
+            print(f"{Fore.RED}[Agent] 字幕获取异常: {e}{Style.RESET_ALL}")
+            subtitle_text = f"[字幕获取失败] {e}"
+
+        # 缓存
+        if subtitle_text:
+            analysis_cache["subtitle_text"] = subtitle_text
+        return subtitle_text or "[无字幕]"
+
     async def _agent_quick_preview():
         """快速预览：获取标题/简介/评论/弹幕"""
         print(f"\n{Fore.CYAN}[Agent] 快速预览视频信息...{Style.RESET_ALL}")
@@ -12963,9 +13000,16 @@ UP主: {up_name}
         """完整视频分析管道"""
         print(f"\n{Fore.CYAN}[Agent] 触发完整视频分析管道...{Style.RESET_ALL}")
 
-        # 1. 视频理解
+        # 1. 视频理解（复用缓存字幕）
         print(f"{Fore.CYAN}[Agent] [1/4] 视频内容理解 (字幕/ASR/视觉帧)...{Style.RESET_ALL}")
-        success, subtitle_text = await brain.understand_video_for_decision(bvid, title=title)
+        if analysis_cache.get("subtitle_text"):
+            print(f"{Fore.GREEN}[Agent] 复用已获取的字幕 ({len(analysis_cache['subtitle_text'])}字){Style.RESET_ALL}")
+            subtitle_text = analysis_cache["subtitle_text"]
+            success = True
+        else:
+            success, subtitle_text = await brain.understand_video_for_decision(bvid, title=title)
+            if success and subtitle_text:
+                analysis_cache["subtitle_text"] = subtitle_text
         if not success:
             subtitle_text = f"[理解受限] {subtitle_text}"
 
@@ -13191,6 +13235,8 @@ AI判断: {thought}
                 else:
                     print(f"{Fore.CYAN}[Agent] 开始完整视频分析...{Style.RESET_ALL}")
                     tool_result = await _agent_analyze_video()
+            elif tool_name == "fetch_subtitles":
+                tool_result = await _agent_fetch_subtitles()
             elif tool_name == "quick_preview":
                 tool_result = await _agent_quick_preview()
             else:
