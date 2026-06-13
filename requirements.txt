@@ -1,0 +1,27 @@
+# ============================================================
+# bilibili_learning_bot 依赖清单
+# ============================================================
+# 安装: pip install -r requirements.txt
+# 可选: pip install -r requirements-optional.txt
+
+# --- 核心依赖 ---
+bilibili-api-python>=16.0
+colorama>=0.4
+httpx>=0.24
+openai>=1.0
+
+# --- 工具类 ---
+qrcode>=7.4
+qrcode-terminal>=0.8
+requests>=2.28
+
+# --- Web 面板（web_panel.py）---
+flask>=2.3
+
+# --- 视频抽帧（video_modes.py）---
+opencv-python>=4.8
+ffmpeg-python>=0.2  # 需系统安装 ffmpeg
+
+# --- 可选：ASR 语音识别（asr_engine.py）---
+# funasr>=1.0
+# openai-whisper>=20231117

@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+.env
+.env.*
+
+# Local data
+Data/
+!Data/.gitkeep
+
+# Runtime files
+bot_memory.json
+bot_journal.md
+upstream-bilibili-ai-bot.zip
+*.zip
+
+# Knowledge base
+KnowledgeBase/
+
+# ASR model files (large)
+model/asr/
+model/
+
+# Backup files
+*.bak
+*.bak.*
+backup_*/
+
+# Temp / test files
+_test_*.py
+*_test_output.txt
+*_result.json
+
+# IDE / OS
+.idea/
+.vscode/
+Thumbs.db
+Desktop.ini
