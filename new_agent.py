@@ -12703,7 +12703,14 @@ async def _agent_video_analysis(brain, bvid, title, up_name, video_url, aid=0):
 3. 善用搜索/读取知识库，对比已有知识
 4. 文件操作(update/delete)前要说明理由并等待用户确认
 5. 可以同时调用多个工具，尤其 fetch_subtitles+search_knowledge 可并行
-6. 任务完成或用户满意时输出 [DONE]"""},
+6. 任务完成或用户满意时输出 [DONE]
+
+工作流程（与"直接分析模式"一致）：
+- 用户要求分析视频/总结内容 → 第一步 [TOOL:fetch_subtitles] 获取字幕
+- 拿到字幕后 → 调用 [TOOL:analyze_video] 做完整评分分析（含评论弹幕+AI决策+归档）
+- 分析完成后 → 根据用户要求输出总结/写文件/打开文件
+- 用户如中途要调整方向（如只总结某部分/改输出格式），在上一步完成后提出来即可
+- 不要用 quick_preview 替代 fetch_subtitles（quick_preview 不看视频内容！）"""},
     ]
 
     # ── Agent 确认函数：4选1（本次允许 / 一直允许 / 不允许 / AI审查） ──
@@ -13151,7 +13158,19 @@ AI判断: {thought}
             print(f"\n{Fore.GREEN}[Agent] {result}{Style.RESET_ALL}")
             continue
         if user_msg.lower() == "/done":
-            user_msg = "立即分析这个视频的完整内容并归档"
+            # 直接运行完整分析管道（与Enter模式一致）
+            print(f"\n{Fore.CYAN}[Agent] /done: 自动运行完整分析管道...{Style.RESET_ALL}")
+            # Step 1: 获取字幕
+            if not analysis_cache.get("subtitle_text"):
+                sub_result = await _agent_fetch_subtitles()
+                if sub_result and not sub_result.startswith("[无字幕]") and not sub_result.startswith("[字幕获取失败]"):
+                    messages.append({"role": "system", "content": f"[已获取视频字幕 ({len(sub_result)}字)]"})
+            # Step 2: 完整分析
+            tool_result = await _agent_analyze_video()
+            print(f"\n{Fore.GREEN}[Agent] {tool_result}{Style.RESET_ALL}")
+            # 把分析结果加入对话，AI可以基于此回复
+            messages.append({"role": "system", "content": f"[自动分析完成]:\n{tool_result}\n\n请向用户汇报分析结果。如需输出文件请用update_file工具。"})
+            continue
 
         # 添加用户消息
         messages.append({"role": "user", "content": user_msg})
@@ -13247,9 +13266,16 @@ AI判断: {thought}
             print(f"{Fore.GREEN}[Agent] 工具结果: {result_preview}{Style.RESET_ALL}")
 
             # 把工具结果作为system消息加入对话
+            context_note = f"[工具 {tool_name} 执行结果]:\n{tool_result}"
+            # 根据已执行工具附加状态提示
+            if tool_name == "fetch_subtitles" and not tool_result.startswith("[无字幕]") and not tool_result.startswith("[字幕获取失败]"):
+                context_note += f"\n\n[数据上下文] 已获取完整字幕({len(tool_result)}字)。下一步通常调用 analyze_video 做评分归档，或直接基于字幕回答用户问题。请勿再次调用 fetch_subtitles。"
+            elif tool_name == "analyze_video":
+                context_note += "\n\n[数据上下文] 视频完整分析已完成（含字幕+评论+弹幕+AI评分+归档）。可以基于这些结果回复用户，或按用户要求生成总结/写文件。"
+            context_note += "\n\n请基于以上结果继续回复用户，如需更多工具可继续调用。"
             messages.append({
                 "role": "system",
-                "content": f"[工具 {tool_name} 执行结果]:\n{tool_result}\n\n请基于以上结果继续回复用户，如需更多工具可继续调用。"
+                "content": context_note
             })
 
         # 如果有工具调用且没有DONE标记，让AI继续思考
