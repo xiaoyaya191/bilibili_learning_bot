@@ -1,0 +1,50 @@
+version: "3.8"
+
+services:
+  bilibili-bot:
+    build: .
+    container_name: bilibili-learning-bot
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - TZ=Asia/Shanghai
+      - WEB_PORT=8080
+      - WEB_HOST=0.0.0.0
+      # 跳过免责声明终端确认（初次启动用，默认需要手动确认）
+      # - BILI_DISCLAIMER_SKIP=1
+    volumes:
+      # 持久化数据：Config、Cookie、数据库、日志
+      - ./Data:/app/Data
+      # 视频下载缓存
+      - ./video_cache:/app/video_cache
+    networks:
+      - bilibili-net
+
+networks:
+  bilibili-net:
+    driver: bridge
+
+# ══════════════════════════════════════════════════
+#  使用说明
+# ══════════════════════════════════════════════════
+#
+# 1. 启动：
+#    docker compose up -d
+#
+# 2. 首次启动后会提示输入免责声明确认，
+#    之后访问 http://localhost:8080 进入 Web 面板。
+#
+# 3. Web 面板初始凭据：
+#    用户名: admin
+#    密码:   admin
+#    首次登录后强制修改。
+#
+# 4. 配置 LLM API：
+#    进入面板 → 设置 → 填入 API Key 和模型名称。
+#
+# 5. 视频下载路径：
+#    容器内 /app/video_cache，可通过 volume 映射到宿主机。
+#
+# 6. 如需跳过免责声明终端确认（自动化部署）：
+#    取消注释 BILI_DISCLAIMER_SKIP=1 环境变量。

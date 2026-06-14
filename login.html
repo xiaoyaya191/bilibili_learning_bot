@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
+<title>登录 - B站 AI 管理系统</title>
+<style>
+:root{
+--bg:#0a0e14;--bg2:#131a24;--bg3:#1c2535;--border:#263040;
+--text:#dde4f0;--text2:#7888a0;--accent:#5b8def;--red:#e05560;--green:#4caf7c;
+--card-bg:#0d1117;--card-border:#30363d;--input-bg:#0d1117;--input-border:#30363d;
+--primary-btn:#238636;--r:10px;--rs:6px;
+--shake-color:#e05560;
+}
+[data-theme="light"]{
+--bg:#ffffff;--bg2:#f6f8fa;--bg3:#e8eaed;--border:#d0d7de;
+--text:#1f2328;--text2:#656d76;--accent:#0969da;--red:#cf222e;--green:#1a7f37;
+--card-bg:#f6f8fa;--card-border:#d0d7de;--input-bg:#ffffff;--input-border:#d0d7de;
+--primary-btn:#0969da;--shake-color:#cf222e;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{
+font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+background:var(--bg);color:var(--text);display:flex;align-items:center;justify-content:center;
+min-height:100vh;transition:background .3s,color .3s;
+}
+.container{position:relative;width:100%}
+.theme-toggle{
+position:fixed;top:16px;right:16px;z-index:10;
+width:40px;height:40px;border-radius:50%;border:1px solid var(--border);
+background:var(--bg2);color:var(--text);font-size:20px;cursor:pointer;
+display:flex;align-items:center;justify-content:center;transition:all .2s;
+}
+.theme-toggle:hover{background:var(--bg3)}
+.overlay{
+position:fixed;inset:0;background:var(--bg);display:flex;
+align-items:center;justify-content:center;z-index:5;transition:opacity .3s;
+}
+.overlay.hidden{display:none}
+.card{
+background:var(--bg2);border:1px solid var(--card-border);border-radius:12px;
+padding:32px 28px;width:400px;max-width:90vw;text-align:center;
+box-shadow:0 8px 24px rgba(0,0,0,.12);transition:background .3s,border-color .3s;
+}
+.card h2{font-size:22px;margin-bottom:6px;color:var(--accent)}
+.card .sub{font-size:12px;color:var(--text2);margin-bottom:8px}
+.card .hint{
+background:var(--bg3);border:1px solid var(--border);border-radius:var(--rs);
+padding:10px 14px;margin-bottom:18px;font-size:12px;color:var(--text2);
+text-align:center;line-height:1.7;
+}
+.card .form{display:flex;flex-direction:column;gap:12px}
+.card input{
+width:100%;background:var(--input-bg);border:1px solid var(--input-border);
+border-radius:var(--rs);padding:10px 14px;color:var(--text);font-size:14px;
+outline:none;transition:border-color .2s;
+}
+.card input:focus{border-color:var(--accent)}
+.card input.error{border-color:var(--red);animation:shake .4s}
+.card .btn{
+width:100%;padding:10px;border:none;border-radius:var(--rs);font-size:15px;
+font-weight:600;cursor:pointer;transition:opacity .2s;color:#fff;
+}
+.card .btn.primary{background:var(--accent)}
+.card .btn.primary:hover{opacity:.85}
+.card .btn:disabled{opacity:.4;cursor:not-allowed}
+.card .msg{margin-top:12px;font-size:13px;min-height:20px}
+.card .msg.err{color:var(--red)}
+.card .msg.ok{color:var(--green)}
+.card .msg.loading{color:var(--text2)}
+.pwd-meter{margin-top:4px;height:4px;border-radius:2px;background:var(--border);overflow:hidden}
+.pwd-meter .bar{height:100%;border-radius:2px;transition:width .3s,background .3s}
+@keyframes shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-6px)}75%{transform:translateX(6px)}}
+@media(max-width:440px){.card{padding:24px 18px}.card h2{font-size:20px}}
+</style>
+</head>
+<body>
+<button class="theme-toggle" id="themeBtn" onclick="toggleTheme()" title="切换主题">🌙</button>
+
+<!-- 登录覆盖层 -->
+<div class="overlay" id="loginOverlay">
+<div class="card">
+<h2>B站 AI 管理系统</h2>
+<p class="sub">请输入账号密码登录</p>
+<div class="hint">
+默认用户名 <b>admin</b> / 默认密码 <b>admin</b><br>
+首次登录后请立即修改用户名和密码
+</div>
+<div class="form" id="loginForm">
+<input id="loginUser" type="text" placeholder="用户名" autocomplete="username" value="admin">
+<input id="loginPass" type="password" placeholder="密码" autocomplete="current-password">
+<button class="btn primary" id="loginBtn" onclick="doLogin()">登 录</button>
+</div>
+<div class="msg" id="loginMsg"></div>
+</div>
+</div>
+
+<!-- 强制修改密码覆盖层 -->
+<div class="overlay hidden" id="changeOverlay">
+<div class="card">
+<h2>🔒 首次登录，请修改默认凭据</h2>
+<p class="sub">设置新的用户名和密码以确保安全</p>
+<div class="form" id="changeForm">
+<input id="chgNewUser" type="text" placeholder="新用户名（至少2位）" autocomplete="username">
+<input id="chgNewPass" type="password" placeholder="新密码（至少3位）" autocomplete="new-password">
+<div class="pwd-meter"><div class="bar" id="pwdBar"></div></div>
+<input id="chgConfirmPass" type="password" placeholder="确认新密码" autocomplete="new-password">
+<button class="btn primary" id="chgBtn" onclick="doChange()">确认修改</button>
+</div>
+<div class="msg" id="chgMsg"></div>
+</div>
+</div>
+
+<script>
+var THEME_KEY='bili_panel_theme';
+var TOKEN_KEY='bili_panel_token';
+
+function show(id){document.getElementById(id).classList.remove('hidden')}
+function hide(id){document.getElementById(id).classList.add('hidden')}
+function msg(id,text,cls){
+var el=document.getElementById(id);el.textContent=text;el.className='msg '+(cls||'');
+}
+function setLoading(btnId,loading){
+var btn=document.getElementById(btnId);
+btn.disabled=loading;btn.textContent=loading?'处理中...':btnId==='loginBtn'?'登 录':'确认修改';
+}
+
+// 主题切换
+function toggleTheme(){
+var current=document.documentElement.getAttribute('data-theme');
+var next=current==='light'?'dark':'light';
+applyTheme(next);
+}
+function applyTheme(theme){
+document.documentElement.setAttribute('data-theme',theme||'dark');
+document.getElementById('themeBtn').textContent=theme==='light'?'☀️':'🌙';
+localStorage.setItem(THEME_KEY,theme||'dark');
+}
+
+// 密码强度
+document.getElementById('chgNewPass').addEventListener('input',function(){
+var pw=this.value;var bar=document.getElementById('pwdBar');
+var score=0;
+if(pw.length>=3)score+=20;if(pw.length>=6)score+=20;if(pw.length>=10)score+=20;
+if(/[A-Z]/.test(pw)||/[a-z]/.test(pw)&&/[0-9]/.test(pw))score+=20;
+if(/[^A-Za-z0-9]/.test(pw))score+=20;
+bar.style.width=score+'%';
+bar.style.background=score<=20?'#e05560':score<=50?'#f0a040':score<=80?'#5b8def':'#4caf7c';
+});
+
+// 键盘回车
+document.addEventListener('keydown',function(e){
+if(e.key!=='Enter')return;
+if(!document.getElementById('changeOverlay').classList.contains('hidden')){
+doChange();
+}else if(!document.getElementById('loginOverlay').classList.contains('hidden')){
+doLogin();
+}
+});
+
+// 登录
+async function doLogin(){
+var user=document.getElementById('loginUser').value.trim();
+var pass=document.getElementById('loginPass').value.trim();
+if(!user){msg('loginMsg','请输入用户名','err');return}
+if(!pass){msg('loginMsg','请输入密码','err');return}
+msg('loginMsg','','');setLoading('loginBtn',true);
+try{
+var resp=await fetch('/api/login',{
+method:'POST',headers:{'Content-Type':'application/json'},
+body:JSON.stringify({username:user,password:pass})
+});
+var data=await resp.json();
+if(!data.ok){
+msg('loginMsg',data.error||data.message||'登录失败','err');
+var inp=document.getElementById('loginPass');
+inp.classList.add('error');inp.value='';
+setTimeout(function(){inp.classList.remove('error')},400);
+setLoading('loginBtn',false);return;
+}
+if(data.require_password_change){
+// 用一个临时token存localStorage用于改密码
+localStorage.setItem(TOKEN_KEY+'_tmp',data.token);
+hide('loginOverlay');show('changeOverlay');
+document.getElementById('chgNewUser').focus();
+setLoading('loginBtn',false);
+return;
+}
+localStorage.setItem(TOKEN_KEY,data.token);
+msg('loginMsg','登录成功，跳转中...','ok');
+setTimeout(function(){location.href='/'},500);
+}catch(e){
+msg('loginMsg','网络错误，请重试','err');
+setLoading('loginBtn',false);
+}
+}
+
+// 修改密码
+async function doChange(){
+var newUser=document.getElementById('chgNewUser').value.trim();
+var newPass=document.getElementById('chgNewPass').value.trim();
+var confirmPass=document.getElementById('chgConfirmPass').value.trim();
+if(!newUser||newUser.length<2){msg('chgMsg','用户名至少2位','err');return}
+if(!newPass||newPass.length<3){msg('chgMsg','新密码至少3位','err');return}
+if(newPass!==confirmPass){msg('chgMsg','两次密码不一致','err');return}
+msg('chgMsg','','');setLoading('chgBtn',true);
+var token=localStorage.getItem(TOKEN_KEY+'_tmp')||'';
+try{
+var resp=await fetch('/api/password-change',{
+method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},
+body:JSON.stringify({new_username:newUser,new_password:newPass})
+});
+var data=await resp.json();
+if(!data.ok){
+msg('chgMsg',data.error||'修改失败','err');setLoading('chgBtn',false);return;
+}
+localStorage.removeItem(TOKEN_KEY+'_tmp');
+localStorage.setItem(TOKEN_KEY,data.token);
+msg('chgMsg','修改成功，跳转中...','ok');
+setTimeout(function(){location.href='/'},800);
+}catch(e){
+msg('chgMsg','网络错误，请重试','err');setLoading('chgBtn',false);
+}
+}
+
+// 初始化
+(function init(){
+var saved=localStorage.getItem(THEME_KEY);
+applyTheme(saved||'dark');
+// 检查是否已登录
+var token=localStorage.getItem(TOKEN_KEY);
+if(token){
+fetch('/api/auth/check',{headers:{'Authorization':'Bearer '+token}})
+.then(function(r){return r.json()})
+.then(function(d){
+if(d.ok&&d.authenticated){location.href='/';return}
+localStorage.removeItem(TOKEN_KEY);show('loginOverlay');
+})
+.catch(function(){show('loginOverlay')});
+}else{
+show('loginOverlay');
+}
+})();
+</script>
+</body>
+</html>
