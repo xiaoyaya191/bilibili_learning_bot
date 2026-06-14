@@ -14,11 +14,7 @@
 
 > 📖 **项目介绍与部署教程：[bot.bxya.top](https://bot.bxya.top)**
 
-### 环境要求
-- Python 3.8+
-- Windows / Linux / macOS / Android (Termux)
-
-### 一键部署
+### 🐧 Linux 部署
 
 ```bash
 # 1. 克隆项目
@@ -26,18 +22,41 @@ git clone https://github.com/xiaoyaya191/bilibili_learning_bot.git
 cd bilibili_learning_bot
 
 # 2. 安装依赖
-pip install -r requirements.txt
+pip3 install -r requirements.txt
 
-# 3. 配置 API Key（编辑 Data/config.json）
-#    或使用环境变量：
+# 3. 配置 API Key（环境变量方式，更安全）
 export BILI_AI_API_KEY="sk-你的APIKey"
 export BILI_AI_BASE_URL="https://api.openai.com/v1"
+
+# 4. 启动 Web 控制台
+python3 web_panel.py
+```
+
+启动后浏览器打开 **http://127.0.0.1:8080**，扫码登录 B 站即可使用。
+
+> 💡 也可编辑 `Data/config.json` 来配置 API Key，两种方式选其一。
+
+### 🪟 Windows 部署
+
+```powershell
+# 1. 克隆项目
+git clone https://github.com/xiaoyaya191/bilibili_learning_bot.git
+cd bilibili_learning_bot
+
+# 2. 安装依赖
+pip install -r requirements.txt
+
+# 3. 配置 API Key（环境变量方式，更安全）
+$env:BILI_AI_API_KEY="sk-你的APIKey"
+$env:BILI_AI_BASE_URL="https://api.openai.com/v1"
 
 # 4. 启动 Web 控制台
 python web_panel.py
 ```
 
-启动后浏览器打开 **http://127.0.0.1:8080**，扫码登录 B 站即可开始使用。
+启动后浏览器打开 **http://127.0.0.1:8080**，扫码登录 B 站即可使用。
+
+> 💡 也可编辑 `Data/config.json` 来配置 API Key。Windows 用户可直接双击 `启动网页版.bat` 一键启动。
 
 ### 📱 Android 手机部署（Termux）
 
