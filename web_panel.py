@@ -5,9 +5,10 @@ bilibili_learning_bot · Web 管理面板
 功能：仪表盘 | 机器人启停 | B站扫码登录 | 配置编辑 | 实时日志
      人格管理 | 评论日志 | 用户画像 | 记忆知识库 | 日记进化 | 操作日志
 """
-import os, sys, json, time, io, base64, threading, asyncio, subprocess, signal, queue
+import os, sys, json, time, io, base64, threading, asyncio, subprocess, signal, queue, hashlib, secrets, re
 from datetime import datetime
 from pathlib import Path
+from functools import wraps
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -64,7 +65,37 @@ ACCOUNT_NAME = os.getenv('BILI_ACCOUNT_NAME', '').strip() or '默认'
 
 app = Flask(__name__, static_folder=None)
 app.secret_key = os.urandom(24).hex()
+app.permanent = True  # persistent session
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+# ── 安全：路径穿越防护 ──
+def safe_join(base: Path, *paths: str) -> Path | None:
+    """安全拼接路径，防止穿越。返回 None 表示非法路径。"""
+    try:
+        result = (base / Path(*paths)).resolve()
+        base_resolved = base.resolve()
+        if not str(result).startswith(str(base_resolved)):
+            return None
+        return result
+    except (ValueError, RuntimeError):
+        return None
+
+def sanitize_filename(name: str) -> str:
+    """清洗文件名，只允许字母、数字、下划线、点、横线。"""
+    return re.sub(r'[^\w.\-]', '', name)[:255]
+
+# ── 安全：Web面板登录认证 ──
+__password__ = os.getenv('BILI_WEB_PASSWORD', '').strip()
+_LOGIN_NONCES: set[str] = set()
+
+def login_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if WEB_PASSWORD:
+            if not session.get('web_authenticated'):
+                return jsonify(dict(ok=False, message='未登录', need_login=True)), 401
+        return f(*args, **kwargs)
+    return decorated
 
 # ── 全局状态 ──
 bot_process: subprocess.Popen | None = None
@@ -1629,8 +1660,12 @@ def api_import_apply():
         fname = body.get('filename', '')
         if not fname:
             return jsonify(dict(ok=False, message='未指定文件名')), 400
-        fpath = BACKUP_DIR_EXPORT / fname
-        if not fpath.exists():
+        # 安全：清洗文件名，防止路径穿越
+        fname = sanitize_filename(fname)
+        if not fname:
+            return jsonify(dict(ok=False, message='非法文件名')), 400
+        fpath = safe_join(BACKUP_DIR_EXPORT, fname)
+        if not fpath or not fpath.exists():
             return jsonify(dict(ok=False, message='备份文件不存在')), 404
         data = json.loads(fpath.read_text(encoding='utf-8'))
         count = 0
@@ -1889,6 +1924,31 @@ def api_behavior_save():
         return jsonify(dict(ok=False, message=str(e))), 400
 
 
+# ── 登录认证 API（可选，通过 BILI_WEB_PASSWORD 环境变量启用）──
+@app.route('/api/login', methods=['POST'])
+def api_login():
+    body = request.get_json(force=True) if request.is_json else {}
+    password = body.get('password', '')
+    if not WEB_PASSWORD:
+        return jsonify(dict(ok=True, message='未设置密码，无需登录'))
+    if password == WEB_PASSWORD:
+        session['web_authenticated'] = True
+        return jsonify(dict(ok=True, message='登录成功'))
+    return jsonify(dict(ok=False, message='密码错误')), 401
+
+@app.route('/api/logout', methods=['POST'])
+def api_logout():
+    session.pop('web_authenticated', None)
+    return jsonify(dict(ok=True, message='已退出'))
+
+@app.route('/api/login/status')
+def api_login_status():
+    return jsonify(dict(
+        need_login=bool(WEB_PASSWORD),
+        authenticated=bool(session.get('web_authenticated'))
+    ))
+
+
 # ── 免责声明 HTML 页面 ──
 def _disclaimer_html():
     return r"""<!DOCTYPE html>
@@ -1965,16 +2025,24 @@ def api_disclaimer_confirm():
         return jsonify(dict(ok=True))
     return jsonify(dict(ok=False, message='请手动输入 我同意'))
 
-# ── 免责声明拦截（未确认则重定向）──
+# ── 免责声明拦截 + 登录拦截（未确认则重定向）──
 @app.before_request
 def _check_disclaimer():
+    # 免责声明白名单
+    whitelist_endpoints = ('disclaimer_page', 'api_disclaimer_confirm', 'static',
+                           'api_login', 'api_login_status', 'login_page')
+    whitelist_paths = ('/api/disclaimer', '/disclaimer', '/api/login', '/login')
+
+    # 登录检查（如果设置了密码）
+    if WEB_PASSWORD and not session.get('web_authenticated'):
+        if request.endpoint not in whitelist_endpoints and not any(request.path.startswith(p) for p in whitelist_paths):
+            return jsonify(dict(ok=False, message='未登录', need_login=True)), 401
+
     if session.get('disclaimer_agreed'):
         return None
-    if request.endpoint in ('disclaimer_page', 'api_disclaimer_confirm', 'static'):
+    if request.endpoint in whitelist_endpoints:
         return None
-    if request.path.startswith('/api/disclaimer'):
-        return None
-    if request.path == '/disclaimer':
+    if any(request.path.startswith(p) for p in whitelist_paths):
         return None
     return redirect('/disclaimer')
 
