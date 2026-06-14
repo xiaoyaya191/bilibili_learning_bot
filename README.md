@@ -30,27 +30,52 @@
 
 **核心理念**：让 AI 替你"刷 B 站"，从推荐流中学习知识、积累记忆、自我成长，而非沉溺于低质内容。
 
-### 快速上手
+### 🐧 Linux 部署
 
 ```bash
 git clone https://github.com/xiaoyaya191/bilibili_learning_bot.git
 cd bilibili_learning_bot
-pip install -r requirements.txt
+pip3 install -r requirements.txt
+python3 new_agent.py
 ```
 
-**命令行启动（推荐）**
-```bash
-python new_agent.py
-```
 进入菜单按 `2` 配置 AI 参数 → 按 `3` 扫码登录 B 站 → 按 `1` 启动机器人。
 
-**Web 控制台启动**
-```bash
-python web_panel.py
-```
-浏览器打开 `http://127.0.0.1:8080`，在网页上配置和操作。
+也可启动 Web 控制台：`python3 web_panel.py`，浏览器打开 `http://127.0.0.1:8080`。
 
-> Windows 用户可直接双击 `启动网页版.bat`。Docker 部署等更多方式详见 [bot.bxya.top](https://bot.bxya.top)。
+### 🪟 Windows 部署
+
+```powershell
+git clone https://github.com/xiaoyaya191/bilibili_learning_bot.git
+cd bilibili_learning_bot
+pip install -r requirements.txt
+python new_agent.py
+```
+
+也可直接双击 `启动网页版.bat` 一键启动 Web 控制台。
+
+### 📱 Android 部署（Termux）
+
+```bash
+pkg install python git
+git clone https://github.com/xiaoyaya191/bilibili_learning_bot.git
+cd bilibili_learning_bot
+pip install -r requirements.txt
+python new_agent.py
+```
+
+### 🐳 Docker 部署
+
+```bash
+git clone https://github.com/xiaoyaya191/bilibili_learning_bot.git
+cd bilibili_learning_bot
+mkdir -p Data KnowledgeBase highlights
+docker compose up -d
+```
+
+打开 `http://your-server-ip:8080` 扫码登录。
+
+> 更多部署方式详见 [bot.bxya.top](https://bot.bxya.top)
 
 ---
 
