@@ -254,3 +254,74 @@ def save_json_file(path, data):
 
 # 加载当前配置（模块导入时自动加载）
 config = load_config()
+
+# ===== 派生配置变量（供其他模块导入） =====
+UNIFIED_API_KEY = get_config_or_env("api", "unified_api_key", "BILI_AI_API_KEY")
+UNIFIED_BASE_URL = get_config_or_env("api", "unified_base_url", "BILI_AI_BASE_URL")
+MODEL_BRAIN = get_config_or_env("api", "model_brain", "BILI_AI_MODEL_BRAIN")
+MODEL_VISION = get_config_or_env("api", "model_vision", "BILI_AI_MODEL_VISION")
+VISION_API_KEY = config["api"].get("vision_api_key") or UNIFIED_API_KEY
+VISION_BASE_URL = config["api"].get("vision_base_url") or UNIFIED_BASE_URL
+COIN_THRESHOLD = config["interaction"]["coin_threshold"]
+FAV_THRESHOLD = config["interaction"]["fav_threshold"]
+INTEREST_THRESHOLD = config["interaction"]["interest_threshold"]
+MAX_ENERGY = config["interaction"]["max_energy"]
+COMMENT_MODE = config.get("behavior", {}).get("comment_mode", "real")
+MAX_COINS_DAILY = config["interaction"]["max_coins_daily"]
+PROB_COIN = config["interaction"]["prob_coin"]
+PROB_FAV = config["interaction"]["prob_fav"]
+PROB_REPLY_TRIGGER = config["interaction"]["prob_reply_trigger"]
+LEARN_MIN_SCORE = config["interaction"].get("learn_min_score", 6.0)
+LEARN_MIN_DURATION_SECONDS = config["interaction"].get("learn_min_duration_seconds", 60)
+AI_MARKER = config.get("behavior", {}).get("ai_marker", "（内容由AI生成并由AI回复）")
+COMMENT_CHECK_INTERVAL = config["interaction"]["comment_check_interval"]
+MAX_REPLIES_PER_CHECK = config["interaction"]["max_replies_per_check"]
+PRIVATE_MESSAGE_ENABLED = config.get("private_message", {}).get("enabled", True)
+PRIVATE_MESSAGE_CHECK_INTERVAL = config.get("private_message", {}).get("check_interval", 120)
+DIARY_ENABLED = config.get("diary", {}).get("enabled", True)
+EVOLUTION_ENABLED = config.get("self_evolution", {}).get("enabled", True)
+AGENT_ENABLED = config.get("agent", {}).get("enabled", True)
+UP_FOLLOW_ENABLED = config.get("up_follow", {}).get("enabled", True)
+DANMAKU_ENABLED = config.get("danmaku", {}).get("enabled", True)
+FALLBACK_MODELS = config.get("fallback_models", {})
+FALLBACK_PROVIDER_ENABLED = config.get("fallback_provider", {}).get("enabled", False)
+FALLBACK_PROVIDER_NAME = config.get("fallback_provider", {}).get("name", "chatanywhere")
+DIARY_AUTO_ENABLED = config.get("diary", {}).get("auto_enabled", True)
+PSYCHO_ENGINE_ENABLED = config.get("psycho_engine", {}).get("enabled", True)
+SESSION_MAX_VIDEOS = config.get("session", {}).get("max_videos", 0)
+SESSION_MAX_DURATION_MINUTES = config.get("session", {}).get("max_duration_minutes", 0)
+AGENT_SKILL_LOG_FILE = os.path.join(DATA_DIR, "agent_skill_log.json")
+AGENT_DIVE_MAX_VIDEOS = config.get("agent", {}).get("dive_max_videos", 10)
+AGENT_MAX_SEARCH_RESULTS = config.get("agent", {}).get("max_search_results", 8)
+AGENT_MAX_STEPS_PER_PLAN = config.get("agent", {}).get("max_steps_per_plan", 5)
+AGENT_MAX_VIDEOS_PER_PLAN = config.get("agent", {}).get("max_videos_per_plan", 3)
+
+
+# ===== 日志系统（供所有模块共用） =====
+def log(msg, level="INFO"):
+    """彩色日志输出"""
+    colors = {
+        "INFO": Fore.WHITE,
+        "SUCCESS": Fore.GREEN,
+        "WARN": Fore.YELLOW,
+        "ERROR": Fore.RED,
+        "DEBUG": Fore.CYAN,
+        "CONFIG": Fore.CYAN,
+        "BRAIN": Fore.MAGENTA,
+        "BILI": Fore.BLUE,
+        "COMMENT": Fore.GREEN,
+        "PRIVATE": Fore.MAGENTA,
+        "DANMAKU": Fore.CYAN,
+        "EYE": Fore.YELLOW,
+        "ASR": Fore.RED,
+        "MEMORY": Fore.BLUE,
+        "DIARY": Fore.GREEN,
+        "EVOLVE": Fore.MAGENTA,
+        "ENERGY": Fore.CYAN,
+        "SAFETY": Fore.YELLOW,
+        "PSYCHO": Fore.MAGENTA,
+    }
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    color = colors.get(level, Fore.WHITE)
+    print(f"{color}[{timestamp}][{level}] {msg}{Style.RESET_ALL}")
