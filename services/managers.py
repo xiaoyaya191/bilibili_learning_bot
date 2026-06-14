@@ -8,7 +8,7 @@ from colorama import Fore, Style
 from core.config import (
     PERSONAS_FILE, MOOD_STATE_FILE, USER_PROFILES_FILE,
     BOT_DIARY_FILE, SELF_EVOLUTION_FILE, PRIVATE_CONTEXT_FILE,
-    AGENT_SKILL_LOG_FILE, load_json_file, save_json_file
+    AGENT_SKILL_LOG_FILE, load_json_file, save_json_file, config as _global_config
 )
 
 
@@ -18,6 +18,7 @@ class PrivateContextDB:
     """私信上下文数据库 - 每个用户的对话历史管理"""
 
     def __init__(self, config: dict = None):
+        self._cfg = config or _global_config
         self.file_path = PRIVATE_CONTEXT_FILE
         self.data = self._load()
 
@@ -69,9 +70,10 @@ class PersonaManager:
     """人格管理器 - 管理不同的人格设定与当前激活人格"""
 
     def __init__(self, config: dict = None):
+        self._cfg = config or _global_config
         self.file_path = PERSONAS_FILE
         self.data = self._load()
-        self.config = config or {}
+        self.config = self._cfg
 
     def _load(self):
         return load_json_file(PERSONAS_FILE, {})
@@ -151,8 +153,9 @@ class MoodManager:
                  "调皮", "温柔", "毒舌", "学究", "中二", "佛系", "热血"]
 
     def __init__(self, config: dict = None):
+        self._cfg = config or _global_config
         self.file_path = MOOD_STATE_FILE
-        self.config = config or {}
+        self.config = self._cfg
         self.data = self._load()
 
     def _load(self):
@@ -215,6 +218,7 @@ class UserProfileManager:
     """用户档案与好感度系统"""
 
     def __init__(self, config: dict = None):
+        self._cfg = config or _global_config
         self.file_path = USER_PROFILES_FILE
         self.data = self._load()
 
@@ -259,6 +263,7 @@ class BotDiaryManager:
     """机器人日记 - 保存人工日记和自动复盘日记"""
 
     def __init__(self, config: dict = None):
+        self._cfg = config or _global_config
         self.file_path = BOT_DIARY_FILE
         self.data = self._load()
 
@@ -297,8 +302,9 @@ class SelfEvolutionManager:
     """自我进化 - 根据近期行为生成可控的人格微调建议"""
 
     def __init__(self, config: dict = None):
+        self._cfg = config or _global_config
         self.file_path = SELF_EVOLUTION_FILE
-        self.config = config or {}
+        self.config = self._cfg
         self.data = self._load()
 
     def _load(self):
@@ -341,10 +347,11 @@ class EntertainmentModule:
     """娱乐功能 - 每日运势、段子、热梗追踪等"""
 
     def __init__(self, config: dict = None):
-        self.config = config or {}
-        self.enabled = self.config.get("entertainment", {}).get("enabled", False) if config else False
+        self._cfg = config or _global_config
+        self.config = self._cfg
+        self.enabled = self.config.get("entertainment", {}).get("enabled", False)
         self.fortune_count = 0
-        self.max_daily_fortune = self.config.get("entertainment", {}).get("max_daily_fortune", 3) if config else 3
+        self.max_daily_fortune = self.config.get("entertainment", {}).get("max_daily_fortune", 3)
 
     def get_daily_fortune(self) -> str:
         fortunes = [

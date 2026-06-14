@@ -1,16 +1,18 @@
 """services/reply_safety.py — 评论/私信回复内容安全审查"""
 import re
+from core.config import config as _global_config
 
 
 class ReplySafetyGuard:
     """评论/私信回复审查：命中敏感词就跳过，不发送。
 
     与原版 new_agent.py 的 ReplySafetyGuard 完全兼容，
-    但通过 __init__(config) 接收配置，避免全局变量依赖。
+    通过 __init__(config) 接收配置，或省略使用 core.config 的全局配置。
     """
 
-    def __init__(self, config: dict):
-        safety_cfg = config.get("reply_safety", {})
+    def __init__(self, config: dict = None):
+        cfg = config or _global_config
+        safety_cfg = cfg.get("reply_safety", {})
         self.enabled = safety_cfg.get("enabled", True)
         self.block_on_incoming = safety_cfg.get("block_on_incoming", True)
         self.block_on_outgoing = safety_cfg.get("block_on_outgoing", True)
