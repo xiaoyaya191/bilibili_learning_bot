@@ -5,9 +5,12 @@ bilibili_learning_bot · Web 管理面板
 功能：仪表盘 | 机器人启停 | B站扫码登录 | 配置编辑 | 实时日志
      人格管理 | 评论日志 | 用户画像 | 记忆知识库 | 日记进化 | 操作日志
 """
-import os, sys, json, time, io, base64, threading, asyncio, subprocess, signal, queue
+import os, sys, json, time, io, base64, threading, asyncio, subprocess, signal, queue, hashlib, uuid as _uuid_module
 from datetime import datetime
 from pathlib import Path
+
+# ── 线程安全 JSON 工具 ──
+from json_utils import JsonStore, sanitize_config_for_export, is_safe_path, get_backup_dir
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -87,26 +90,14 @@ def log_line(msg: str):
     print(line, flush=True)
     return line
 
-# ── 文件工具 ──
+# ── 文件工具（线程安全）──
 def read_json(path: Path, default=None):
-    if default is None: default = {}
-    try:
-        if path.exists():
-            return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        pass
-    return default
+    """线程安全读取 JSON（通过 JsonStore）。"""
+    return JsonStore(path).read(default if default is not None else {})
 
 def write_json(path: Path, data):
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(path)
-        return True
-    except Exception as e:
-        log_line(f"写入失败 {path.name}: {e}")
-        return False
+    """线程安全写入 JSON（原子写临时文件再 rename）。"""
+    return JsonStore(path).write(data)
 
 def file_stat(path: Path):
     if not path.exists(): return {"exists": False, "size": 0, "mtime": None, "size_fmt": "0 B"}
@@ -243,10 +234,12 @@ def _bot_reader(pipe, prefix=""):
             text = line.rstrip()
             if text:
                 log_line(prefix + text)
-    except OSError: pass
+    except OSError as e:
+        log_line(f"⚠ 读取子进程输出异常: {e}")
     finally:
         try: pipe.close()
-        except OSError: pass
+        except OSError as e:
+            log_line(f"⚠ 关闭管道异常: {e}")
 
 def start_bot_process():
     global bot_process, bot_running, bot_start_time
@@ -293,16 +286,18 @@ def stop_bot_process():
         if bot_process:
             log_line("⏹ 正在停止机器人...")
             try:
-                if bot_process.stdin:
+                if bot_process.stdin and not bot_process.stdin.closed:
                     bot_process.stdin.write("0\n")
                     bot_process.stdin.flush()
-            except subprocess.TimeoutExpired: pass
+            except (BrokenPipeError, OSError, ValueError) as e:
+                log_line(f"⚠ 发送退出命令失败 (管道断开): {e}")
             time.sleep(0.5)
             bot_process.terminate()
             try: bot_process.wait(timeout=8)
             except subprocess.TimeoutExpired:
+                log_line("⚠ 进程未响应 terminate，尝试 kill...")
                 try: bot_process.kill()
-                except Exception: pass
+                except Exception as e: log_line(f"⚠ kill 失败: {e}")
             bot_process = None
     except Exception as e:
         log_line(f"停止异常: {e}")
@@ -499,6 +494,7 @@ a{color:var(--accent)}
 <button class="ni" data-pg="diary" onclick="nav('diary',this)"><span class="ic">📖</span>日记进化</button>
 <button class="ni" data-pg="acts" onclick="nav('acts',this)"><span class="ic">📋</span>操作日志</button>
 <div class="ns">工具</div>
+<button class="ni" data-pg="tutor" onclick="nav('tutor',this)"><span class="ic">🎓</span>知识辅导</button>
 <button class="ni" data-pg="tools" onclick="nav('tools',this)"><span class="ic">🔧</span>功能中心</button>
 <button class="ni" data-pg="sys" onclick="nav('sys',this)"><span class="ic">💾</span>系统管理</button>
 <div class="ns">帮助</div>
@@ -660,6 +656,26 @@ a{color:var(--accent)}
 </div>
 </div>
 
+	<div class="pc"><h3>🛡️ 关键词安全校验</h3>
+	<p style="font-size:11px;color:var(--text2);margin-bottom:10px">开启后AI会过滤涉及敏感关键词的评论和回复。关闭后不再进行关键词检查（风险自负）。</p>
+	<div class="fr" style="align-items:center;margin-bottom:10px">
+	<label class="toggle-sw"><input type="checkbox" id="safetyEnabled" onchange="toggleSafety()"><span class="toggle-track"></span><span style="margin-left:10px;font-size:13px">启用关键词校验</span></label>
+	</div>
+	<div id="safetyKwSection" style="display:none">
+	<p style="font-size:11px;color:var(--text2);margin-bottom:6px">当前屏蔽关键词（一行一个）：</p>
+	<textarea id="safetyKeywords" style="width:100%;height:120px;background:var(--bg3);border:1px solid var(--border);border-radius:var(--rs);color:var(--text);font-size:12px;padding:8px;font-family:monospace;resize:vertical"></textarea>
+	<div class="btn-grp" style="margin-top:8px">
+	<button class="btn btn-pr" onclick="saveSafetyKeywords()">💾 保存关键词</button>
+	<button class="btn btn-out btn-sm" onclick="addSafetyKeyword()">+ 添加关键词</button>
+	</div>
+	<div class="fg" style="margin-top:8px"><label>快速添加关键词</label>
+	<div style="display:flex;gap:6px"><input id="newSafetyKw" placeholder="输入新关键词" style="flex:1"><button class="btn btn-out btn-sm" onclick="addSafetyKeyword()">添加</button></div>
+	</div>
+	<span id="safetyMsg" style="font-size:11px"></span>
+	</div>
+	</div>
+	</div>
+
 <!-- UPFOLLOW -->
 <div class="page" id="pg-upfu">
 <div class="ph"><h1>👥 UP主关注列表</h1><p>AI已关注的UP主</p></div>
@@ -710,6 +726,65 @@ a{color:var(--accent)}
 </div>
 <div class="btn-grp"><button class="btn btn-pr" onclick="saveDry()">💾 保存归档设置</button><span id="dryMsg" style="font-size:11px;margin-left:8px"></span></div>
 </div>
+
+<!-- TUTOR (v2.0.3) -->
+<div class="page" id="pg-tutor">
+<div class="ph"><h1>🎓 知识辅导</h1><p>选择知识文件 → AI讲解/问答/二次创作/生成HTML</p></div>
+
+<div class="pc"><h3>📂 选择知识文件</h3>
+<div style="display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap">
+<select id="tutorFileSelect" multiple size="8" style="flex:1;min-width:250px;max-width:550px;padding:6px 8px;background:var(--bg3);border:1px solid var(--border);border-radius:var(--rs);color:var(--text);font-size:12px">
+</select>
+<div style="display:flex;flex-direction:column;gap:5px">
+<button class="btn btn-pr btn-sm" onclick="tutorLoadFile()">📖 加载选中</button>
+<button class="btn btn-out btn-sm" onclick="tutorSelectAll()">☑ 全选</button>
+<button class="btn btn-out btn-sm" onclick="tutorSelectNone()">☐ 取消</button>
+<button class="btn btn-out btn-sm" onclick="rf_tutor()" style="margin-top:4px">🔄 刷新</button>
+</div>
+</div>
+<div id="tutorFileInfo" style="margin-top:8px;font-size:11px;color:var(--text2)"></div>
+<div class="btn-grp" id="tutorFileActions" style="margin-top:6px;display:none">
+<button class="btn btn-pr btn-sm" onclick="tutorLoadFile()">📖 加载选中</button>
+<button class="btn btn-out btn-sm" onclick="tutorSelectAll()">☑ 全选</button>
+</div>
+</div>
+
+<div class="pc" id="tutorContentBox" style="display:none">
+<h3>📄 文件内容预览 <span style="font-size:10px;color:var(--text2);cursor:pointer" onclick="var p=document.getElementById('tutorContentPre');p.style.display=p.style.display==='none'?'block':'none'">[展开/折叠]</span></h3>
+<pre id="tutorContentPre" style="background:var(--bg3);border:1px solid var(--border);border-radius:var(--rs);padding:12px;max-height:250px;overflow-y:auto;font-size:11px;color:var(--text2);white-space:pre-wrap;word-break:break-all;display:none"></pre>
+</div>
+
+<div class="pc" id="tutorChatBox" style="display:none">
+<h3>💬 AI 辅导对话</h3>
+<div id="tutorChatLog" style="background:var(--bg3);border:1px solid var(--border);border-radius:var(--rs);padding:12px;max-height:350px;overflow-y:auto;font-size:12px;margin-bottom:10px;min-height:100px">
+<div style="color:var(--text2);text-align:center;padding:20px">AI导师已就绪，开始提问吧！</div>
+</div>
+<div style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap">
+<textarea id="tutorInput" placeholder="输入你的问题..." style="flex:1;min-width:180px;background:var(--bg3);border:1px solid var(--border);border-radius:var(--rs);color:var(--text);font-size:12px;padding:8px;resize:none;height:50px;font-family:inherit" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();tutorSend('chat')}"></textarea>
+<div style="display:flex;flex-direction:column;gap:4px">
+<button class="btn btn-pr btn-sm" onclick="tutorSend('chat')">📤 提问</button>
+<button class="btn btn-out btn-sm" onclick="tutorSend('rewrite')">✍️ 改写</button>
+<button class="btn btn-out btn-sm" onclick="tutorSend('html')">🎨 HTML</button>
+</div>
+</div>
+<div style="display:flex;gap:8px;align-items:center;margin-top:6px">
+<span style="font-size:11px;color:var(--text2)">HTML风格:</span>
+<select id="tutorHtmlStyle" style="padding:4px 8px;background:var(--bg3);border:1px solid var(--border);border-radius:var(--rs);color:var(--text);font-size:11px">
+<option value="dark">暗色科技风</option>
+<option value="light">清新白底风</option>
+<option value="modern">现代极简风</option>
+</select>
+<span id="tutorStatus" style="font-size:11px;color:var(--text2);margin-left:10px"></span>
+</div>
+</div>
+
+<div class="pc" id="tutorResultBox" style="display:none">
+<h3>📝 操作结果</h3>
+<div id="tutorResultContent" style="font-size:12px"></div>
+<div class="btn-grp" id="tutorResultActions" style="display:none"></div>
+</div>
+</div>
+
 <!-- SYSTEM -->
 
 <div class="page" id="pg-sys">
@@ -788,6 +863,7 @@ h+='<div class="sc"><div class="si gn">🔑</div><div><div class="sv">'+(d.bili_
 h+='<div class="sc"><div class="si or">⚙️</div><div><div class="sv">'+(d.config_sections||0)+'</div><div class="sl">配置项</div></div></div>';
 h+='<div class="sc"><div class="si pk">⏱</div><div><div class="sv" id="puptime">--</div><div class="sl">运行时长</div></div></div>';
 h+='<div class="sc"><div class="si pp">📦</div><div><div class="sv">'+(d.data_files||0)+'</div><div class="sl">数据文件</div></div></div>';
+h+='<div class="sc" id="asrDashCard"><div class="si '+(d.asr_enabled?'gn':'rd')+'">🎙️</div><div><div class="sv">'+(d.asr_enabled?'开启':'关闭')+'</div><div class="sl">ASR语音识别</div></div></div>';
 document.getElementById('dashStats').innerHTML=h;
 document.getElementById('puptime').textContent=d.uptime;
 
@@ -1151,6 +1227,61 @@ document.getElementById("cmtModeMsg").textContent=r.message||"";
 toast(r.message,r.ok?"ok":"err");
 }
 
+	// ── SAFETY KEYWORDS ──
+	var _safetyLoaded=false;
+	async function fetchSafety(){
+	try{
+	var r=await api("GET","/api/behavior/safety");
+	document.getElementById("safetyEnabled").checked=r.enabled||false;
+	var kws=r.keywords||[];
+	document.getElementById("safetyKeywords").value=kws.join("
+");
+	document.getElementById("safetyKwSection").style.display=r.enabled?"":"none";
+	_safetyLoaded=true;
+	}catch(e){}
+	}
+	async function toggleSafety(){
+	if(!_safetyLoaded){await fetchSafety();}
+	var cb=document.getElementById("safetyEnabled");
+	if(!cb.checked){
+	if(!confirm("⚠ 确定要关闭关键词安全校验吗？
+
+关闭后AI将不再过滤任何评论和回复。
+这可能导致账号风险。
+
+你可以随时在设置中重新开启。")){
+	cb.checked=true;
+	return;
+	}
+	}
+	var r=await api("POST","/api/behavior/safety/toggle",{enabled:cb.checked});
+	document.getElementById("safetyKwSection").style.display=cb.checked?"":"none";
+	document.getElementById("safetyMsg").textContent=r.message||"";
+	toast(r.message,r.ok?"ok":"err");
+	}
+	async function saveSafetyKeywords(){
+	var txt=document.getElementById("safetyKeywords").value.trim();
+	var kws=txt.split(/[
+,]/).map(function(s){return s.trim()}).filter(function(s){return s.length>0});
+	var r=await api("POST","/api/behavior/safety/save",{keywords:kws});
+	document.getElementById("safetyMsg").textContent=r.message||"";
+	toast(r.message,r.ok?"ok":"err");
+	}
+	async function addSafetyKeyword(){
+	var inp=document.getElementById("newSafetyKw");
+	var kw=inp.value.trim();
+	if(!kw){toast("请输入关键词","err");return}
+	var ta=document.getElementById("safetyKeywords");
+	var kws=ta.value.split("
+").map(function(s){return s.trim()}).filter(function(s){return s.length>0});
+	if(kws.indexOf(kw)>=0){toast("关键词已存在","err");inp.value="";return}
+	kws.push(kw);
+	ta.value=kws.join("
+");
+	inp.value="";
+	await saveSafetyKeywords();
+	}
+
 // ── UPFOLLOW ──
 async function rf_upfu(){
 try{var r=await api("GET","/api/up-follow/list");var its=r.items||[];
@@ -1225,9 +1356,137 @@ if(!confirm("确定从 "+fn+" 恢复所有配置？当前配置将被覆盖！")
 var r=await api("POST","/api/import/apply",{filename:fn});toast(r.message,r.ok?"ok":"err");if(r.ok)rf_dash()}
 async function factoryReset(){
 if(!confirm("确定恢复出厂设置？此操作不可逆！\n将删除所有配置、登录信息、数据文件！"))return;
+// 🔒 服务端两步确认
+var req=await api("POST","/api/factory-reset/request");
+if(!req.ok){toast(req.message,"err");return}
+var token=prompt("⚠ 最后确认：输入确认令牌以执行\n\n令牌: "+req.token+"\n（直接复制粘贴上面的令牌）");
+if(!token||token!==req.token){toast("令牌不匹配，已取消","err");return}
 var delKB=document.getElementById("resetKB").checked;
 if(delKB&&!confirm("同时删除知识库目录？此操作不可逆！"))return;
-var r=await api("POST","/api/factory-reset",{delete_kb:delKB});toast(r.message,r.ok?"ok":"err");if(r.ok){rf_dash();listBackups()}}
+var r=await api("POST","/api/factory-reset",{delete_kb:delKB,confirm_token:token});toast(r.message,r.ok?"ok":"err");if(r.ok){rf_dash();listBackups()}}
+
+// ── TUTOR (v2.0.3) ──
+var _tutorHistory=[],_tutorRelPaths=[];
+function rf_tutor(){
+var sel=document.getElementById("tutorFileSelect");
+fetch("/api/kb/list-files").then(function(r){return r.json()}).then(function(d){
+if(!d.ok){toast(d.message,"err");return}
+sel.innerHTML='';
+for(var i=0;i<d.files.length;i++){
+var f=d.files[i],up=f.up_name?" @"+f.up_name:"";
+sel.innerHTML+='<option value="'+esc(f.rel_path)+'">['+f.category_path+'] '+esc(f.title)+up+' ('+f.size_kb+'KB)</option>';
+}
+}).catch(function(e){toast("加载文件列表失败","err")});
+}
+function tutorSelectAll(){
+var sel=document.getElementById("tutorFileSelect");
+for(var i=0;i<sel.options.length;i++)sel.options[i].selected=true;
+}
+function tutorSelectNone(){
+var sel=document.getElementById("tutorFileSelect");
+for(var i=0;i<sel.options.length;i++)sel.options[i].selected=false;
+}
+function _tutorGetSelected(){
+var sel=document.getElementById("tutorFileSelect");
+var out=[];
+for(var i=0;i<sel.options.length;i++){
+if(sel.options[i].selected)out.push(sel.options[i].value);
+}
+return out;
+}
+async function tutorLoadFile(){
+var rps=_tutorGetSelected();
+if(rps.length===0){toast("请至少选择一个知识文件","err");return}
+_tutorRelPaths=rps;_tutorHistory=[];
+document.getElementById("tutorChatLog").innerHTML='<div style="color:var(--text2);text-align:center;padding:20px">AI导师已就绪'+(rps.length>1?'（'+rps.length+'个文件）':'')+'，开始提问吧！</div>';
+try{
+var r=await api("POST","/api/kb/read-file",{rel_paths:rps});
+if(!r.ok){toast(r.message,"err");return}
+document.getElementById("tutorFileInfo").innerHTML='<span class="tg tg-suc">已加载 '+rps.length+' 个文件</span> ('+r.total_size+' 字符)';
+document.getElementById("tutorContentPre").textContent=r.content||"(多文件内容已合并)";
+document.getElementById("tutorContentBox").style.display="";
+document.getElementById("tutorChatBox").style.display="";
+document.getElementById("tutorResultBox").style.display="none";
+}catch(e){toast("加载失败: "+e.message,"err")}
+}
+async function tutorSend(mode){
+if(_tutorRelPaths.length===0){toast("请先加载文件","err");return}
+var inp=document.getElementById("tutorInput");
+var msg=inp.value.trim();
+if(mode!="rewrite"&&mode!="html"&&!msg){toast("请输入问题","err");return}
+if(mode=="rewrite"){
+if(_tutorRelPaths.length>1){
+if(!msg){toast("多文件改写请输入改写要求","err");return}
+}else{msg=msg||"请优化结构、补充缺失知识点、修正不准确表述。"}
+}
+if(mode=="html")msg=msg||"请生成知识讲解网页。";
+
+var log=document.getElementById("tutorChatLog");
+if(mode=="chat"){
+log.innerHTML+='<div style="margin-bottom:8px"><span style="color:var(--accent);font-weight:600">💬 你:</span> '+esc(msg)+'</div>';
+inp.value="";
+}
+var stat=document.getElementById("tutorStatus");
+stat.textContent="⏳ AI思考中...";
+
+try{
+var r=await api("POST","/api/kb/tutor-chat",{
+rel_paths:_tutorRelPaths, message:msg,
+history:_tutorHistory, mode:mode,
+style:document.getElementById("tutorHtmlStyle").value
+});
+if(!r.ok){stat.textContent="";toast(r.message,"err");log.innerHTML+='<div style="color:var(--red);margin-bottom:8px">❌ '+esc(r.message)+'</div>';return}
+stat.textContent="";
+
+if(mode=="chat"){
+_tutorHistory.push({role:"user",content:msg},{role:"assistant",content:r.reply});
+if(_tutorHistory.length>20)_tutorHistory=_tutorHistory.slice(-20);
+log.innerHTML+='<div style="margin-bottom:10px;background:var(--bg3);border-left:3px solid var(--accent);padding:8px 12px;border-radius:4px"><span style="color:var(--accent2);font-weight:600">🎓 导师:</span> '+r.reply.replace(/
+/g,"<br>")+'</div>';
+log.scrollTop=log.scrollHeight;
+}else if(mode=="rewrite"){
+var rb=document.getElementById("tutorResultBox");
+var rc=document.getElementById("tutorResultContent");
+rc.innerHTML='<div style="background:rgba(76,175,124,.08);border:1px solid rgba(76,175,124,.25);border-radius:6px;padding:10px;margin-bottom:10px"><strong>修改说明:</strong> '+esc(r.summary)+'</div><pre style="background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:10px;max-height:300px;overflow:auto;font-size:11px;white-space:pre-wrap">'+esc(r.new_content||"")+'</pre>';
+rb.style.display="";
+var ra=document.getElementById("tutorResultActions");
+ra.style.display="";
+ra.innerHTML='<button class="btn btn-suc" onclick="tutorSaveRewrite()">💾 保存改写（覆盖原文件）</button>';
+window._tutorRewriteContent=r.new_content||"";
+}else if(mode=="html"){
+var rb=document.getElementById("tutorResultBox");
+var rc=document.getElementById("tutorResultContent");
+rc.innerHTML='<div style="background:rgba(91,141,239,.08);border:1px solid rgba(91,141,239,.25);border-radius:6px;padding:10px;margin-bottom:10px"><strong>HTML已生成</strong></div><pre style="background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:10px;max-height:200px;overflow:auto;font-size:10px;white-space:pre-wrap">'+esc((r.html||"").substring(0,2000))+'...</pre>';
+rb.style.display="";
+var ra=document.getElementById("tutorResultActions");
+ra.style.display="";
+ra.innerHTML='<button class="btn btn-pr" onclick="tutorSaveHtml()">💾 保存HTML文件</button> <button class="btn btn-out" onclick="tutorPreviewHtml()">👁 预览HTML</button>';
+window._tutorHtmlContent=r.html||"";
+}
+}catch(e){stat.textContent="";toast("请求失败: "+e.message,"err")}
+}
+async function tutorSaveRewrite(){
+if(!window._tutorRewriteContent||_tutorRelPaths.length===0){toast("没有可保存的内容","err");return}
+try{
+var r=await api("POST","/api/kb/tutor-save",{rel_path:_tutorRelPaths[0],content:window._tutorRewriteContent});
+toast(r.message,r.ok?"ok":"err");
+}catch(e){toast("保存失败","err")}
+}
+async function tutorSaveHtml(){
+if(!window._tutorHtmlContent){toast("没有可保存的HTML","err");return}
+try{
+var title=_tutorRelPaths.length>1?"multi_"+_tutorRelPaths.length+"files":(_tutorRelPaths[0]||"knowledge").split("/").pop().replace(".md","");
+var r=await api("POST","/api/kb/tutor-html-save",{html:window._tutorHtmlContent,title:title});
+toast(r.message,r.ok?"ok":"err");
+if(r.ok&&r.path){document.getElementById("tutorResultContent").innerHTML+='<div style="margin-top:8px;font-size:11px;color:var(--green)">文件: '+esc(r.path)+'</div>'}
+}catch(e){toast("保存失败","err")}
+}
+function tutorPreviewHtml(){
+if(!window._tutorHtmlContent){toast("没有可预览的HTML","err");return}
+var w=window.open("","_blank");
+if(w){w.document.write(window._tutorHtmlContent);w.document.close()}
+else{toast("请允许弹窗以预览HTML","err")}
+}
 
 // ── INIT ──
 rf_dash();auto();
@@ -1279,6 +1538,8 @@ def api_info():
         python_version=sys.version.split()[0],
         platform=sys.platform,
         cwd=str(BASE_DIR),
+        asr_enabled=config.get('asr', {}).get('enabled', False),
+        asr_backend=config.get('asr', {}).get('backend', 'funasr'),
     ))
 
 # ── 配置 ──
@@ -1573,7 +1834,7 @@ def api_mood_set():
         return jsonify(dict(ok=False, message=str(e))), 400
 
 # ── 导出/导入配置 ──
-BACKUP_DIR_EXPORT = Path(r"C:\bilibili_claw_backup") if sys.platform == 'win32' else Path.home() / "bilibili_claw_backup"
+BACKUP_DIR_EXPORT = get_backup_dir()
 
 @app.route('/api/export', methods=['POST'])
 def api_export():
@@ -1603,6 +1864,11 @@ def api_export():
             except Exception: pass
 
         out = BACKUP_DIR_EXPORT / f"bilibili_learning_bot_export_{ts}.json"
+        # 🔒 API Key 脱敏处理
+        if 'config.json' in export_data:
+            export_data['config.json'] = sanitize_config_for_export(export_data['config.json'])
+        if 'bilibili_cookies.json' in export_data:
+            export_data['bilibili_cookies.json'] = sanitize_config_for_export(export_data['bilibili_cookies.json'])
         out.write_text(json.dumps(export_data, ensure_ascii=False, indent=2), encoding='utf-8')
         log_line(f"配置已导出: {out}")
         return jsonify(dict(ok=True, message=f'配置已导出到 {out}', path=str(out)))
@@ -1629,6 +1895,10 @@ def api_import_apply():
         fname = body.get('filename', '')
         if not fname:
             return jsonify(dict(ok=False, message='未指定文件名')), 400
+        # 🔒 路径穿越防护：校验 filename 不包含 ../ 且在备份目录下
+        if not is_safe_path(fname, BACKUP_DIR_EXPORT):
+            log_line(f"⛔ 拒绝路径穿越尝试: {fname}")
+            return jsonify(dict(ok=False, message='文件名包含非法路径')), 403
         fpath = BACKUP_DIR_EXPORT / fname
         if not fpath.exists():
             return jsonify(dict(ok=False, message='备份文件不存在')), 404
@@ -1648,10 +1918,29 @@ def api_import_apply():
         return jsonify(dict(ok=False, message=str(e))), 500
 
 # ── 恢复出厂设置 ──
+# 🔒 服务端二次确认：需要前端先生成确认令牌
+_factory_reset_pending_token = None
+
+@app.route('/api/factory-reset/request', methods=['POST'])
+def api_factory_reset_request():
+    """请求恢复出厂设置，返回确认令牌（60秒有效）"""
+    global _factory_reset_pending_token
+    _factory_reset_pending_token = _uuid_module.uuid4().hex
+    log_line("⚠ 收到恢复出厂设置请求，等待二次确认...")
+    return jsonify(dict(ok=True, token=_factory_reset_pending_token,
+                        message='请在60秒内输入确认令牌完成操作'))
+
 @app.route('/api/factory-reset', methods=['POST'])
 def api_factory_reset():
+    global _factory_reset_pending_token
     try:
         body = request.get_json(silent=True) or {}
+        confirm_token = body.get('confirm_token', '')
+        # 🔒 必须有有效确认令牌
+        if not _factory_reset_pending_token or confirm_token != _factory_reset_pending_token:
+            _factory_reset_pending_token = None
+            return jsonify(dict(ok=False, message='操作未确认，请先调用 /api/factory-reset/request 获取令牌')), 403
+        _factory_reset_pending_token = None  # 一次性使用
         delete_kb = body.get('delete_kb', False)
         deleted = []
         for fname in ['config.json', 'bilibili_cookies.json', 'mood_state.json', 'personas.json',
@@ -1814,6 +2103,167 @@ def api_action_kb_revisit():
     except Exception as e:
         return jsonify(dict(ok=False, message=str(e))), 400
 
+# ── 知识辅导 (v2.0.3) ──
+@app.route('/api/kb/list-files')
+def api_kb_list_files():
+    """列出 KnowledgeBase 下所有 .md 文件"""
+    try:
+        from services.knowledge_tutor import scan_md_files
+        files = scan_md_files()
+        return jsonify(dict(ok=True, files=files, total=len(files)))
+    except Exception as e:
+        return jsonify(dict(ok=False, message=str(e))), 500
+
+@app.route('/api/kb/read-file', methods=['POST'])
+def api_kb_read_file():
+    """读取指定 .md 文件的内容（支持单文件或多文件）"""
+    try:
+        body = request.get_json(force=True)
+        rel_paths = body.get('rel_paths') or body.get('rel_path')
+        if isinstance(rel_paths, str):
+            rel_paths = [rel_paths]
+        if not rel_paths:
+            return jsonify(dict(ok=False, message='请提供文件路径')), 400
+        from services.knowledge_tutor import read_md_file, KNOWLEDGE_BASE_DIR
+        parts = []
+        total_size = 0
+        for rp in rel_paths:
+            full_path = KNOWLEDGE_BASE_DIR / rp.strip()
+            if not full_path.exists():
+                return jsonify(dict(ok=False, message=f'文件不存在: {rp}')), 404
+            c = read_md_file(full_path)
+            total_size += len(c)
+            fname = os.path.basename(str(full_path))
+            parts.append(f'=== {fname} ===\n{c}')
+        combined = '\n\n'.join(parts)
+        return jsonify(dict(ok=True, content=combined, paths=[str(KNOWLEDGE_BASE_DIR / rp.strip()) for rp in rel_paths], total_size=total_size, file_count=len(rel_paths)))
+    except Exception as e:
+        return jsonify(dict(ok=False, message=str(e))), 500
+
+@app.route('/api/kb/tutor-chat', methods=['POST'])
+def api_kb_tutor_chat():
+    """知识辅导：AI 对话（支持单文件或多文件）"""
+    try:
+        body = request.get_json(force=True)
+        rel_paths = body.get('rel_paths') or body.get('rel_path')
+        if isinstance(rel_paths, str):
+            rel_paths = [rel_paths]
+        message = (body.get('message') or '').strip()
+        history = body.get('history') or []
+        mode = (body.get('mode') or 'chat').strip()  # chat / rewrite / html
+        style = (body.get('style') or 'dark').strip()
+
+        if not rel_paths:
+            return jsonify(dict(ok=False, message='请提供文件路径')), 400
+        if not message and mode == 'chat':
+            return jsonify(dict(ok=False, message='请输入问题')), 400
+
+        from services.knowledge_tutor import KNOWLEDGE_BASE_DIR, get_tutor
+        full_paths = []
+        for rp in rel_paths:
+            fp = KNOWLEDGE_BASE_DIR / rp.strip()
+            if not fp.exists():
+                return jsonify(dict(ok=False, message=f'文件不存在: {rp}')), 404
+            full_paths.append(str(fp))
+
+        tutor = get_tutor()
+        if not tutor.is_available():
+            return jsonify(dict(ok=False, message='AI 接口不可用，请先配置 API Key')), 503
+
+        # 在后台线程中运行异步任务
+        import threading
+        result = {}
+        error = None
+
+        def _run():
+            nonlocal result, error
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                if mode == 'rewrite':
+                    # rewrite 只支持单文件
+                    summary, new_content = loop.run_until_complete(
+                        tutor.rewrite_file(full_paths[0], message)
+                    )
+                    result = dict(mode='rewrite', summary=summary, new_content=new_content)
+                elif mode == 'html':
+                    # html 支持多文件拼接
+                    if len(full_paths) == 1:
+                        html = loop.run_until_complete(
+                            tutor.generate_html(full_paths[0], style)
+                        )
+                    else:
+                        html = loop.run_until_complete(
+                            tutor.generate_html(full_paths, style)
+                        )
+                    result = dict(mode='html', html=html, style=style)
+                else:
+                    # chat 支持多文件
+                    if len(full_paths) == 1:
+                        reply = loop.run_until_complete(
+                            tutor.chat_about_file(full_paths[0], message, history)
+                        )
+                    else:
+                        reply = loop.run_until_complete(
+                            tutor.chat_about_file(full_paths, message, history)
+                        )
+                    result = dict(mode='chat', reply=reply)
+                loop.close()
+            except Exception as e:
+                error = str(e)
+
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+        t.join(timeout=180)  # 最多等3分钟
+
+        if error:
+            return jsonify(dict(ok=False, message=error)), 500
+        return jsonify(dict(ok=True, **result))
+    except Exception as e:
+        return jsonify(dict(ok=False, message=str(e))), 500
+
+@app.route('/api/kb/tutor-save', methods=['POST'])
+def api_kb_tutor_save():
+    """保存改写后的知识文件"""
+    try:
+        body = request.get_json(force=True)
+        rel_path = (body.get('rel_path') or '').strip()
+        content = (body.get('content') or '').strip()
+        if not rel_path or not content:
+            return jsonify(dict(ok=False, message='请提供文件路径和内容')), 400
+        from services.knowledge_tutor import write_md_file, KNOWLEDGE_BASE_DIR
+        full_path = KNOWLEDGE_BASE_DIR / rel_path
+        if not full_path.exists():
+            return jsonify(dict(ok=False, message='文件不存在')), 404
+        success = write_md_file(full_path, content)
+        if success:
+            return jsonify(dict(ok=True, message='文件已保存（原文件已备份）'))
+        else:
+            return jsonify(dict(ok=False, message='保存失败')), 500
+    except Exception as e:
+        return jsonify(dict(ok=False, message=str(e))), 500
+
+@app.route('/api/kb/tutor-html-save', methods=['POST'])
+def api_kb_tutor_html_save():
+    """保存生成的 HTML 文件"""
+    try:
+        body = request.get_json(force=True)
+        html = (body.get('html') or '').strip()
+        title = (body.get('title') or 'knowledge').strip()
+        if not html:
+            return jsonify(dict(ok=False, message='HTML内容为空')), 400
+        from services.knowledge_tutor import KNOWLEDGE_BASE_DIR
+        import re as _re
+        html_dir = KNOWLEDGE_BASE_DIR / ".html_exports"
+        html_dir.mkdir(parents=True, exist_ok=True)
+        safe_title = _re.sub(r'[\\/*?:"<>|]', '_', title)[:40]
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        html_path = html_dir / f"{safe_title}_{ts}.html"
+        html_path.write_text(html, encoding='utf-8')
+        return jsonify(dict(ok=True, path=str(html_path), message='HTML已保存'))
+    except Exception as e:
+        return jsonify(dict(ok=False, message=str(e))), 500
+
 # ── 行为设置 ──
 @app.route('/api/behavior/get')
 def api_behavior_get():
@@ -1952,6 +2402,123 @@ else{msg.textContent='✗ 请输入"我同意"';msg.className='msg err';btn.disa
 </body>
 </html>"""
 
+# ── 首次设置页面（配置用户名和密码）──
+def _setup_html():
+    return r"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
+<title>首次设置 · 管理面板</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI','Microsoft YaHei',sans-serif;background:#0d1117;color:#c9d1d9;display:flex;align-items:center;justify-content:center;min-height:100vh}
+.card{background:#161b22;border:2px solid #58a6ff;border-radius:12px;padding:32px 28px;max-width:440px;width:90%;text-align:center}
+.card h2{color:#58a6ff;font-size:22px;margin-bottom:8px}
+.card .sub{font-size:13px;color:#8b949e;margin-bottom:20px}
+.fg{margin-bottom:14px;text-align:left}
+.fg label{display:block;font-size:12px;font-weight:600;color:#8b949e;margin-bottom:4px}
+.fg input{width:100%;background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:10px 14px;color:#c9d1d9;font-size:15px;outline:none;transition:border-color .2s}
+.fg input:focus{border-color:#58a6ff}
+.fg input.error{border-color:#f85149;animation:shake .4s}
+.hint{font-size:11px;color:#6e7681;margin-top:4px}
+.btn{background:#58a6ff;color:#fff;border:none;border-radius:8px;padding:10px 24px;font-size:15px;cursor:pointer;transition:opacity .2s;width:100%;margin-top:6px}
+.btn:hover{opacity:.85}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.msg{margin-top:12px;font-size:13px;min-height:20px}
+.msg.err{color:#f85149}
+.msg.ok{color:#3fb950}
+@keyframes shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-6px)}75%{transform:translateX(6px)}}
+</style>
+</head>
+<body>
+<div class="card">
+<h2>🔐 首次设置</h2>
+<p class="sub">欢迎使用 B站 AI 管理系统<br>请设置管理面板的用户名和密码</p>
+<div class="fg"><label>用户名</label><input id="setupUser" type="text" placeholder="设置用户名" autocomplete="off" autofocus></div>
+<div class="fg"><label>密码</label><input id="setupPass" type="password" placeholder="设置密码（至少4位）" autocomplete="off"></div>
+<div class="fg"><label>确认密码</label><input id="setupPass2" type="password" placeholder="再次输入密码" autocomplete="off"></div>
+<button class="btn" id="setupBtn" onclick="doSetup()">完成设置</button>
+<div class="msg" id="msg"></div>
+</div>
+<script>
+var inpU=document.getElementById('setupUser'),inpP=document.getElementById('setupPass'),inpP2=document.getElementById('setupPass2');
+var btn=document.getElementById('setupBtn'),msg=document.getElementById('msg');
+[inpU,inpP,inpP2].forEach(function(el){el.addEventListener('keydown',function(e){if(e.key==='Enter')doSetup()})});
+async function doSetup(){
+var u=inpU.value.trim(),p=inpP.value,p2=inpP2.value;
+if(!u){msg.textContent='请输入用户名';msg.className='msg err';inpU.classList.add('error');setTimeout(function(){inpU.classList.remove('error')},400);return}
+if(u.length<2){msg.textContent='用户名至少2个字符';msg.className='msg err';return}
+if(p.length<4){msg.textContent='密码至少4位';msg.className='msg err';inpP.classList.add('error');setTimeout(function(){inpP.classList.remove('error')},400);return}
+if(p!==p2){msg.textContent='两次输入的密码不一致';msg.className='msg err';inpP2.classList.add('error');setTimeout(function(){inpP2.classList.remove('error')},400);return}
+btn.disabled=true;btn.textContent='正在保存...';
+try{
+var r=await fetch('/api/auth/setup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,password:p})});
+var d=await r.json();
+if(d.ok){msg.textContent='✓ 设置成功！正在跳转...';msg.className='msg ok';setTimeout(function(){location.href='/login'},800)}
+else{msg.textContent='✗ '+d.message;msg.className='msg err';btn.disabled=false;btn.textContent='完成设置'}
+}catch(e){msg.textContent='请求失败，请重试';msg.className='msg err';btn.disabled=false;btn.textContent='完成设置'}
+}
+</script>
+</body>
+</html>"""
+
+# ── 登录页面 ──
+def _login_html():
+    return r"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
+<title>登录 · 管理面板</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI','Microsoft YaHei',sans-serif;background:#0d1117;color:#c9d1d9;display:flex;align-items:center;justify-content:center;min-height:100vh}
+.card{background:#161b22;border:2px solid #30363d;border-radius:12px;padding:32px 28px;max-width:400px;width:90%;text-align:center}
+.card h2{color:#c9d1d9;font-size:22px;margin-bottom:8px}
+.card .sub{font-size:13px;color:#8b949e;margin-bottom:20px}
+.fg{margin-bottom:14px;text-align:left}
+.fg label{display:block;font-size:12px;font-weight:600;color:#8b949e;margin-bottom:4px}
+.fg input{width:100%;background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:10px 14px;color:#c9d1d9;font-size:15px;outline:none;transition:border-color .2s}
+.fg input:focus{border-color:#58a6ff}
+.fg input.error{border-color:#f85149;animation:shake .4s}
+.btn{background:#238636;color:#fff;border:none;border-radius:8px;padding:10px 24px;font-size:15px;cursor:pointer;transition:opacity .2s;width:100%;margin-top:6px}
+.btn:hover{opacity:.85}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.msg{margin-top:12px;font-size:13px;min-height:20px}
+.msg.err{color:#f85149}
+.msg.ok{color:#3fb950}
+@keyframes shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-6px)}75%{transform:translateX(6px)}}
+</style>
+</head>
+<body>
+<div class="card">
+<h2>🔑 登录管理面板</h2>
+<p class="sub">请输入用户名和密码</p>
+<div class="fg"><label>用户名</label><input id="loginUser" type="text" placeholder="用户名" autocomplete="off" autofocus></div>
+<div class="fg"><label>密码</label><input id="loginPass" type="password" placeholder="密码" autocomplete="off"></div>
+<button class="btn" id="loginBtn" onclick="doLogin()">登 录</button>
+<div class="msg" id="msg"></div>
+</div>
+<script>
+var inpU=document.getElementById('loginUser'),inpP=document.getElementById('loginPass');
+var btn=document.getElementById('loginBtn'),msg=document.getElementById('msg');
+[inpU,inpP].forEach(function(el){el.addEventListener('keydown',function(e){if(e.key==='Enter')doLogin()})});
+async function doLogin(){
+var u=inpU.value.trim(),p=inpP.value;
+if(!u||!p){msg.textContent='请输入用户名和密码';msg.className='msg err';return}
+btn.disabled=true;btn.textContent='验证中...';
+try{
+var r=await fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,password:p})});
+var d=await r.json();
+if(d.ok){msg.textContent='✓ 登录成功，跳转中...';msg.className='msg ok';setTimeout(function(){location.href='/'},500)}
+else{msg.textContent='✗ '+d.message;msg.className='msg err';btn.disabled=false;btn.textContent='登 录';inpP.value='';inpP.classList.add('error');setTimeout(function(){inpP.classList.remove('error')},400)}
+}catch(e){msg.textContent='请求失败，请重试';msg.className='msg err';btn.disabled=false;btn.textContent='登 录'}
+}
+</script>
+</body>
+</html>"""
+
 # ── 免责声明确认页（Web端）──
 @app.route('/disclaimer')
 def disclaimer_page():
@@ -1965,18 +2532,105 @@ def api_disclaimer_confirm():
         return jsonify(dict(ok=True))
     return jsonify(dict(ok=False, message='请手动输入 我同意'))
 
-# ── 免责声明拦截（未确认则重定向）──
+# ── 首次设置页面 ──
+@app.route('/setup')
+def setup_page():
+    return _setup_html(), 200, {'Content-Type': 'text/html; charset=utf-8'}
+
+# ── 登录页面 ──
+@app.route('/login')
+def login_page():
+    return _login_html(), 200, {'Content-Type': 'text/html; charset=utf-8'}
+
+# ── 认证 API ──
+@app.route('/api/auth/setup', methods=['POST'])
+def api_auth_setup():
+    """首次设置：保存用户名和密码到 config.json"""
+    data = request.get_json(force=True) if request.is_json else {}
+    username = (data.get('username') or '').strip()
+    password = (data.get('password') or '')
+    if len(username) < 2:
+        return jsonify(dict(ok=False, message='用户名至少2个字符'))
+    if len(password) < 4:
+        return jsonify(dict(ok=False, message='密码至少4位'))
+    config = read_json(CONFIG_FILE, {})
+    web_cfg = config.setdefault('web', {})
+    web_cfg['username'] = username
+    web_cfg['password'] = password
+    if write_json(CONFIG_FILE, config):
+        # 设置成功后自动登录
+        session['disclaimer_agreed'] = True
+        session['panel_authenticated'] = True
+        log_line(f"面板首次设置完成，用户: {username}")
+        return jsonify(dict(ok=True, message='设置成功'))
+    return jsonify(dict(ok=False, message='保存配置失败'))
+
+@app.route('/api/auth/login', methods=['POST'])
+def api_auth_login():
+    """登录验证"""
+    data = request.get_json(force=True) if request.is_json else {}
+    username = (data.get('username') or '').strip()
+    password = data.get('password', '')
+    config = read_json(CONFIG_FILE, {})
+    web_cfg = config.get('web', {})
+    saved_user = web_cfg.get('username', '')
+    saved_pass = web_cfg.get('password', '')
+    if not saved_user or not saved_pass:
+        return jsonify(dict(ok=False, message='面板尚未设置，请先完成首次配置'))
+    if username == saved_user and password == saved_pass:
+        session['panel_authenticated'] = True
+        log_line(f"面板登录成功，用户: {username}")
+        return jsonify(dict(ok=True, message='登录成功'))
+    import time as _time
+    _time.sleep(0.8)
+    return jsonify(dict(ok=False, message='用户名或密码错误'))
+
+@app.route('/api/auth/logout', methods=['POST'])
+def api_auth_logout():
+    """退出登录"""
+    session.pop('panel_authenticated', None)
+    session.pop('disclaimer_agreed', None)
+    return jsonify(dict(ok=True, message='已退出登录'))
+
+@app.route('/api/auth/status')
+def api_auth_status():
+    """检查登录状态"""
+    return jsonify(dict(authenticated=bool(session.get('panel_authenticated'))))
+
+# ── 面板认证检查（免责声明 + 首次设置 + 登录）──
 @app.before_request
-def _check_disclaimer():
-    if session.get('disclaimer_agreed'):
+def _check_auth():
+    # 1. 先检查免责声明
+    if not session.get('disclaimer_agreed'):
+        if request.endpoint in ('disclaimer_page', 'api_disclaimer_confirm', 'static'):
+            return None
+        if request.path.startswith('/api/disclaimer'):
+            return None
+        if request.path == '/disclaimer':
+            return None
+        return redirect('/disclaimer')
+
+    # 2. 检查面板是否已配置（首次使用）
+    config = read_json(CONFIG_FILE, {})
+    web_cfg = config.get('web', {})
+    has_credentials = bool(web_cfg.get('username')) and bool(web_cfg.get('password'))
+    if not has_credentials:
+        allowed = ('setup_page', 'api_auth_setup', 'api_auth_logout', 'static')
+        if request.endpoint in allowed:
+            return None
+        if request.path in ('/setup', '/api/auth/setup', '/api/auth/logout'):
+            return None
+        return redirect('/setup')
+
+    # 3. 检查登录状态
+    if session.get('panel_authenticated'):
         return None
-    if request.endpoint in ('disclaimer_page', 'api_disclaimer_confirm', 'static'):
+    allowed = ('login_page', 'api_auth_login', 'api_auth_setup', 'api_auth_logout', 'static')
+    if request.endpoint in allowed:
         return None
-    if request.path.startswith('/api/disclaimer'):
+    if request.path in ('/login', '/api/auth/login', '/api/auth/logout', '/api/auth/status'):
         return None
-    if request.path == '/disclaimer':
-        return None
-    return redirect('/disclaimer')
+    return redirect('/login')
 
 # ═══════════════════════════════════════════
 #  启动

@@ -130,10 +130,6 @@ DEFAULT_CONFIG = {
         "enabled": True, "prob_initiate": 0.06, "cooldown_minutes": 45,
         "max_initiate_per_session": 3
     },
-    "entertainment": {
-        "enabled": False, "auto_fortune": False, "prob_fun_action": 0.05,
-        "joke_mode": "normal", "max_daily_fortune": 3
-    },
     "up_follow": {
         "enabled": True, "auto_follow_prob": 0.08, "max_daily_follows": 3,
         "unfollow_inactive_days": 0, "browse_up_videos_prob": 0.06,
@@ -290,6 +286,9 @@ DIARY_AUTO_ENABLED = config.get("diary", {}).get("auto_enabled", True)
 PSYCHO_ENGINE_ENABLED = config.get("psycho_engine", {}).get("enabled", True)
 SESSION_MAX_VIDEOS = config.get("session", {}).get("max_videos", 0)
 SESSION_MAX_DURATION_MINUTES = config.get("session", {}).get("max_duration_minutes", 0)
+BEHAVIOR_COMMENT_USER_COOLDOWN_MINUTES = config.get("behavior", {}).get("comment_user_cooldown_minutes", 60)
+BEHAVIOR_PRIVATE_REPLY_COOLDOWN_MINUTES = config.get("behavior", {}).get("private_reply_cooldown_minutes", 3)
+PROB_COMMENT_OTHERS = config["interaction"]["prob_comment_others"]
 AGENT_SKILL_LOG_FILE = os.path.join(DATA_DIR, "agent_skill_log.json")
 AGENT_DIVE_MAX_VIDEOS = config.get("agent", {}).get("dive_max_videos", 10)
 AGENT_MAX_SEARCH_RESULTS = config.get("agent", {}).get("max_search_results", 8)

@@ -187,7 +187,7 @@ class KBSearchEngine:
 
     # ── 增量更新 ──
 
-    def update_entry(self, md_path: str | Path) -> bool:
+    async def update_entry(self, md_path: str | Path) -> bool:
         """新增或更新单个条目的向量索引"""
         md_path = Path(md_path)
         if not md_path.exists():
@@ -209,7 +209,7 @@ class KBSearchEngine:
 
         # 生成向量
         try:
-            vector = self.model.embedding(text)
+            vector = await self.model.embedding(text)
         except Exception:
             return False
 

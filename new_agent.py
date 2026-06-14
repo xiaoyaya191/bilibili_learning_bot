@@ -21,11 +21,14 @@ import colorama
 from colorama import Fore, Style
 
 # ===== 模块化导入 =====
-from services.managers import PersonaManager, MoodManager, UserProfileManager, BotDiaryManager, SelfEvolutionManager, PrivateContextDB, EntertainmentModule
+from services.managers import PersonaManager, MoodManager, UserProfileManager, BotDiaryManager, SelfEvolutionManager, PrivateContextDB
 from services.reply_safety import ReplySafetyGuard
 
 from services.utils import InterestManager, BiliToolbox
 from services.agent_service import AgentSkillRunner
+from services.knowledge_tutor import KnowledgeTutor, scan_md_files, read_md_file, write_md_file
+# [FIXED v2.0.3] services/interaction_service.py 导入兼容性未完成，回退到内联版 CommentInteractionManager（见下方 ~L826）
+# from services.interaction_service import CommentInteractionManager
 def _disclaimer_confirm():
     """显示红色免责声明，输入'我同意'后继续。"""
     _TARGET = "我同意"
@@ -350,13 +353,6 @@ DEFAULT_CONFIG = {
         "cooldown_minutes": 45,
         "max_initiate_per_session": 3
     },
-    "entertainment": {
-        "enabled": False,
-        "auto_fortune": False,
-        "prob_fun_action": 0.05,
-        "joke_mode": "normal",
-        "max_daily_fortune": 3
-    },
     "up_follow": {
         "enabled": True,
         "auto_follow_prob": 0.08,
@@ -640,13 +636,6 @@ ACTIVE_CHAT_ENABLED = config.get("active_chat", {}).get("enabled", True)
 PROB_INITIATE_CHAT = config.get("active_chat", {}).get("prob_initiate", 0.06)
 ACTIVE_CHAT_COOLDOWN_MINUTES = config.get("active_chat", {}).get("cooldown_minutes", 45)
 ACTIVE_CHAT_MAX_PER_SESSION = config.get("active_chat", {}).get("max_initiate_per_session", 3)
-
-# 🎉 娱乐功能（默认关闭，需手动开启）
-# ENTERTAINMENT_ENABLED = config.get("entertainment", {}).get("enabled", False)
-# ENTERTAINMENT_AUTO_FORTUNE = config.get("entertainment", {}).get("auto_fortune", False)
-# ENTERTAINMENT_PROB_FUN_ACTION = config.get("entertainment", {}).get("prob_fun_action", 0.05)
-# ENTERTAINMENT_JOKE_MODE = config.get("entertainment", {}).get("joke_mode", "normal")
-# ENTERTAINMENT_MAX_DAILY_FORTUNE = config.get("entertainment", {}).get("max_daily_fortune", 3)
 
 # [*] UP主关注（AI自动关注喜欢的UP主）
 UP_FOLLOW_ENABLED = config.get("up_follow", {}).get("enabled", True)
@@ -1671,6 +1660,7 @@ def show_main_menu():
     {Fore.LIGHTCYAN_EX}D.{Style.RESET_ALL} [GOLD] 干货归档 (高分内容单独保存)
     {Fore.LIGHTCYAN_EX}V.{Style.RESET_ALL} 📹 手动视频分析 (输入链接/标题/UP主，AI客观解析)
     {Fore.LIGHTMAGENTA_EX}K.{Style.RESET_ALL} 🔄 知识库重温 (选择已学视频，重新看/优化)
+    {Fore.LIGHTCYAN_EX}T.{Style.RESET_ALL} 🎓 知识辅导 (讲解/问答/二次创作/生成HTML)
     {Fore.RED}R.{Style.RESET_ALL} 🔄 恢复出厂设置 (清除所有配置/登录/数据)
     {Fore.YELLOW}S.{Style.RESET_ALL} 🛡️ 关键词审查开关 (当前: {'开启' if REPLY_SAFETY_ENABLED else '关闭'})
     {Fore.GREEN}E.{Style.RESET_ALL} 📤 导出配置 (备份所有设置到一个文件)
@@ -3192,7 +3182,7 @@ async def run_manual_diary_generation(extra_note=""):
     entry = await diary_mgr.generate_from_events(
         events,
         persona_mgr.build_prompt_block(),
-        mood_mgr.get_mood(),
+        mood_mgr.get_current(),
         extra_note=extra_note
     )
     print(f"{Fore.GREEN}[OK] 已生成日记: {entry['title']}{Style.RESET_ALL}")
@@ -3213,7 +3203,7 @@ async def run_manual_self_evolution(apply_result=True):
     item = await evolution_mgr.reflect(
         events or [{"source": "diary", "text": e.get("content", "")} for e in diary_entries],
         persona_mgr.build_prompt_block(),
-        mood_mgr.get_mood(),
+        mood_mgr.get_current(),
         diary_entries=diary_entries
     )
     parsed = item.get("parsed", {})
@@ -3285,7 +3275,7 @@ def show_diary_evolution_menu():
                     break
                 lines.append(line)
             try:
-                entry = diary_mgr.add_entry(title, "\n".join(lines), mood=MoodManager().get_mood(), tags=["手动"], source="manual")
+                entry = diary_mgr.add_entry(title, "\n".join(lines), mood=MoodManager().get_current(), tags=["手动"], source="manual")
                 print(f"{Fore.GREEN}[OK] 已保存日记: {entry['id']}{Style.RESET_ALL}")
             except Exception as e:
                 print(f"{Fore.RED}[ERROR] 保存失败: {e}{Style.RESET_ALL}")
@@ -3453,185 +3443,6 @@ def show_agent_skill_menu():
                     print(f"{Fore.YELLOW}[WARN] 分数无效，保持原样{Style.RESET_ALL}")
             save_config(config)
             print(f"{Fore.GREEN}[OK] Agent设置已保存{Style.RESET_ALL}")
-        else:
-            print(f"{Fore.RED}[ERROR] 无效选项{Style.RESET_ALL}")
-
-# ==============================================================================
-# 🎉 娱乐模式菜单
-# ==============================================================================
-def show_entertainment_menu():
-    """显示娱乐模式菜单"""
-    global config, ENTERTAINMENT_ENABLED, ENTERTAINMENT_AUTO_FORTUNE
-    global ENTERTAINMENT_PROB_FUN_ACTION, ENTERTAINMENT_JOKE_MODE, ENTERTAINMENT_MAX_DAILY_FORTUNE
-    
-    ent_mgr = EntertainmentModule()
-    
-    while True:
-        enabled_text = "🎉 已开启" if ENTERTAINMENT_ENABLED else "💤 已关闭"
-        fortune_text = "✓ 自动" if ENTERTAINMENT_AUTO_FORTUNE else "✗ 手动"
-        
-        print(f"""
-    ╔══════════════════════════════════════════════════════════╗
-    ║                    🎉 娱乐模式                           ║
-    ║              (所有功能需先开启娱乐模式才能使用)           ║
-    ╚══════════════════════════════════════════════════════════╝
-
-    {Fore.CYAN}当前状态:{Style.RESET_ALL}
-    • 娱乐模式: {Fore.GREEN + enabled_text + Style.RESET_ALL}
-    • 运势自动推送: {Fore.GREEN + fortune_text + Style.RESET_ALL}
-    • 搞笑动作概率: {Fore.YELLOW}{ENTERTAINMENT_PROB_FUN_ACTION}{Style.RESET_ALL}
-    • 段子模式: {Fore.MAGENTA}{ENTERTAINMENT_JOKE_MODE}{Style.RESET_ALL}
-    • 每日运势上限: {Fore.BLUE}{ENTERTAINMENT_MAX_DAILY_FORTUNE}次{Style.RESET_ALL}
-
-    {Fore.CYAN}请选择操作:{Style.RESET_ALL}
-    {Fore.GREEN}1.{Style.RESET_ALL} [REFRESH]  {'关闭' if ENTERTAINMENT_ENABLED else '开启'}娱乐模式
-    {Fore.GREEN}2.{Style.RESET_ALL} 🌟 抽取今日运势
-    {Fore.GREEN}3.{Style.RESET_ALL} 😂 听个段子
-    {Fore.GREEN}4.{Style.RESET_ALL} 🎲 生成整活评论
-    {Fore.GREEN}5.{Style.RESET_ALL} 📖 B站热梗词典
-    {Fore.GREEN}6.{Style.RESET_ALL} 🎮 猜UP主小游戏
-    {Fore.YELLOW}7.{Style.RESET_ALL} ⚙️  娱乐设置
-    {Fore.YELLOW}8.{Style.RESET_ALL} [REFRESH] {'关闭' if ENTERTAINMENT_AUTO_FORTUNE else '开启'}运势自动推送
-    {Fore.RED}0.{Style.RESET_ALL} ↩️  返回主菜单
-        """)
-        
-        choice = input(f"{Fore.CYAN}请输入选项 (0-8): {Style.RESET_ALL}").strip()
-        
-        if choice == "0":
-            break
-        elif choice == "1":
-            if ENTERTAINMENT_ENABLED:
-                config["entertainment"]["enabled"] = False
-                ENTERTAINMENT_ENABLED = False
-                save_config(config)
-                print(f"\n{Fore.YELLOW}💤 娱乐模式已关闭！恢复正经模式~{Style.RESET_ALL}")
-            else:
-                config["entertainment"]["enabled"] = True
-                ENTERTAINMENT_ENABLED = True
-                save_config(config)
-                print(f"\n{Fore.GREEN}🎉 娱乐模式已开启！来整活吧！{Style.RESET_ALL}")
-        
-        elif choice == "2":
-            if not ENTERTAINMENT_ENABLED:
-                print(f"\n{Fore.RED}[WARN] 请先开启娱乐模式！{Style.RESET_ALL}")
-                continue
-            result = ent_mgr.draw_fortune()
-            if result["type"] == "limit":
-                print(f"\n{Fore.YELLOW}[WARN] {result['msg']}{Style.RESET_ALL}")
-            else:
-                print(f"\n{'='*40}")
-                print(f"  {result['icon']} {result['level']} {result['icon']}")
-                print(f"  {result['msg']}")
-                print(f"  今日已抽: {result['count']}/{result['max']}")
-                print(f"{'='*40}")
-        
-        elif choice == "3":
-            if not ENTERTAINMENT_ENABLED:
-                print(f"\n{Fore.RED}[WARN] 请先开启娱乐模式！{Style.RESET_ALL}")
-                continue
-            print(f"\n{Fore.CYAN}🤔 AI正在构思段子...{Style.RESET_ALL}")
-            try:
-                joke = asyncio.run(ent_mgr.generate_joke())
-                print(f"\n{Fore.YELLOW}😂 {joke}{Style.RESET_ALL}")
-            except Exception as e:
-                print(f"\n{Fore.RED}段子生成失败: {e}{Style.RESET_ALL}")
-        
-        elif choice == "4":
-            if not ENTERTAINMENT_ENABLED:
-                print(f"\n{Fore.RED}[WARN] 请先开启娱乐模式！{Style.RESET_ALL}")
-                continue
-            title = input(f"{Fore.CYAN}📹 输入视频标题 (回车生成随机): {Style.RESET_ALL}").strip()
-            up = input(f"{Fore.CYAN}👤 输入UP主名称 (可选): {Style.RESET_ALL}").strip()
-            print(f"\n{Fore.CYAN}🤔 正在生成整活评论...{Style.RESET_ALL}")
-            try:
-                comment = asyncio.run(ent_mgr.fun_comment(title or "未知视频", up_name=up))
-                print(f"\n{Fore.LIGHTGREEN_EX}[MSG] 整活评论:{Style.RESET_ALL}")
-                print(f"  {comment}")
-            except Exception as e:
-                print(f"\n{Fore.RED}生成失败: {e}{Style.RESET_ALL}")
-        
-        elif choice == "5":
-            if not ENTERTAINMENT_ENABLED:
-                print(f"\n{Fore.RED}[WARN] 请先开启娱乐模式！{Style.RESET_ALL}")
-                continue
-            print(f"\n{Fore.CYAN}📖 B站热梗词典 ({len(ent_mgr.BILIBILI_MEMES)}条){Style.RESET_ALL}")
-            print(f"{'-'*60}")
-            for i, meme in enumerate(ent_mgr.BILIBILI_MEMES, 1):
-                print(f"  {i:2d}. {meme}")
-            print(f"{'-'*60}")
-            print(f"\n{Fore.LIGHTGREEN_EX}[IDEA] 随机一条: {ent_mgr.random_meme()}{Style.RESET_ALL}")
-        
-        elif choice == "6":
-            if not ENTERTAINMENT_ENABLED:
-                print(f"\n{Fore.RED}[WARN] 请先开启娱乐模式！{Style.RESET_ALL}")
-                continue
-            print(f"\n{Fore.CYAN}🎮 猜B站UP主小游戏{Style.RESET_ALL}")
-            print(f"  规则：根据描述猜出对应的B站UP主名称")
-            
-            while True:
-                game_result = ent_mgr.guess_up_game_start()
-                print(f"\n{Fore.YELLOW}[MSG] 提示: {game_result['hint']}{Style.RESET_ALL}")
-                guess = input(f"{Fore.CYAN}🤔 你的答案 (回车跳过): {Style.RESET_ALL}").strip()
-                if not guess:
-                    print(f"{Fore.LIGHTMAGENTA_EX}答案揭晓: {ent_mgr.game_state.get('guess_answer','未知')}{Style.RESET_ALL}")
-                    break
-                check = ent_mgr.guess_up_game_check(guess)
-                print(f"\n{Fore.GREEN if check['correct'] else Fore.YELLOW}{check['msg']}{Style.RESET_ALL}")
-                if check['correct']:
-                    break
-                again = input(f"{Fore.CYAN}再玩一次？(y/n): {Style.RESET_ALL}").strip().lower()
-                if again != 'y':
-                    break
-        
-        elif choice == "7":
-            print(f"\n{Fore.CYAN}⚙️  娱乐设置{Style.RESET_ALL}")
-            print(f"  1. 搞笑动作概率 (当前: {ENTERTAINMENT_PROB_FUN_ACTION})")
-            print(f"  2. 段子模式 (当前: {ENTERTAINMENT_JOKE_MODE})")
-            print(f"  3. 每日运势上限 (当前: {ENTERTAINMENT_MAX_DAILY_FORTUNE})")
-            sub = input(f"{Fore.CYAN}选择 (0返回): {Style.RESET_ALL}").strip()
-            if sub == "1":
-                raw = input(f"概率 (0.0-1.0): ").strip()
-                try:
-                    val = float(raw)
-                    if 0 <= val <= 1:
-                        config["entertainment"]["prob_fun_action"] = val
-                        ENTERTAINMENT_PROB_FUN_ACTION = val
-                        save_config(config)
-                        print(f"{Fore.GREEN}[OK] 已更新{Style.RESET_ALL}")
-                except (ValueError, TypeError) as e:
-                    log(f'类型转换失败: {e}', 'DEBUG')
-            elif sub == "2":
-                print("  normal / spicy / chaos")
-                raw = input("模式: ").strip()
-                if raw in ("normal", "spicy", "chaos"):
-                    config["entertainment"]["joke_mode"] = raw
-                    ENTERTAINMENT_JOKE_MODE = raw
-                    save_config(config)
-                    print(f"{Fore.GREEN}[OK] 已更新{Style.RESET_ALL}")
-            elif sub == "3":
-                raw = input("每日上限次数: ").strip()
-                try:
-                    val = int(raw)
-                    if val > 0:
-                        config["entertainment"]["max_daily_fortune"] = val
-                        ENTERTAINMENT_MAX_DAILY_FORTUNE = val
-                        save_config(config)
-                        print(f"{Fore.GREEN}[OK] 已更新{Style.RESET_ALL}")
-                except (ValueError, TypeError) as e:
-                    log(f'类型转换失败: {e}', 'DEBUG')
-        
-        elif choice == "8":
-            if ENTERTAINMENT_AUTO_FORTUNE:
-                config["entertainment"]["auto_fortune"] = False
-                ENTERTAINMENT_AUTO_FORTUNE = False
-                save_config(config)
-                print(f"\n{Fore.YELLOW}📴 运势自动推送已关闭{Style.RESET_ALL}")
-            else:
-                config["entertainment"]["auto_fortune"] = True
-                ENTERTAINMENT_AUTO_FORTUNE = True
-                save_config(config)
-                print(f"\n{Fore.GREEN}🔔 运势自动推送已开启，机器人运行时会随机推送运势~{Style.RESET_ALL}")
-        
         else:
             print(f"{Fore.RED}[ERROR] 无效选项{Style.RESET_ALL}")
 
@@ -3971,6 +3782,316 @@ def show_knowledge_base_menu():
                 print(f"{Fore.RED}[ERROR] 构建向量索引失败: {e}{Style.RESET_ALL}")
         else:
             print(f"{Fore.RED}[ERROR] 无效选项，请重新选择！{Style.RESET_ALL}")
+
+# ═══════════════════════════════════════════════════════════════
+# 🎓 知识辅导菜单 (v2.0.3)
+# ═══════════════════════════════════════════════════════════════
+def _parse_multi_choice(choice_str: str, max_idx: int) -> list[int]:
+    """解析多选输入，支持: 单个(5), 逗号(1,3,7), 范围(1-5), 混合(1-3,7,9-11), all"""
+    choice_str = choice_str.strip().lower()
+    if choice_str == 'all':
+        return list(range(1, max_idx + 1))
+    
+    result = set()
+    parts = [p.strip() for p in choice_str.split(',')]
+    for part in parts:
+        if not part:
+            continue
+        if '-' in part:
+            range_parts = part.split('-', 1)
+            try:
+                start = int(range_parts[0])
+                end = int(range_parts[1])
+                if start < 1 or end > max_idx or start > end:
+                    return []
+                result.update(range(start, end + 1))
+            except (ValueError, IndexError):
+                return []
+        else:
+            try:
+                val = int(part)
+                if val < 1 or val > max_idx:
+                    return []
+                result.add(val)
+            except ValueError:
+                return []
+    
+    return sorted(result)
+
+async def show_knowledge_tutor_menu():
+    """知识辅导菜单：选择知识文件 → 讲解/问答/二次创作/生成HTML"""
+    print(f"\n{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}|        🎓 知识辅导 - AI讲解/问答/二次创作                    |{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
+
+    # 扫描知识库
+    md_files = scan_md_files()
+    if not md_files:
+        print(f"{Fore.YELLOW}[WARN] 知识库中没有找到学习归档文件！{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}[INFO] 请先让机器人学习一些视频，或手动分析视频并归档{Style.RESET_ALL}")
+        input(f"\n{Fore.CYAN}按回车返回...{Style.RESET_ALL}")
+        return
+
+    # 检查 AI 是否可用
+    tutor = KnowledgeTutor()
+    if not tutor.is_available():
+        print(f"{Fore.RED}[ERROR] AI 接口不可用，请先配置 API Key！{Style.RESET_ALL}")
+        input(f"\n{Fore.CYAN}按回车返回...{Style.RESET_ALL}")
+        return
+
+    # 按分类分组展示
+    from collections import defaultdict
+    by_category = defaultdict(list)
+    for item in md_files:
+        by_category[item['category_path']].append(item)
+
+    print(f"\n{Fore.GREEN}共找到 {len(md_files)} 个知识文件，分布在 {len(by_category)} 个分类:{Style.RESET_ALL}\n")
+
+    all_items = []
+    idx = 1
+    for cat in sorted(by_category.keys()):
+        items = by_category[cat]
+        print(f"{Fore.CYAN}[{cat}] ({len(items)}个){Style.RESET_ALL}")
+        for item in items:
+            up_str = f" @{item['up_name']}" if item['up_name'] else ""
+            print(f"  {Fore.YELLOW}{idx:3d}.{Style.RESET_ALL} {item['title'][:45]}{up_str} ({item['size_kb']}KB)")
+            all_items.append(item)
+            idx += 1
+        print()
+
+    print(f"  {Fore.YELLOW}  0.{Style.RESET_ALL} 返回主菜单")
+
+    print(f"\n{Fore.YELLOW}[提示] 支持多选: 逗号分隔(1,3,7) / 范围(1-5) / 全部(all){Style.RESET_ALL}")
+    try:
+        choice = input(f"\n{Fore.CYAN}请选择要辅导的知识文件 (1-{len(all_items)}): {Style.RESET_ALL}").strip()
+        if not choice or choice == "0":
+            print(f"{Fore.YELLOW}[INFO] 已取消{Style.RESET_ALL}")
+            return
+
+        # 解析多选输入
+        selected_indices = _parse_multi_choice(choice, len(all_items))
+        if not selected_indices:
+            print(f"{Fore.RED}[ERROR] 无效选项{Style.RESET_ALL}")
+            return
+
+        selected_files = [(all_items[i-1]['file_path'], all_items[i-1]['title']) for i in selected_indices]
+
+        print(f"\n{Fore.GREEN}已选择 {len(selected_files)} 个文件:{Style.RESET_ALL}")
+        for fp, ttl in selected_files:
+            sel_info = all_items[selected_indices[selected_files.index((fp, ttl))] - 1]
+            print(f"  {Fore.YELLOW}•{Style.RESET_ALL} {ttl[:45]}  [{sel_info['category_path']}] ({sel_info['size_kb']}KB){' @'+sel_info['up_name'] if sel_info['up_name'] else ''}")
+
+        # 进入辅导会话
+        await _tutor_session(selected_files)
+
+    except ValueError:
+        print(f"{Fore.RED}[ERROR] 请输入数字{Style.RESET_ALL}")
+        input(f"\n{Fore.CYAN}按回车返回...{Style.RESET_ALL}")
+    except KeyboardInterrupt:
+        print(f"\n{Fore.YELLOW}[WARN] 用户中断{Style.RESET_ALL}")
+    except Exception as e:
+        print(f"{Fore.RED}[ERROR] 辅导异常: {e}{Style.RESET_ALL}")
+        import traceback
+        traceback.print_exc()
+        input(f"\n{Fore.CYAN}按回车返回...{Style.RESET_ALL}")
+
+
+async def _tutor_session(files: list[tuple[str, str]]):
+    """知识辅导交互会话（CLI）- 支持单文件和多文件"""
+    tutor = KnowledgeTutor()
+    conversation_history: list[dict[str, str]] = []
+    is_multi = len(files) > 1
+    file_paths = [f[0] for f in files]
+    titles = [f[1] for f in files]
+
+    print(f"\n{Fore.CYAN}╔══════════════════════════════════════════════════════════╗{Style.RESET_ALL}")
+    if is_multi:
+        print(f"{Fore.CYAN}║  📚 多文件辅导 ({len(files)}个文件)".ljust(59) + "║")
+        for i, (fp, ttl) in enumerate(files):
+            print(f"{Fore.CYAN}║    {i+1}. {ttl[:45]}".ljust(59) + "║")
+    else:
+        print(f"{Fore.CYAN}║  📖 {titles[0][:40]}".ljust(59) + "║")
+    print(f"{Fore.CYAN}╚══════════════════════════════════════════════════════════╝{Style.RESET_ALL}")
+    print(f"\n{Fore.GREEN}AI导师已就绪！你可以：{Style.RESET_ALL}")
+    print(f"  {Fore.YELLOW}•{Style.RESET_ALL} 直接提问 → AI讲解知识点" + (f"（跨{len(files)}个文件综合分析）" if is_multi else ""))
+    print(f"  {Fore.YELLOW}•{Style.RESET_ALL} 输入 {Fore.CYAN}:rewrite{Style.RESET_ALL} → AI二次创作（优化改写）")
+    if is_multi:
+        print(f"  {Fore.YELLOW}•{Style.RESET_ALL} 输入 {Fore.CYAN}:rewrite N{Style.RESET_ALL} → 改写第N个文件（如 :rewrite 2）")
+    print(f"  {Fore.YELLOW}•{Style.RESET_ALL} 输入 {Fore.CYAN}:rewrite [要求]{Style.RESET_ALL} → 带自定义要求的改写")
+    print(f"  {Fore.YELLOW}•{Style.RESET_ALL} 输入 {Fore.CYAN}:html{Style.RESET_ALL} → 生成HTML可视化网页")
+    print(f"  {Fore.YELLOW}•{Style.RESET_ALL} 输入 {Fore.CYAN}:html dark/light/modern{Style.RESET_ALL} → 指定风格生成HTML")
+    print(f"  {Fore.YELLOW}•{Style.RESET_ALL} 输入 {Fore.CYAN}:view{Style.RESET_ALL} → 查看原始文件内容")
+    if is_multi:
+        print(f"  {Fore.YELLOW}•{Style.RESET_ALL} 输入 {Fore.CYAN}:view N{Style.RESET_ALL} → 查看第N个文件（如 :view 2）")
+    print(f"  {Fore.YELLOW}•{Style.RESET_ALL} 输入 {Fore.CYAN}:quit{Style.RESET_ALL} → 退出辅导")
+    print()
+
+    def _pick_file(cmd: str) -> tuple[str, str] | None:
+        """从命令中解析文件编号（多文件模式下使用）"""
+        if is_multi:
+            parts = cmd.split(maxsplit=1)
+            if len(parts) > 1:
+                try:
+                    n = int(parts[0])
+                    if 1 <= n <= len(files):
+                        return files[n - 1]
+                except ValueError:
+                    pass
+            # 列出文件让用户选择
+            print(f"\n{Fore.YELLOW}请选择要操作的文件:{Style.RESET_ALL}")
+            for i, (fp, ttl) in enumerate(files):
+                print(f"  {Fore.CYAN}{i+1}.{Style.RESET_ALL} {ttl[:50]}")
+            try:
+                n = int(input(f"{Fore.CYAN}输入编号 (1-{len(files)}): {Style.RESET_ALL}").strip())
+                if 1 <= n <= len(files):
+                    return files[n - 1]
+            except (ValueError, EOFError):
+                pass
+            return None
+        else:
+            return files[0]
+
+    while True:
+        try:
+            user_input = input(f"{Fore.GREEN}💬 你: {Style.RESET_ALL}").strip()
+        except (EOFError, KeyboardInterrupt):
+            print(f"\n{Fore.YELLOW}[INFO] 退出辅导{Style.RESET_ALL}")
+            break
+
+        if not user_input:
+            continue
+
+        if user_input.lower() == ":quit":
+            print(f"{Fore.YELLOW}[INFO] 退出辅导{Style.RESET_ALL}")
+            break
+
+        # ── 查看原始内容 ──
+        if user_input.lower().startswith(":view"):
+            if is_multi:
+                parts = user_input.split(maxsplit=1)
+                if len(parts) > 1:
+                    try:
+                        n = int(parts[1])
+                        if 1 <= n <= len(files):
+                            view_file = files[n - 1]
+                        else:
+                            view_file = _pick_file("view")
+                    except ValueError:
+                        view_file = _pick_file("view")
+                else:
+                    view_file = _pick_file("view")
+                if view_file is None:
+                    continue
+                fp, ttl = view_file
+            else:
+                fp, ttl = files[0]
+
+            content = read_md_file(fp)
+            print(f"\n{Fore.CYAN}── 文件原始内容: {ttl[:40]} ──{Style.RESET_ALL}")
+            lines = content.split('\n')
+            for i, line in enumerate(lines):
+                if i >= 80:
+                    print(f"{Fore.YELLOW}... (共 {len(lines)} 行，仅显示前80行) ...{Style.RESET_ALL}")
+                    break
+                print(f"  {Fore.LIGHTBLACK_EX}{line}{Style.RESET_ALL}")
+            print()
+            continue
+
+        # ── 二次创作 ──
+        if user_input.lower().startswith(":rewrite"):
+            extra = user_input[len(":rewrite"):].strip()
+            if is_multi:
+                # 尝试解析文件编号，如 ":rewrite 2 请优化"
+                parts = extra.split(maxsplit=1) if extra else [""]
+                try:
+                    n = int(parts[0])
+                    if 1 <= n <= len(files):
+                        rewrite_file = files[n - 1]
+                        extra = parts[1] if len(parts) > 1 else ""
+                    else:
+                        rewrite_file = _pick_file("rewrite " + extra)
+                except ValueError:
+                    rewrite_file = _pick_file("rewrite " + extra)
+                if rewrite_file is None:
+                    continue
+                fp, ttl = rewrite_file
+            else:
+                fp, ttl = files[0]
+
+            print(f"\n{Fore.CYAN}✍️ AI正在二次创作: {ttl[:40]}...{Style.RESET_ALL}")
+            summary, new_content = await tutor.rewrite_file(fp, extra)
+            print(f"\n{Fore.GREEN}📝 修改说明:{Style.RESET_ALL}")
+            print(f"  {summary}")
+
+            if new_content:
+                print(f"\n{Fore.CYAN}── 改写后的内容（前40行预览）──{Style.RESET_ALL}")
+                new_lines = new_content.split('\n')
+                for i, line in enumerate(new_lines[:40]):
+                    print(f"  {Fore.LIGHTBLACK_EX}{line}{Style.RESET_ALL}")
+                if len(new_lines) > 40:
+                    print(f"  {Fore.YELLOW}... (共 {len(new_lines)} 行) ...{Style.RESET_ALL}")
+
+                save = input(f"\n{Fore.CYAN}是否保存改写结果到文件？(y/N): {Style.RESET_ALL}").strip().lower()
+                if save == 'y':
+                    if write_md_file(fp, new_content):
+                        print(f"{Fore.GREEN}[OK] 文件已更新！（原文件已备份为 .md.bak）{Style.RESET_ALL}")
+                        conversation_history = []
+                    else:
+                        print(f"{Fore.RED}[ERROR] 保存失败{Style.RESET_ALL}")
+            print()
+            continue
+
+        # ── 生成 HTML ──
+        if user_input.lower().startswith(":html"):
+            # 多文件总是生成综合HTML
+            parts = user_input.split(maxsplit=1)
+            style = parts[1].strip().lower() if len(parts) > 1 else "dark"
+            if style not in ("dark", "light", "modern"):
+                style = "dark"
+
+            file_label = f"{len(files)}个文件" if is_multi else titles[0]
+            print(f"\n{Fore.CYAN}🎨 正在生成HTML网页 [{file_label}] (风格: {style})...{Style.RESET_ALL}")
+            print(f"{Fore.YELLOW}[INFO] 这可能需要30-60秒，请耐心等待...{Style.RESET_ALL}")
+
+            html_content = await tutor.generate_html(file_paths, style)
+
+            html_dir = os.path.join(KNOWLEDGE_BASE_DIR, ".html_exports")
+            os.makedirs(html_dir, exist_ok=True)
+            if is_multi:
+                safe_title = f"multi_{len(files)}files"
+            else:
+                safe_title = re.sub(r'[\\/*?:"<>|]', '_', titles[0])[:40]
+            html_path = os.path.join(html_dir, f"{safe_title}_{style}.html")
+            try:
+                with open(html_path, 'w', encoding='utf-8') as f:
+                    f.write(html_content)
+                print(f"{Fore.GREEN}[OK] HTML已保存到: {html_path}{Style.RESET_ALL}")
+
+                print(f"{Fore.CYAN}正在尝试打开HTML文件...{Style.RESET_ALL}")
+                try:
+                    import webbrowser
+                    webbrowser.open(f"file://{html_path}")
+                    print(f"{Fore.GREEN}[OK] 已用默认浏览器打开{Style.RESET_ALL}")
+                except Exception:
+                    print(f"{Fore.YELLOW}[INFO] 无法自动打开，请手动用浏览器打开: {html_path}{Style.RESET_ALL}")
+            except Exception as e:
+                print(f"{Fore.RED}[ERROR] 保存HTML失败: {e}{Style.RESET_ALL}")
+            print()
+            continue
+
+        # ── 普通问答 ──
+        print(f"\n{Fore.CYAN}🤔 AI思考中...{Style.RESET_ALL}")
+        reply = await tutor.chat_about_file(file_paths, user_input, conversation_history)
+
+        conversation_history.append({"role": "user", "content": user_input})
+        conversation_history.append({"role": "assistant", "content": reply})
+        if len(conversation_history) > 20:
+            conversation_history = conversation_history[-20:]
+
+        print(f"\n{Fore.MAGENTA}🎓 AI导师:{Style.RESET_ALL}")
+        print(f"  {reply}")
+        print()
+
 
 def count_knowledge_categories():
     """统计知识库分类数量（从 file_index 多级路径统计，自动清理失效条目）"""
@@ -7451,6 +7572,16 @@ class AgentBrain:
             except Exception as e:
                 log(f"视频理解模块初始化失败，将退回字幕模式: {e}", "WARN")
 
+        # 懒初始化向量检索引擎
+        self.kb_search = None
+        if KBSearchEngine and ModelClient and load_modular_settings and BotState:
+            try:
+                modular_settings = load_modular_settings()
+                self.kb_search = KBSearchEngine(ModelClient(modular_settings, BotState()))
+            except Exception as e:
+                log(f"向量检索引擎初始化失败: {e}", "WARN")
+
+
         self.cookies = None
         self.credential = None
         self._ai_errors_consecutive = 0  # 连续AI错误计数，用于熔断
@@ -7470,11 +7601,7 @@ class AgentBrain:
         self._last_curiosity_dive_at = datetime.min
         self._curiosity_dive_count_today = 0
         self._curiosity_dive_date = ""
-        
-        # 🎉 娱乐模块
-        self.entertainment = EntertainmentModule()
-        self._last_fun_action_at = datetime.min  # 上次娱乐动作时间
-        
+
         # [*] UP主关注追踪
         self.daily_follows = 0
         self.daily_follows_date = ""
@@ -8187,7 +8314,7 @@ class AgentBrain:
             entry = await self.diary_mgr.generate_from_events(
                 self.session_events,
                 self.persona_mgr.build_prompt_block(),
-                self.mood_mgr.get_mood()
+                self.mood_mgr.get_current()
             )
             self.last_auto_diary_at = datetime.now()
             log(f"自动日记已生成: {entry.get('title')}", "NOTE")
@@ -8208,7 +8335,7 @@ class AgentBrain:
             item = await self.evolution_mgr.reflect(
                 self.session_events,
                 self.persona_mgr.build_prompt_block(),
-                self.mood_mgr.get_mood(),
+                self.mood_mgr.get_current(),
                 diary_entries=self.diary_mgr.list_entries(limit=5)
             )
             parsed = item.get("parsed", {})
@@ -8759,7 +8886,7 @@ class AgentBrain:
                     self.diary_mgr.add_entry(
                         f"好奇心深度搜索: {topic}",
                         f"搜索主题「{topic}」观看了{videos_watched}个视频。\n关键发现:\n{summary_text}",
-                        mood=self.mood_mgr.get_mood() if hasattr(self, 'mood_mgr') else "好奇",
+                        mood=self.mood_mgr.get_current() if hasattr(self, 'mood_mgr') else "好奇",
                         tags=["好奇心", "深度搜索", topic],
                         source="curiosity_dive"
                     )
@@ -8800,14 +8927,17 @@ class AgentBrain:
         cover_desc = getattr(self, "_current_video_cover_desc", "") or ""
 
         if has_subtitle:
-            # [FIX] 低置信度字幕跳过AI二次判断，直接使用
-            # _check_subtitle_mismatch 已确认字幕用词/结构与标题有弱关联，
-            # 无需再让AI判断"字幕是否与标题匹配" — 避免无谓的二次拒绝
-            # 触发昂贵的视频下载+ASR流程
+            # [FIX] 低置信度字幕：单轨弱关联→跳过AI二次判断直接使用
+            # 所有轨校验均失败→字幕完全不可信，必须回退到ASR+视觉
             is_low_confidence = subtitle_text.startswith("[低置信度字幕") or subtitle_text.startswith("[极低置信度字幕")
             if is_low_confidence:
-                log(f"[OK] 低置信度字幕，跳过AI二次判断，直接使用供AI分析", "BRAIN")
-                return True, subtitle_text
+                is_all_failed = "所有轨校验均失败" in subtitle_text
+                if is_all_failed:
+                    log(f"[WARN] 所有字幕轨校验均失败，字幕不可信，回退到ASR+视觉理解", "BRAIN")
+                    # 不return，继续往下尝试ASR/视觉帧
+                else:
+                    log(f"[OK] 低置信度字幕(有关键词弱关联)，跳过AI二次判断，直接使用供AI分析", "BRAIN")
+                    return True, subtitle_text
             
             # AI评估：字幕是否足以理解视频
             subtitle_sufficient, sufficiency_reason = await self._ai_judge_subtitle_sufficiency(
@@ -8832,7 +8962,10 @@ class AgentBrain:
         if not ASR_ENABLED:
             log(f"ASR未开启，跳过语音识别", "INFO")
             if has_subtitle:
-                return True, subtitle_text
+                is_all_failed = "所有轨校验均失败" in subtitle_text
+                if not is_all_failed:
+                    return True, subtitle_text
+                log(f"[WARN] 所有轨校验失败且ASR未开启，尝试视觉帧理解兜底", "BRAIN")
             # [VISION] 尝试画面理解兜底
             vis_fallback = await self._understand_with_vision_frames(bvid, title, subtitle_text)
             if vis_fallback:
@@ -8851,7 +8984,10 @@ class AgentBrain:
         if skip:
             log(f"🤖 规则预判跳过ASR: {skip_reason}", "BRAIN")
             if has_subtitle:
-                return True, subtitle_text
+                is_all_failed = "所有轨校验均失败" in subtitle_text
+                if not is_all_failed:
+                    return True, subtitle_text
+                log(f"[WARN] 规则跳过ASR但字幕所有轨校验失败，尝试视觉帧理解", "BRAIN")
             # 规则明确跳过（纯音乐等）→ 视觉帧理解兜底
             vis_fallback = await self._understand_with_vision_frames(bvid, title, subtitle_text)
             if vis_fallback:
@@ -10462,7 +10598,7 @@ B站等级: Lv.{target_level}
             log(f"兴趣列表: {', '.join(interests)}", "INTEREST")
         else:
             log("兴趣列表为空，将对所有视频感兴趣", "INTEREST")
-        log(f"当前人格: {self.persona_mgr.get_active_persona_name()} | 当前心情: {self.mood_mgr.get_mood()}", "INFO")
+        log(f"当前人格: {self.persona_mgr.get_active_persona()} | 当前心情: {self.mood_mgr.get_current()}", "INFO")
         
         print(f"\n{Fore.CYAN}知识库分类系统已初始化:{Style.RESET_ALL}")
         self.classifier.show_category_structure()
@@ -11293,7 +11429,7 @@ B站等级: Lv.{target_level}
                     mode=mode,
                     thought=thought,
                     actions=action_log,
-                    mood=self.mood_mgr.get_mood(),
+                    mood=self.mood_mgr.get_current(),
                     url=video_url
                 )
                 await self.maybe_auto_diary()
@@ -11355,6 +11491,94 @@ async def _resolve_b23_short(short_code: str) -> str:
     except Exception as e:
         log(f'非预期异常: {e}', 'WARN')
     return ""
+
+async def _manual_api_retry(api_call, name: str, fallback=None, max_retries=3, base_delay=1.5):
+    """手动视频分析专用 API 重试包装器。
+    
+    重试策略：首次失败后指数退避（1.5s → 3s → 6s）+ 随机抖动。
+    -799 限流自动触发全局冷却 + 额外等待。
+    
+    Args:
+        api_call: async callable，无参数
+        name: 调用名称（用于日志）
+        fallback: 最终失败时的兜底返回值
+        max_retries: 额外重试次数（含首次共 max_retries+1 次尝试）
+        base_delay: 基础延迟秒数
+    """
+    last_error = None
+    for attempt in range(max_retries + 1):
+        try:
+            if attempt > 0:
+                delay = base_delay * (2 ** (attempt - 1)) + random.uniform(0, 2.0)
+                log(f"[RETRY] {name} 第{attempt}次重试({delay:.1f}s)...", "MANUAL")
+                await asyncio.sleep(delay)
+            result = await api_call()
+            # 检查空结果
+            if result is not None:
+                if isinstance(result, list) and len(result) == 0:
+                    if attempt < max_retries:
+                        log(f"[RETRY] {name} 返回空列表，准备重试...", "MANUAL")
+                        continue
+                elif isinstance(result, str) and not result.strip():
+                    if attempt < max_retries:
+                        log(f"[RETRY] {name} 返回空字符串，准备重试...", "MANUAL")
+                        continue
+                return result
+            if attempt < max_retries:
+                log(f"[RETRY] {name} 返回None，准备重试...", "MANUAL")
+        except Exception as e:
+            last_error = e
+            err_msg = str(e)
+            if '-799' in err_msg or '请求过于频繁' in err_msg:
+                _bili_trigger_cooldown()
+                retry_delay = base_delay * (2 ** attempt) + random.uniform(3, 8)
+                log(f"[RETRY] {name} 触发-799限流，{retry_delay:.0f}s后重试({attempt+1}/{max_retries})...", "MANUAL")
+                await asyncio.sleep(retry_delay)
+            elif attempt < max_retries:
+                log(f"[RETRY] {name} 异常: {_mask_urls(err_msg[:120])}，重试中({attempt+1}/{max_retries})...", "MANUAL")
+            else:
+                log(f"[ERROR] {name} 重试{max_retries}次均失败: {_mask_urls(err_msg[:200])}", "MANUAL")
+    
+    log(f"[WARN] {name} 最终失败，返回兜底值: {fallback}", "MANUAL")
+    return fallback
+
+
+
+async def _ai_cross_check_subtitle_match(brain, title: str, subtitle_text: str):
+    """快速AI交叉验证：字幕内容是否与视频标题匹配。
+
+    返回 (is_match: bool, confidence: float, reason: str)
+    """
+    if not title or not subtitle_text or len(subtitle_text) < 30:
+        return True, 0.5, "内容过短跳过验证"
+
+    check_prompt = f"""你是内容匹配验证器。判断以下视频字幕内容是否与标题相符。
+
+标题: {title}
+
+字幕内容(前2000字):
+{subtitle_text[:2000]}
+
+只返回JSON: {{"match": true/false, "confidence": 0.0-1.0, "reason": "简短理由(20字内)"}}"""
+
+    try:
+        resp = await brain._call_ai_with_retry(
+            model=MODEL_BRAIN,
+            messages=[{"role": "user", "content": check_prompt}],
+            request_timeout=30
+        )
+        raw = resp.choices[0].message.content
+        s = raw.find("{")
+        e = raw.rfind("}")
+        if s >= 0 and e >= s:
+            result = json.loads(raw[s:e+1])
+            return result.get("match", True), result.get("confidence", 0.5), result.get("reason", "AI验证完成")
+    except Exception as ex:
+        log(f"[WARN] AI交叉验证异常: {ex}，默认放行", "MANUAL")
+
+    return True, 0.5, "验证异常-默认放行"
+
+
 
 async def manual_video_analysis():
     """手动视频分析：用户输入链接/标题/UP主名，AI客观解析视频内容。"""
@@ -11565,15 +11789,46 @@ async def manual_video_analysis():
     print(f"{Fore.CYAN}|  [模式] 客观分析 - 开始解析视频内容                           |{Style.RESET_ALL}")
     print(f"{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
 
-    # 1. 视频理解
-    print(f"\n{Fore.CYAN}[1/4] 理解视频内容 (字幕/ASR)...{Style.RESET_ALL}")
-    success, subtitle_text = await brain.understand_video_for_decision(bvid, title=title)
-    if success:
-        preview = subtitle_text[:200].replace('\n', ' ')
-        print(f"{Fore.GREEN}[OK] 视频内容获取成功: {preview}...{Style.RESET_ALL}")
-    else:
-        subtitle_text = f"[理解受限] {subtitle_text}"
-        print(f"{Fore.YELLOW}[WARN] 视频理解受限: {subtitle_text[:120]}{Style.RESET_ALL}")
+    # [RETRY] 视频理解 + AI交叉验证重试循环（最多8次）
+    # 每次获取字幕后先让AI对比标题验证内容是否匹配，不匹配则回退到ASR重试
+    MAX_UNDERSTAND_RETRIES = 8
+    subtitle_text = ""
+    for understand_retry in range(MAX_UNDERSTAND_RETRIES):
+        if understand_retry > 0:
+            print(f"\n{Fore.YELLOW}[RETRY] 第{understand_retry+1}/{MAX_UNDERSTAND_RETRIES}次尝试，强制ASR+视觉帧理解...{Style.RESET_ALL}")
+            brain.bili._video_meta_cache.pop(bvid, None)
+
+        print(f"\n{Fore.CYAN}[1/4] 理解视频内容 (字幕/ASR)...{Style.RESET_ALL}")
+        success, subtitle_text = await brain.understand_video_for_decision(bvid, title=title)
+        if success:
+            preview = subtitle_text[:200].replace('\n', ' ')
+            print(f"{Fore.GREEN}[OK] 视频内容获取成功: {preview}...{Style.RESET_ALL}")
+        else:
+            subtitle_text = f"[理解受限] {subtitle_text}"
+            print(f"{Fore.YELLOW}[WARN] 视频理解受限: {subtitle_text[:120]}{Style.RESET_ALL}")
+            if understand_retry < MAX_UNDERSTAND_RETRIES - 1:
+                wait = 1.5 * (understand_retry + 1)
+                log(f"[RETRY] 视频理解失败，{wait:.1f}s后重试...", "MANUAL")
+                await asyncio.sleep(wait)
+                continue
+            break
+
+        # AI交叉验证：字幕是否与标题匹配？
+        if len(subtitle_text) > 30 and title and not subtitle_text.startswith("[理解受限]"):
+            is_match, match_conf, match_reason = await _ai_cross_check_subtitle_match(
+                brain, title, subtitle_text[:2000]
+            )
+            if not is_match and match_conf < 0.4:
+                log(f"[RETRY] AI交叉验证: 字幕与标题不匹配(conf={match_conf:.2f}): {match_reason}", "MANUAL")
+                if understand_retry < MAX_UNDERSTAND_RETRIES - 1:
+                    print(f"{Fore.YELLOW}[RETRY] 字幕疑似不匹配，将重试...{Style.RESET_ALL}")
+                    await asyncio.sleep(1.5 * (understand_retry + 1))
+                    continue
+                else:
+                    log(f"[WARN] 已达最大重试次数，使用当前内容继续分析", "MANUAL")
+            else:
+                log(f"[OK] AI交叉验证通过(conf={match_conf:.2f}): {match_reason}", "MANUAL")
+        break
 
     # 2. 评论+弹幕
     print(f"\n{Fore.CYAN}[2/4] 获取评论区讨论...{Style.RESET_ALL}")
@@ -11592,7 +11847,12 @@ async def manual_video_analysis():
     danmaku_text = ""
     if aid:
         try:
-            comment_text, c_list = await brain._get_comments_context(aid)
+            comment_text, c_list = await _manual_api_retry(
+                lambda: brain._get_comments_context(aid),
+                "获取评论区", fallback=("[未读取评论]", []), max_retries=2
+            )
+            if isinstance(comment_text, tuple):
+                comment_text, c_list = comment_text
             if c_list:
                 print(f"{Fore.GREEN}[OK] 获取到 {len(c_list)} 条评论{Style.RESET_ALL}")
             else:
@@ -11601,7 +11861,10 @@ async def manual_video_analysis():
             print(f"{Fore.YELLOW}[WARN] 评论获取失败: {e}{Style.RESET_ALL}")
 
         try:
-            danmaku_list = await brain.maybe_read_danmaku(bvid)
+            danmaku_list = await _manual_api_retry(
+                lambda: brain.maybe_read_danmaku(bvid),
+                "获取弹幕", fallback=[], max_retries=2
+            )
             if danmaku_list:
                 danmaku_text = f"【弹幕（共{len(danmaku_list)}条）】:\n" + "\n".join(
                     f"  {dm.get('text','')}" for dm in danmaku_list[:15]
@@ -11610,71 +11873,83 @@ async def manual_video_analysis():
         except Exception as e:
             log(f'非预期异常: {e}', 'WARN')
 
-    # 3. AI决策分析（客观模式）
-    print(f"\n{Fore.CYAN}[3/4] AI客观决策分析中...{Style.RESET_ALL}")
-
-    # 构建不含心情/人格的客观prompt（手动分析模式：客观评价，不掷硬币）
-    objective_prompt = SYSTEM_PROMPT_BRAIN.replace("{bot_name}", get_bot_name()).replace("{memory_ups}", str(brain.get_known_up_names()))
-    # 覆盖随机性格：手动分析模式强制客观分析，不掷硬币
-    objective_prompt = objective_prompt.replace(
-        "【性格模式】掷硬币决定：- **夸夸模式**：真诚赞美。 - **吐槽模式**：犀利毒舌。",
-        "【性格模式】客观分析模式：基于内容质量公正评分，不随机切换夸夸/吐槽。评分标准：标题与内容匹配度、信息密度、观点深度、制作质量。"
-    )
-    if intent:
-        objective_prompt += f"\n\n【用户额外要求】{intent}"
-
-    context = (f"视频标题: {title}\nUP主: {up_name}\n"
-               f"【📺 视频内容字幕】: {subtitle_text}\n"
-               f"{comment_text}"
-               f"{danmaku_text}")
-
-    try:
-        resp = await brain._call_ai_with_retry(
-            model=MODEL_BRAIN,
-            messages=[
-                {"role": "system", "content": objective_prompt},
-                {"role": "user", "content": context}
-            ],
-            request_timeout=120
-        )
-        raw = resp.choices[0].message.content
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start >= 0 and end >= start:
-            json_str = raw[start:end + 1]
+    # 3. AI决策分析（客观模式）- 支持3次重试
+    MAX_AI_DECISION_RETRIES = 3
+    score = 0
+    thought = ""
+    learning_topic = ""
+    decision_mode_str = ""
+    for decision_retry in range(MAX_AI_DECISION_RETRIES):
+        if decision_retry > 0:
+            print(f"{Fore.YELLOW}[RETRY] AI决策第{decision_retry+1}/{MAX_AI_DECISION_RETRIES}次尝试...{Style.RESET_ALL}")
+            await asyncio.sleep(2.0 * decision_retry)
         else:
-            raise ValueError(f"AI返回未找到JSON: {raw[:200]}")
+            print(f"\n{Fore.CYAN}[3/4] AI客观决策分析中...{Style.RESET_ALL}")
+
+        objective_prompt = SYSTEM_PROMPT_BRAIN.replace("{bot_name}", get_bot_name()).replace("{memory_ups}", str(brain.get_known_up_names()))
+        objective_prompt = objective_prompt.replace(
+            "【性格模式】掷硬币决定：- **夸夸模式**：真诚赞美。 - **吐槽模式**：犀利毒舌。",
+            "【性格模式】客观分析模式：基于内容质量公正评分，不随机切换夸夸/吐槽。评分标准：标题与内容匹配度、信息密度、观点深度、制作质量。"
+        )
+        if intent:
+            objective_prompt += f"\n\n【用户额外要求】{intent}"
+
+        context = (f"视频标题: {title}\nUP主: {up_name}\n"
+                   f"【📺 视频内容字幕】: {subtitle_text}\n"
+                   f"{comment_text}"
+                   f"{danmaku_text}")
 
         try:
-            decision = json.loads(json_str)
-        except json.JSONDecodeError:
-            fixed = json_str.replace("'", '"')
-            fixed = re.sub(r'\bTrue\b', 'true', fixed)
-            fixed = re.sub(r'\bFalse\b', 'false', fixed)
-            fixed = re.sub(r'\bNone\b', 'null', fixed)
-            decision = json.loads(fixed)
+            resp = await brain._call_ai_with_retry(
+                model=MODEL_BRAIN,
+                messages=[
+                    {"role": "system", "content": objective_prompt},
+                    {"role": "user", "content": context}
+                ],
+                request_timeout=120
+            )
+            raw = resp.choices[0].message.content
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if start >= 0 and end >= start:
+                json_str = raw[start:end + 1]
+            else:
+                raise ValueError(f"AI返回未找到JSON: {raw[:200]}")
 
-        score = decision.get('score', 0)
-        thought = decision.get('thought', '')
-        mode = decision.get('mode', '')
-        learning_topic = decision.get('learning_topic', '')
+            try:
+                decision = json.loads(json_str)
+            except json.JSONDecodeError:
+                fixed = json_str.replace("'", '"')
+                fixed = re.sub(r'\bTrue\b', 'true', fixed)
+                fixed = re.sub(r'\bFalse\b', 'false', fixed)
+                fixed = re.sub(r'\bNone\b', 'null', fixed)
+                decision = json.loads(fixed)
 
-        print(f"\n{Fore.CYAN}+------------------------------------------------------------+{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}|  [分析结果]                                                  |{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}+------------------------------------------------------------+{Style.RESET_ALL}")
-        print(f"  AI评分: {Fore.YELLOW}{score}/10{Style.RESET_ALL}")
-        print(f"  AI想法: {thought}")
-        if mode:
-            print(f"  模式: {mode}")
-        if learning_topic:
-            print(f"  主题: {learning_topic}")
-        print(f"{Fore.CYAN}+------------------------------------------------------------+{Style.RESET_ALL}")
+            score = decision.get('score', 0)
+            thought = decision.get('thought', '')
+            decision_mode_str = decision.get('mode', '')
+            learning_topic = decision.get('learning_topic', '')
+            break
 
-    except Exception as e:
-        print(f"{Fore.RED}[ERROR] AI决策失败: {_mask_urls(str(e)[:200])}{Style.RESET_ALL}")
-        score = 0
-        thought = ""
-        learning_topic = ""
+        except Exception as e:
+            print(f"{Fore.RED}[ERROR] AI决策失败: {_mask_urls(str(e)[:200])}{Style.RESET_ALL}")
+            if decision_retry < MAX_AI_DECISION_RETRIES - 1:
+                continue
+            score = 0
+            thought = ""
+            learning_topic = ""
+
+    # ── 显示分析结果 ──
+    print(f"{Fore.CYAN}+------------------------------------------------------------+{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}|  [分析结果]                                                  |{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}+------------------------------------------------------------+{Style.RESET_ALL}")
+    print(f"  AI评分: {Fore.YELLOW}{score}/10{Style.RESET_ALL}")
+    print(f"  AI想法: {thought}")
+    if decision_mode_str:
+        print(f"  模式: {decision_mode_str}")
+    if learning_topic:
+        print(f"  主题: {learning_topic}")
+    print(f"{Fore.CYAN}+------------------------------------------------------------+{Style.RESET_ALL}")
 
     # ── 恢复心情设置 ──
     try:
@@ -13279,6 +13554,15 @@ if __name__ == "__main__":
                 print(f"{Fore.RED}[ERROR] 知识库重温异常: {e}{Style.RESET_ALL}")
                 import traceback
                 traceback.print_exc()
+        elif choice.lower() == "t":
+            try:
+                asyncio.run(show_knowledge_tutor_menu())
+            except KeyboardInterrupt:
+                print(f"\n{Fore.YELLOW}[WARN] 用户中断{Style.RESET_ALL}")
+            except Exception as e:
+                print(f"{Fore.RED}[ERROR] 知识辅导异常: {e}{Style.RESET_ALL}")
+                import traceback
+                traceback.print_exc()
         elif choice.lower() == "r":
             factory_reset_all()
         elif choice.lower() == "e":
@@ -14235,7 +14519,7 @@ B站等级: Lv.{target_level}
             log(f"兴趣列表: {', '.join(interests)}", "INTEREST")
         else:
             log("兴趣列表为空，将对所有视频感兴趣", "INTEREST")
-        log(f"当前人格: {self.persona_mgr.get_active_persona_name()} | 当前心情: {self.mood_mgr.get_mood()}", "INFO")
+        log(f"当前人格: {self.persona_mgr.get_active_persona()} | 当前心情: {self.mood_mgr.get_current()}", "INFO")
         
         print(f"\n{Fore.CYAN}知识库分类系统已初始化:{Style.RESET_ALL}")
         self.classifier.show_category_structure()
@@ -15066,7 +15350,7 @@ B站等级: Lv.{target_level}
                     mode=mode,
                     thought=thought,
                     actions=action_log,
-                    mood=self.mood_mgr.get_mood(),
+                    mood=self.mood_mgr.get_current(),
                     url=video_url
                 )
                 await self.maybe_auto_diary()

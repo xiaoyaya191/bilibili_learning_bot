@@ -1,4 +1,4 @@
-"""services/managers.py — 管理类（Persona/Mood/UserProfile/BotDiary/SelfEvolution/PrivateContext/Entertainment）
+"""services/managers.py — 管理类（Persona/Mood/UserProfile/BotDiary/SelfEvolution/PrivateContext）
 
 每个类通过 __init__(config) 接收配置，使用 core.config 中的路径常量。
 """
@@ -140,6 +140,17 @@ class PersonaManager:
         p = self.get_persona()
         return p.get("system_prompt", "")
 
+    def build_prompt_block(self) -> str:
+        """构建用于 prompt 的人格描述块"""
+        p = self.get_persona()
+        name = p.get("name", "AI小助手")
+        style = p.get("style", "热情、专业")
+        sp = p.get("system_prompt", "")
+        lines = [f"【当前人格】{name}", f"风格: {style}"]
+        if sp:
+            lines.append(sp)
+        return "\n".join(lines)
+
     def recheck(self):
         self.data = self._load()
 
@@ -208,6 +219,12 @@ class MoodManager:
         }
         return modifiers.get(mood, "语气平稳正常")
 
+    def build_prompt_block(self) -> str:
+        """构建用于 prompt 的心情描述块"""
+        mood = self.get_current()
+        modifier = self.get_style_modifier()
+        return f"【当前心情】{mood}\n语气修饰: {modifier}"
+
     def recheck(self):
         self.data = self._load()
 
@@ -252,6 +269,17 @@ class UserProfileManager:
 
     def get_all_users(self) -> list:
         return list(self.data.keys())
+
+    def build_prompt_block(self, user_id: str, user_name: str = None) -> str:
+        """构建用于 prompt 的用户档案描述块"""
+        prof = self.get_profile(user_id)
+        if not prof:
+            return f"【用户档案】{user_name or user_id}: 新用户，尚无互动记录"
+        affinity = prof.get("affinity", 0.0)
+        interactions = prof.get("interactions", 0)
+        first_seen = prof.get("first_seen", "未知")
+        lines = [f"【用户档案】{user_name or user_id}: 好感度={affinity:.2f}, 互动次数={interactions}, 首次见面={first_seen}"]
+        return "\n".join(lines)
 
     def recheck(self):
         self.data = self._load()
@@ -339,40 +367,3 @@ class SelfEvolutionManager:
 
     def recheck(self):
         self.data = self._load()
-
-
-# ===== EntertainmentModule =====
-
-class EntertainmentModule:
-    """娱乐功能 - 每日运势、段子、热梗追踪等"""
-
-    def __init__(self, config: dict = None):
-        self._cfg = config or _global_config
-        self.config = self._cfg
-        self.enabled = self.config.get("entertainment", {}).get("enabled", False)
-        self.fortune_count = 0
-        self.max_daily_fortune = self.config.get("entertainment", {}).get("max_daily_fortune", 3)
-
-    def get_daily_fortune(self) -> str:
-        fortunes = [
-            "今天运势极佳，适合学习新知识！",
-            "宜交友，可能会有有趣的评论互动~",
-            "推荐看科技类视频，会有意外收获",
-            "保持好奇心，今天会发现有趣的新UP主",
-            "适合回顾老知识，温故而知新",
-            "运程平稳，平常心刷视频就好",
-            "今天适合尝试新的视频类型，拓宽视野",
-        ]
-        return random.choice(fortunes)
-
-    def get_random_joke(self, mode: str = "normal") -> str:
-        jokes = {
-            "normal": [
-                "为什么程序员总是搞混万圣节和圣诞节？因为 Oct 31 == Dec 25",
-                "AI 和人的区别：AI 不会假装自己懂了",
-            ],
-            "geek": [
-                "SIGINT 和 SIGTERM 的区别：一个是你妈喊你吃饭，一个是你爸关你电脑",
-            ]
-        }
-        return random.choice(jokes.get(mode, jokes["normal"]))
