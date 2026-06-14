@@ -1,4 +1,4 @@
-﻿# agent_brain.py - 完整版（包含兴趣系统 + 评论互动）
+# agent_brain.py - 完整版（包含兴趣系统 + 评论互动）
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # pyright: basic
