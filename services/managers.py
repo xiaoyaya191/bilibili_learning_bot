@@ -225,6 +225,26 @@ class MoodManager:
         modifier = self.get_style_modifier()
         return f"【当前心情】{mood}\n语气修饰: {modifier}"
 
+    def shift(self, reason: str, delta: int):
+        """根据事件偏移心情值。delta 为整数，正=上扬，负=下滑。
+        心情按 ALL_MOODS 顺序从 0~12 编号，delta 会被 volatility 缩放。
+        """
+        mood = self.get_current()
+        try:
+            idx = self.ALL_MOODS.index(mood)
+        except ValueError:
+            idx = self.ALL_MOODS.index("平静")
+        vol = float(self.data.get("volatility", 1.0))
+        new_idx = max(0, min(len(self.ALL_MOODS) - 1, idx + int(round(delta * vol))))
+        new_mood = self.ALL_MOODS[new_idx]
+        if new_mood != mood:
+            self.data["current"] = new_mood
+            self.data.setdefault("history", []).append({
+                "mood": new_mood, "time": datetime.now().isoformat(),
+                "reason": reason, "delta": delta, "from": mood
+            })
+            self._save()
+
     def recheck(self):
         self.data = self._load()
 
@@ -266,6 +286,17 @@ class UserProfileManager:
         prof = self.get_profile(user_id)
         new_val = max(-1.0, min(1.0, prof.get("affinity", 0.0) + delta))
         self.update_profile(user_id, {"affinity": new_val})
+
+    def update_impression(self, user_id: str, user_name: str, impression: str) -> dict:
+        """记录对用户的印象/评价"""
+        prof = self.get_profile(user_id)
+        if not prof:
+            self.update_profile(user_id, {"name": user_name})
+            prof = self.get_profile(user_id)
+        if impression:
+            prof["impression"] = impression[:120]
+            self._save()
+        return prof
 
     def get_all_users(self) -> list:
         return list(self.data.keys())

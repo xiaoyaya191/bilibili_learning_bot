@@ -35,7 +35,7 @@ class AgentSkillRunner:
             log(f"保存Agent技能日志失败: {e}", "WARN")
 
     async def plan_and_execute(self, goal: str):
-        """规划并执行一个目标"""
+        """规划并执行一个目标（内部用，返回 raw dict）"""
         log(f"🤖 Agent开始规划: {goal}", "INFO")
         plan = await self._make_plan(goal)
         if not plan:
@@ -44,10 +44,71 @@ class AgentSkillRunner:
         result = await self._execute_plan(plan)
         self.goal_log.append({
             "goal": goal, "plan": plan, "result": result,
-            "time": datetime.now().isoformat()
+            "created_at": datetime.now().isoformat(),
+            "time": datetime.now().isoformat(),
         })
         self._save_goal_log()
         return result
+
+    async def run_goal(self, goal: str):
+        """[兼容接口] 执行一个Agent目标，返回 callers 期望的 {goal, results: [{step, result}, ...]} 格式"""
+        plan = await self._make_plan(goal)
+        if not plan:
+            return {"goal": goal, "results": [], "status": "no_plan"}
+
+        log(f"📋 Agent计划: {json.dumps(plan, ensure_ascii=False)[:200]}", "CONFIG")
+
+        results_list = []
+        # 重置搜索缓存，确保 watch 步骤能拿到本轮搜索结果
+        self._search_results = []
+
+        for step in plan:
+            action = step.get("action")
+            step_info = {}
+            step_result = {}
+
+            if action == "search":
+                query = step.get("query", goal)
+                count = step.get("result_count", AGENT_MAX_SEARCH_RESULTS)
+                step_info = {"skill": "search_bilibili_videos", "query": query, "count": count}
+                raw = await self._search_videos(query, count)
+                if isinstance(raw, list):
+                    self._search_results = raw  # 缓存供 watch 步骤使用
+                    step_result = {"ok": True, "videos": raw, "count": len(raw)}
+                else:
+                    step_result = {"ok": False, "error": raw.get("error", "搜索失败"), "videos": []}
+
+            elif action == "watch":
+                max_v = step.get("max_videos", AGENT_MAX_VIDEOS_PER_PLAN)
+                step_info = {"skill": "watch_bilibili_videos", "max_videos": max_v}
+                raw = await self._watch_videos(max_v)
+                if raw.get("error"):
+                    step_result = {"ok": False, "error": raw["error"], "watched": raw.get("videos", [])}
+                else:
+                    step_result = {"ok": True, "watched": raw.get("videos", []), "count": raw.get("watched", 0)}
+
+            elif action == "summarize":
+                step_info = {"skill": "write_memory"}
+                raw = self._summarize()
+                step_result = {"ok": True, "summary": raw.get("summary", "")}
+
+            else:
+                step_info = {"skill": action}
+                step_result = {"ok": False, "error": f"未知动作: {action}"}
+
+            results_list.append({"step": step_info, "result": step_result})
+
+        # 写入日志
+        self.goal_log.append({
+            "goal": goal,
+            "plan": plan,
+            "results": results_list,
+            "created_at": datetime.now().isoformat(),
+            "time": datetime.now().isoformat(),
+        })
+        self._save_goal_log()
+
+        return {"goal": goal, "results": results_list, "status": "completed"}
 
     async def _make_plan(self, goal: str) -> list:
         cfg = _global_config.get("agent", {})
@@ -59,13 +120,17 @@ class AgentSkillRunner:
         return plan[:max_steps]
 
     async def _execute_plan(self, plan: list) -> dict:
+        """[内部] 原始执行（供 plan_and_execute 使用）"""
         results = {}
         for step in plan:
             action = step.get("action")
             if action == "search":
                 query = step.get("query", "")
                 count = step.get("result_count", 8)
-                results["search"] = await self._search_videos(query, count)
+                raw = await self._search_videos(query, count)
+                if isinstance(raw, list):
+                    self._search_results = raw
+                results["search"] = raw
             elif action == "watch":
                 max_v = step.get("max_videos", 5)
                 results["watch"] = await self._watch_videos(max_v)
@@ -93,11 +158,16 @@ class AgentSkillRunner:
         for item in results[:max_videos]:
             bvid = item.get("bvid")
             if bvid:
-                watched.append({"bvid": bvid, "status": "watched"})
+                watched.append({"bvid": bvid, "title": item.get("title", ""), "status": "watched"})
         return {"watched": len(watched), "videos": watched}
 
     def _summarize(self):
         return {"status": "completed", "summary": "Agent任务执行完成"}
+
+    def list_runs(self, limit: int = 10):
+        """返回最近的 Agent 运行记录"""
+        log_list = self.goal_log or self._load_goal_log()
+        return log_list[-limit:] if len(log_list) > limit else log_list
 
     def get_goal_log(self):
         return self.goal_log

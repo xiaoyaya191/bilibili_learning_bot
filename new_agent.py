@@ -99,6 +99,8 @@ async def request(method: str, url: str, data=None, credential=None, **kwargs):
     api = Api(url=url, method=method)
     if credential:
         api.credential = credential
+        # [FIX] 必须设置 verify=True，Api._prepare_request 才会自动注入 csrf/csrf_token
+        api.verify = True
     if data:
         api.update_data(**data)
     return await api.request(**kwargs)
@@ -5913,11 +5915,10 @@ async def fetch_bilibili_subtitles(bvid, cookies_obj=None, title=None, ai_verify
             if not title:
                 title = v_data['data'].get('title', '')
 
-            # [FIX] player/v2 有时返回空字幕列表或 subtitle_url 为空，重试最多10次
+            # [FIX] player/v2 有时返回空字幕列表或 subtitle_url 为空，内层重试最多5次
             # [NEW] 添加 fnval=4048 确保返回字幕数据(DASH+字幕+HDR+4K+...)
-            # [NEW] 获取到列表后按优先级多轨尝试，关键词校验永不断然拒绝
             subs = []
-            for retry in range(10):
+            for retry in range(5):
                 p_params = await _wbi_sign_params({'cid': cid, 'aid': aid, 'fnver': 0, 'fnval': 4048})
                 p_res = await client.get('https://api.bilibili.com/x/player/v2', params=p_params)
                 p_data = p_res.json()
@@ -5930,18 +5931,16 @@ async def fetch_bilibili_subtitles(bvid, cookies_obj=None, title=None, ai_verify
                     # 备选路径2: data.player.subtitle.subtitles
                     subs = p_data.get('data', {}).get('player', {}).get('subtitle', {}).get('subtitles', [])
                 if subs:
-                    # [FIX] 只要有字幕轨就跳出重试循环，后续多轨逐个验证
                     break
-                if retry < 9:
-                    log(f"[RETRY] API第{retry+1}次未获取到字幕列表，1.5秒后重试...({retry+1}/10)", "SUBTITLE")
-                    await asyncio.sleep(1.5)  # B站AI字幕生成需要一定时间
+                if retry < 4:
+                    log(f"[RETRY] API第{retry+1}次未获取到字幕列表，1.5秒后重试...", "SUBTITLE")
+                    await asyncio.sleep(1.5)
             if not subs:
                 # [DEBUG] 输出 API 返回的数据结构，方便排查
                 data_keys = list(p_data.get('data', {}).keys()) if isinstance(p_data, dict) else 'N/A'
                 subtitle_raw = p_data.get('data', {}).get('subtitle', 'KEY_NOT_FOUND')
                 need_login = p_data.get('data', {}).get('need_login_subtitle', None)
                 log(f"[DEBUG] player/v2 data keys: {data_keys} | need_login_subtitle: {need_login} | subtitle: {str(subtitle_raw)[:200]}", "SUBTITLE")
-                # [KEY] B站部分视频的AI字幕需要登录才能获取
                 if need_login and not cookies_obj:
                     log("[HINT] 该视频字幕需要B站登录才能获取！请先通过菜单3录入登录Cookie", "SUBTITLE")
                 # 也尝试不带 fnval 的请求作为最后备选
@@ -5959,9 +5958,7 @@ async def fetch_bilibili_subtitles(bvid, cookies_obj=None, title=None, ai_verify
             if not subs:
                 return False, "[该视频无有效CC字幕]", video_desc, False
 
-            # ── [FIX] 多轮重试：按优先级排序所有字幕轨，逐个下载验证 ──
-            # 最佳轨(ai-zh)被拒时自动尝试备选轨(zh -> ai-en -> ...)
-            # 避免因单轨校验过严而触发昂贵的ASR下载
+            # ── 按优先级排序所有字幕轨，逐个下载验证 ──
             def _sub_priority(s):
                 lan = s.get('lan', '')
                 if lan == 'ai-zh': return 0
@@ -5971,7 +5968,6 @@ async def fetch_bilibili_subtitles(bvid, cookies_obj=None, title=None, ai_verify
                 return 50
 
             sorted_subs = sorted(subs, key=_sub_priority)
-            best_fallback_text = None  # 所有轨都失败时的兜底文本
 
             for sub_idx, sub_info in enumerate(sorted_subs):
                 sub_url = sub_info.get('subtitle_url', '')
@@ -5983,7 +5979,6 @@ async def fetch_bilibili_subtitles(bvid, cookies_obj=None, title=None, ai_verify
                     sub_url = 'https://api.bilibili.com' + sub_url
 
                 lan = sub_info.get('lan', '?')
-                # [FIX] 每个字幕轨URL下载重试3次，应对网络波动
                 clean_text = None
                 for url_retry in range(3):
                     try:
@@ -5993,7 +5988,7 @@ async def fetch_bilibili_subtitles(bvid, cookies_obj=None, title=None, ai_verify
 
                         full_text = " ".join([item.get('content', '') for item in s_data.get('body', [])])
                         clean_text = re.sub(r'\s+', ' ', full_text).strip()
-                        break  # 下载成功
+                        break
                     except httpx.HTTPStatusError as e:
                         if url_retry < 2:
                             log(f"[RETRY] 字幕轨[{lan}]HTTP{e.response.status_code}, 第{url_retry+1}次重试...", "SUBTITLE")
@@ -6015,27 +6010,20 @@ async def fetch_bilibili_subtitles(bvid, cookies_obj=None, title=None, ai_verify
                     log(f"[RETRY] 字幕轨[{lan}]内容为空，尝试下一轨...", "SUBTITLE")
                     continue
 
-                # ── 字幕内容与标题关联校验（已大幅放宽，永不断然拒绝）──
+                # ── 字幕内容与标题关联校验 ──
                 if clean_text and title:
                     overlap, mismatch = _check_subtitle_mismatch(title, clean_text)
                     if mismatch:
-                        # [FIX] 校验返回了mismatch(极罕见，如字幕极短<200字)，保留为兜底继续尝试
-                        log(f"[WARN] 字幕轨[{lan}]校验失败: {mismatch[:80]}，保留兜底继续尝试...", "SUBTITLE")
-                        if best_fallback_text is None:
-                            best_fallback_text = clean_text
+                        log(f"[WARN] 字幕轨[{lan}]校验失败: {mismatch[:80]}，尝试下一轨...", "SUBTITLE")
                         continue
-                    
-                    # ── 🤖 AI语义验证（如果提供了验证函数）──
+
                     ai_verified = False
                     if overlap is not None and overlap < 0.3:
-                        # 低置信度轨：如果启用AI验证，先让AI判断
                         if ai_verify_func is not None:
                             try:
                                 is_match, ai_conf, ai_reason = await ai_verify_func(title, clean_text, video_desc)
                                 if not is_match:
                                     log(f"[AI-VERIFY] 字幕轨[{lan}]AI判定内容不匹配: {ai_reason} (conf={ai_conf:.2f})，尝试下一轨...", "SUBTITLE")
-                                    if best_fallback_text is None:
-                                        best_fallback_text = clean_text
                                     continue
                                 else:
                                     log(f"[AI-VERIFY] 字幕轨[{lan}]AI判定匹配(conf={ai_conf:.2f}): {ai_reason}", "SUBTITLE")
@@ -6043,20 +6031,16 @@ async def fetch_bilibili_subtitles(bvid, cookies_obj=None, title=None, ai_verify
                             except Exception as ai_e:
                                 log(f"[AI-VERIFY] AI验证异常: {ai_e}，关键词法放行", "SUBTITLE")
                                 ai_verified = False
-                        
+
                         log(f"[OK] 字幕轨[{lan}]低置信度(overlap={overlap:.2f})，{'AI已验证' if ai_verified else '直接使用供AI判断'}", "SUBTITLE")
                         clean_text = f"[低置信度字幕, track={lan}, overlap={overlap:.2f}]{' [AI已验证]' if ai_verified else ''}\n{clean_text[:3000]}{'...' if len(clean_text) > 3000 else ''}"
                         return True, clean_text, video_desc, ai_verified
                     else:
-                        # 关键词验证通过(overlap >= 0.3)
-                        # 如果启用AI验证，再做一次语义验证确保不是关键词巧合
                         if ai_verify_func is not None:
                             try:
                                 is_match, ai_conf, ai_reason = await ai_verify_func(title, clean_text, video_desc)
                                 if not is_match:
                                     log(f"[AI-VERIFY] 字幕轨[{lan}]关键词通过但AI判定不匹配: {ai_reason} (conf={ai_conf:.2f})，尝试下一轨...", "SUBTITLE")
-                                    if best_fallback_text is None:
-                                        best_fallback_text = clean_text
                                     continue
                                 else:
                                     log(f"[AI-VERIFY] 字幕轨[{lan}]双验证通过(关键词+AI, conf={ai_conf:.2f})", "SUBTITLE")
@@ -6066,20 +6050,13 @@ async def fetch_bilibili_subtitles(bvid, cookies_obj=None, title=None, ai_verify
                                 ai_verified = False
                         else:
                             ai_verified = False
-                        
-                        # 验证通过
+
                         log(f"[OK] 字幕轨[{lan}]验证通过(overlap={overlap:.2f})", "SUBTITLE")
                         return True, clean_text[:3000] + ("..." if len(clean_text) > 3000 else ""), video_desc, ai_verified
                 else:
-                    # 无标题/无校验，直接返回
                     return True, clean_text[:3000] + ("..." if len(clean_text) > 3000 else ""), video_desc, False
 
-            # ── 所有轨都失败但有兜底文本 -> 极低置信度返回，绝不丢弃 ──
-            if best_fallback_text:
-                log(f"[WARN] 所有{len(sorted_subs)}轨验证均失败，返回首轨文本(极低置信度)供AI判断", "SUBTITLE")
-                best_fallback_text = f"[极低置信度字幕-所有轨校验均失败]\n{best_fallback_text[:3000]}{'...' if len(best_fallback_text) > 3000 else ''}"
-                return True, best_fallback_text, video_desc, False
-
+            # ── 所有轨均未通过验证，跳过该视频 ──
             return False, "[所有字幕轨均无有效内容]", "", False
 
         except httpx.HTTPStatusError as e:
@@ -8552,7 +8529,7 @@ class AgentBrain:
             # 🧠 更新向量索引
             if self.kb_search:
                 try:
-                    self.kb_search.update_entry(file_path)
+                    await self.kb_search.update_entry(file_path)
                 except Exception as ve:
                     log(f"向量索引更新失败: {ve}", "WARN")
 
@@ -8640,7 +8617,7 @@ class AgentBrain:
             # 🧠 更新向量索引
             if self.kb_search:
                 try:
-                    self.kb_search.update_entry(file_path)
+                    await self.kb_search.update_entry(file_path)
                 except Exception as ve:
                     log(f"向量索引更新失败: {ve}", "WARN")
 
@@ -8931,7 +8908,7 @@ class AgentBrain:
             # 所有轨校验均失败→字幕完全不可信，必须回退到ASR+视觉
             is_low_confidence = subtitle_text.startswith("[低置信度字幕") or subtitle_text.startswith("[极低置信度字幕")
             if is_low_confidence:
-                is_all_failed = "所有轨校验均失败" in subtitle_text
+                is_all_failed = "轮重试均失败" in subtitle_text or "所有轨校验均失败" in subtitle_text
                 if is_all_failed:
                     log(f"[WARN] 所有字幕轨校验均失败，字幕不可信，回退到ASR+视觉理解", "BRAIN")
                     # 不return，继续往下尝试ASR/视觉帧
@@ -8962,7 +8939,7 @@ class AgentBrain:
         if not ASR_ENABLED:
             log(f"ASR未开启，跳过语音识别", "INFO")
             if has_subtitle:
-                is_all_failed = "所有轨校验均失败" in subtitle_text
+                is_all_failed = "轮重试均失败" in subtitle_text or "所有轨校验均失败" in subtitle_text
                 if not is_all_failed:
                     return True, subtitle_text
                 log(f"[WARN] 所有轨校验失败且ASR未开启，尝试视觉帧理解兜底", "BRAIN")
@@ -8984,7 +8961,7 @@ class AgentBrain:
         if skip:
             log(f"🤖 规则预判跳过ASR: {skip_reason}", "BRAIN")
             if has_subtitle:
-                is_all_failed = "所有轨校验均失败" in subtitle_text
+                is_all_failed = "轮重试均失败" in subtitle_text or "所有轨校验均失败" in subtitle_text
                 if not is_all_failed:
                     return True, subtitle_text
                 log(f"[WARN] 规则跳过ASR但字幕所有轨校验失败，尝试视觉帧理解", "BRAIN")

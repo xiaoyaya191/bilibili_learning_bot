@@ -2,7 +2,7 @@
 import asyncio, json, os, random, re, time
 from datetime import datetime
 from colorama import Fore, Style
-from core.config import config as _global_config, COMMENT_LOG_FILE, COMMENT_MODE, COMMENT_USER_COOLDOWN_MINUTES, MODEL_BRAIN, MAX_REPLIES_PER_CHECK, PROB_COMMENT_OTHERS, log
+from core.config import config as _global_config, COMMENT_LOG_FILE, COMMENT_MODE, BEHAVIOR_COMMENT_USER_COOLDOWN_MINUTES, MODEL_BRAIN, MAX_REPLIES_PER_CHECK, PROB_COMMENT_OTHERS, log
 from services.managers import PersonaManager, MoodManager, UserProfileManager
 from services.reply_safety import ReplySafetyGuard
 

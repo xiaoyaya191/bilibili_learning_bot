@@ -52,3 +52,47 @@ class ReplySafetyGuard:
             if kw in combined:
                 return False
         return True
+
+    # ── v2.0.3 补全：与原 new_agent.py 内联版兼容的方法 ──
+
+    def find_hits(self, text: str) -> list:
+        """扫描文本，返回命中敏感词的列表。"""
+        if not self.enabled or not text:
+            return []
+        return [kw for kw in self.blocked_keywords if kw in text]
+
+    def review(self, incoming: str, outgoing: str):
+        """审查对话：检查来信和回信是否命中敏感词。
+        返回 (ok: bool, reason: str, hits: list)
+        """
+        incoming_hits = []
+        outgoing_hits = []
+
+        if self.block_on_incoming and incoming:
+            incoming_hits = self.find_hits(incoming)
+        if self.block_on_outgoing and outgoing:
+            outgoing_hits = self.find_hits(outgoing)
+
+        all_hits = list(set(incoming_hits + outgoing_hits))
+        if all_hits:
+            parts = []
+            if incoming_hits:
+                parts.append(f"来信命中: {', '.join(incoming_hits)}")
+            if outgoing_hits:
+                parts.append(f"回信命中: {', '.join(outgoing_hits)}")
+            return False, '; '.join(parts), all_hits
+        return True, '', []
+
+    def review_video_for_comment(self, title: str = '', up: str = '',
+                                  subtitle: str = '', comments: str = ''):
+        """审查视频内容是否适合评论（防涉政）。
+        返回 (allowed: bool, reason: str, hits: list)
+        """
+        if not self.block_political_video_comments:
+            return True, '', []
+
+        combined = f"{title} {up} {subtitle} {comments}"
+        hits = self.find_hits(combined)
+        if hits:
+            return False, f"视频内容命中敏感词: {', '.join(hits)}", hits
+        return True, '', []
