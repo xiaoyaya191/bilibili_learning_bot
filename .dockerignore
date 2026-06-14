@@ -1,0 +1,27 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# 本地运行时数据（挂载卷方式注入）
+Data/
+KnowledgeBase/
+highlights/
+
+# 临时文件
+*.zip
+*.bak
+bot_memory.json
+bot_journal.md
+
+# IDE
+.idea/
+.vscode/

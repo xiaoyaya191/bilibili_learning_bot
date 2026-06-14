@@ -49,6 +49,29 @@ pip install -r requirements.txt
 python web_panel.py
 ```
 
+### 🐳 Docker 部署
+
+```bash
+# 1. 克隆项目
+git clone https://github.com/xiaoyaya191/bilibili_learning_bot.git
+cd bilibili_learning_bot
+
+# 2. 创建数据目录（挂载用）
+mkdir -p Data KnowledgeBase highlights
+
+# 3. 配置 API Key（编辑 Data/config.json）
+#    或用环境变量方式（更安全）：
+
+# 4. 构建并启动
+docker compose up -d
+```
+
+> ⚠️ **首次启动需扫码登录**：打开 `http://your-server-ip:8080`，在 Web 面板中点击"B站登录"扫码。
+>
+> 推荐将 API Key 写入 `docker-compose.yml` 的 `environment` 字段，避免每次重建容器重复配置。
+
+---
+
 > 💡 更多配置说明（人格设置、双账号、干运行模式等）请往下看完整文档，或访问 [bot.bxya.top](https://bot.bxya.top)。
 
 ---
