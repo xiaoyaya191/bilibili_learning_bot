@@ -1,4 +1,4 @@
-﻿# agent_brain.py - 完整版（包含兴趣系统 + 评论互动）
+# agent_brain.py - 完整版（包含兴趣系统 + 评论互动）
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # pyright: basic
@@ -8,6 +8,7 @@ import random
 import os
 import re
 import sys
+import atexit
 import time
 import shutil
 import qrcode
@@ -42,6 +43,7 @@ def _disclaimer_confirm():
     return True
 
 # [PSYCHO] 智能分析引擎
+from json_utils import get_backup_dir
 from psycho_engine import (
     PsychoProfile, RecommendationEngine,
     get_mode_emoji, get_mode_label,
@@ -57,12 +59,14 @@ try:
     from xingye_bot.settings import load_settings as load_modular_settings
     from xingye_bot.state import BotState
     from xingye_bot.video_modes import VideoUnderstanding, normalize_mode
+    from xingye_bot.kb_search import KBSearchEngine
 except ImportError:
     ModelClient = None
     load_modular_settings = None
     BotState = None
     VideoUnderstanding = None
     normalize_mode = None
+    KBSearchEngine = None
 
 # --- 初始化彩色日志 ---
 colorama.init(autoreset=True)
@@ -105,6 +109,59 @@ def _mask_urls(text: str) -> str:
         return text
     return _URL_MASK_RE.sub(r'\1***\3', text)
 
+# ── 单实例锁：防止多个 bot 进程同时运行 ──
+_BOT_LOCK_FILE = None  # 延迟初始化，等 DATA_DIR 定义后再设
+_bot_lock_acquired = False
+
+def _acquire_bot_lock() -> bool:
+    """获取 bot 单实例锁。成功返回 True，失败（已有实例运行）返回 False。"""
+    global _BOT_LOCK_FILE, _bot_lock_acquired
+    if _BOT_LOCK_FILE is None:
+        _BOT_LOCK_FILE = os.path.join(DATA_DIR, "bot.lock")
+    
+    # 确  保 Data 目录存在
+    os.makedirs(DATA_DIR, exist_ok=True)
+    
+    if os.path.exists(_BOT_LOCK_FILE):
+        try:
+            with open(_BOT_LOCK_FILE, 'r') as f:
+                old_pid = int(f.read().strip())
+            # 检查旧进程是否还活着（发 signal 0）
+            os.kill(old_pid, 0)
+            # 旧进程仍在运行
+            print(f"{Fore.RED}[LOCK] ❌ 已有 bot 实例正在运行 (PID: {old_pid})！"
+                  f"\n[LOCK] 请先停止旧实例或删除锁文件：{_BOT_LOCK_FILE}{Style.RESET_ALL}")
+            return False
+        except (ValueError, ProcessLookupError, OSError):
+            # 旧进程已不存在或 PID 无效，清理过期锁文件
+            print(f"{Fore.YELLOW}[LOCK] ⚠ 清理过期锁文件 (旧进程已不存在){Style.RESET_ALL}")
+            try:
+                os.remove(_BOT_LOCK_FILE)
+            except OSError:
+                pass
+    
+    # 写入当前进程 PID
+    try:
+        with open(_BOT_LOCK_FILE, 'w') as f:
+            f.write(str(os.getpid()))
+        _bot_lock_acquired = True
+        # 注册退出时清理
+        atexit.register(_release_bot_lock)
+        return True
+    except OSError as e:
+        print(f"{Fore.RED}[LOCK] ❌ 无法创建锁文件: {e}{Style.RESET_ALL}")
+        return False
+
+def _release_bot_lock():
+    """释放 bot 单实例锁（删除锁文件）。"""
+    global _bot_lock_acquired, _BOT_LOCK_FILE
+    if _bot_lock_acquired and _BOT_LOCK_FILE and os.path.exists(_BOT_LOCK_FILE):
+        try:
+            os.remove(_BOT_LOCK_FILE)
+            _bot_lock_acquired = False
+        except OSError:
+            pass
+
 # ==============================================================================
 # 🎛️ 核心配置
 # ==============================================================================
@@ -112,8 +169,9 @@ def _mask_urls(text: str) -> str:
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "Data")
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
-# 一键备份目录：C盘固定路径，与项目文件分离
-BACKUP_DIR = r"C:\bilibili_claw_backup"
+BOT_LOCK_FILE = os.path.join(DATA_DIR, "bot.lock")  # 单实例锁文件
+# 一键备份目录：平台自适应路径，与项目文件分离
+BACKUP_DIR = get_backup_dir()
 BACKUP_FILE = os.path.join(BACKUP_DIR, "bilibili_claw_export.json")
 COOKIE_FILE = os.path.join(DATA_DIR, "bilibili_cookies.json")
 INTERESTS_FILE = os.path.join(DATA_DIR, "interests.json")  # 兴趣配置文件
@@ -144,7 +202,9 @@ DEFAULT_CONFIG = {
     "interaction": {
         "coin_threshold": 8.0,
         "fav_threshold": 8.5,
-        "interest_threshold": 4.5,
+        "interest_threshold": 6.5,
+        "learn_min_score": 6.0,  # 学习归档最低分数门槛，低于此分不归档
+        "learn_min_duration_seconds": 60,  # 学习归档最低视频时长(秒)，短于此不归档
         "max_coins_daily": 2,
         "max_energy": 100,
         "prob_reply_trigger": 0.15,
@@ -195,7 +255,7 @@ DEFAULT_CONFIG = {
         "frame_count": 8
     },
     "asr": {
-        "enabled": True,
+        "enabled": False,
         "backend": "funasr",
         "whisper_model": "base",
         "language": "zh",
@@ -344,8 +404,8 @@ def load_config():
                         if sub_key not in config[key]:
                             config[key][sub_key] = DEFAULT_CONFIG[key][sub_key]
             return config
-        except (OSError, json.JSONDecodeError):
-            pass
+        except (OSError, json.JSONDecodeError) as e:
+            log(f'加载JSON文件失败: {e}', 'DEBUG')
     # 如果配置文件不存在或损坏，使用默认配置
     save_config(DEFAULT_CONFIG)
     return DEFAULT_CONFIG.copy()
@@ -383,8 +443,9 @@ def mask_secret(value):
 
 def configure_openai_client():
     openai.api_key = UNIFIED_API_KEY
-    # 确保 base_url 以 / 结尾，避免 openai 库拼接路径错误
-    url = UNIFIED_BASE_URL.rstrip("/") + "/"
+    # openai 0.28.1 库内部 class_url 已带前导 "/"（如 "/chat/completions"），
+    # api_base 不要带尾部 "/"，否则拼接出双斜杠导致 Invalid URL
+    url = UNIFIED_BASE_URL.rstrip("/")
     openai.api_base = url
     openai.base_url = url
 
@@ -430,6 +491,8 @@ configure_openai_client()
 COIN_THRESHOLD = config["interaction"]["coin_threshold"]
 FAV_THRESHOLD = config["interaction"]["fav_threshold"]
 INTEREST_THRESHOLD = config["interaction"]["interest_threshold"]
+LEARN_MIN_SCORE = config["interaction"].get("learn_min_score", 6.0)  # 学习归档最低分数
+LEARN_MIN_DURATION_SECONDS = config["interaction"].get("learn_min_duration_seconds", 60)  # 最低视频时长
 MAX_COINS_DAILY = config["interaction"]["max_coins_daily"]
 MAX_ENERGY = config["interaction"]["max_energy"]
 PROB_REPLY_TRIGGER = config["interaction"]["prob_reply_trigger"]
@@ -441,6 +504,11 @@ COMMENT_CHECK_ENABLED = config["interaction"].get("comment_check_enabled", True)
 COMMENT_CHECK_INTERVAL = config["interaction"]["comment_check_interval"]
 MAX_REPLIES_PER_CHECK = config["interaction"]["max_replies_per_check"]
 RANDOM_ENABLED = config["interaction"].get("random_enabled", True)
+# [AI] AI字幕内容验证开关：True=语义验证字幕是否与标题匹配，False=仅关键词判断
+AI_SUBTITLE_VERIFY_ENABLED = config.get("ai_subtitle_verify", {}).get("enabled", True)
+# [AI] 知识库定期审查：每处理N个视频后随机抽查知识库条目
+KNOWLEDGE_REVIEW_INTERVAL = config.get("ai_subtitle_verify", {}).get("knowledge_review_interval", 10)
+KNOWLEDGE_REVIEW_SAMPLE_SIZE = config.get("ai_subtitle_verify", {}).get("knowledge_review_sample_size", 3)
 
 ENERGY_RECOVERY_MIN = config["energy"]["energy_recovery_min"]
 ENERGY_RECOVERY_MAX = config["energy"]["energy_recovery_max"]
@@ -467,7 +535,7 @@ SMART_FRAME_ENABLED = config.get("vision", {}).get("smart_frame_enabled", True)
 SMART_FRAME_MIN = config.get("vision", {}).get("smart_frame_min", 10)
 SMART_FRAME_MAX = config.get("vision", {}).get("smart_frame_max", 60)
 # [ASR] 语音识别（ASR）配置
-ASR_ENABLED = config.get("asr", {}).get("enabled", True)
+ASR_ENABLED = config.get("asr", {}).get("enabled", False)
 ASR_BACKEND = config.get("asr", {}).get("backend", "funasr")  # funasr / whisper
 ASR_WHISPER_MODEL = config.get("asr", {}).get("whisper_model", "base")  # tiny/base/small/medium/large
 ASR_LANGUAGE = config.get("asr", {}).get("language", "zh")
@@ -761,8 +829,8 @@ class InterestManager:
                 with open(self.interests_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     return data.get("interests", [])
-            except (OSError, json.JSONDecodeError):
-                pass
+            except (OSError, json.JSONDecodeError) as e:
+                log(f'加载JSON文件失败: {e}', 'DEBUG')
         return []
     
     def _save_interests(self):
@@ -852,8 +920,8 @@ class ReplySafetyGuard:
             for kw in _EXTRA_KW:
                 if kw not in self.keywords:
                     self.keywords.append(kw)
-        except ImportError:
-            pass
+        except ImportError as e:
+            log(f'可选依赖未安装: {e}', 'DEBUG')
 
     def find_hits(self, text):
         if not self.enabled or not text:
@@ -1344,7 +1412,7 @@ class AgentSkillRunner:
 }}
 """
         try:
-            resp = openai.chat.completions.create(
+            resp = openai.ChatCompletion.create(
                 model=MODEL_BRAIN,
                 messages=[
                     {"role": "system", "content": "你是谨慎的工具规划器，只输出严格JSON。"},
@@ -1452,7 +1520,7 @@ class AgentSkillRunner:
             if self.brain:
                 ok, content = await self.brain.understand_video_for_decision(bvid, title=title)
             else:
-                ok, content, _desc = await fetch_bilibili_subtitles(bvid, None)
+                ok, content, _desc, _aiv = await fetch_bilibili_subtitles(bvid, None)
             summary = str(content)[:3000] if (content and ok) else (f"[视频理解失败] {str(content)[:200]}" if content else "")
             watched.append({
                 "bvid": bvid,
@@ -1489,7 +1557,7 @@ class AgentSkillRunner:
 
 仅回答 YES 或 NO：看了这些视频后，是否已足够了解该目标的核心内容？"""
         try:
-            resp = openai.chat.completions.create(
+            resp = openai.ChatCompletion.create(
                 model=MODEL_BRAIN,
                 messages=[{"role": "system", "content": "你是严谨的判断器，只回答YES或NO。"},
                           {"role": "user", "content": prompt}],
@@ -1534,12 +1602,21 @@ class CommentInteractionManager:
         self.user_profile_mgr = UserProfileManager()
         self.safety_guard = ReplySafetyGuard()
         self.video_understander = None
+        self.kb_search = None  # 懒初始化，kb_search.py 向量检索引擎
         if VideoUnderstanding and ModelClient and BotState and load_modular_settings:
             try:
                 modular_settings = load_modular_settings()
                 self.video_understander = VideoUnderstanding(modular_settings, ModelClient(modular_settings, BotState()))
             except Exception as e:
                 log(f"视频理解模块初始化失败，将退回字幕模式: {e}", "WARN")
+
+        # 懒初始化向量检索引擎
+        if KBSearchEngine and ModelClient and load_modular_settings and BotState:
+            try:
+                modular_settings = load_modular_settings()
+                self.kb_search = KBSearchEngine(ModelClient(modular_settings, BotState()))
+            except Exception as e:
+                log(f"向量检索引擎初始化失败: {e}", "WARN")
     
     def _load_comment_log(self):
         """加载评论日志"""
@@ -1563,8 +1640,8 @@ class CommentInteractionManager:
             self.comment_log["processed_comments"] = list(self.processed_comments)
             with open(COMMENT_LOG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(self.comment_log, f, ensure_ascii=False, indent=2)
-        except OSError:
-            pass
+        except OSError as e:
+            log(f'文件操作失败: {e}', 'DEBUG')
     
     def _is_comment_processed(self, comment_id):
         """检查评论是否已处理"""
@@ -1709,6 +1786,9 @@ class CommentInteractionManager:
                                         log(f"[WARN] 视频{aid}评论触发-799，全局冷却已启动，静默重试...", "WARN")
                                         _logged_hit = True
                                     await asyncio.sleep(wait)
+                                elif '12002' in err_msg:
+                                    # 评论区已关闭，正常现象，静默跳过
+                                    break
                                 else:
                                     log(f"跳过视频 {aid} 的评论检查: {e}", "WARN")
                                     break
@@ -1870,7 +1950,7 @@ class CommentInteractionManager:
                     只返回回复内容，不要有其他文字。
                     """
                     
-                    resp = openai.chat.completions.create(
+                    resp = openai.ChatCompletion.create(
                         model=MODEL_BRAIN,
                         messages=[
                             {"role": "system", "content": "你是一个友好的B站用户，正在回复别人的评论。"},
@@ -2067,7 +2147,7 @@ class PrivateMessageManager:
 9. 如果需要回复，结尾必须带上"{config.get('behavior', {}).get('ai_marker', '（内容由AI生成并由AI回复）')}"。
 10. 只返回回复内容，不要解释。
 """
-        resp = openai.chat.completions.create(
+        resp = openai.ChatCompletion.create(
             model=MODEL_BRAIN,
             messages=[
                 {"role": "system", "content": (
@@ -2119,7 +2199,7 @@ class PrivateMessageManager:
 {context_block}
 """
         try:
-            resp = openai.chat.completions.create(
+            resp = openai.ChatCompletion.create(
                 model=MODEL_BRAIN,
                 messages=[
                     {"role": "system", "content": "你是工具调度器，只返回严格JSON。"},
@@ -2326,8 +2406,8 @@ class PersonaManager:
                 if "active_persona" not in data:
                     data["active_persona"] = default["active_persona"]
                 return data
-            except (OSError, json.JSONDecodeError):
-                pass
+            except (OSError, json.JSONDecodeError) as e:
+                log(f'加载JSON文件失败: {e}', 'DEBUG')
         data = self._default_data()
         self._save(data)
         return data
@@ -2411,8 +2491,8 @@ class MoodManager:
                     if k not in data:
                         data[k] = v
                 return data
-            except (OSError, json.JSONDecodeError):
-                pass
+            except (OSError, json.JSONDecodeError) as e:
+                log(f'加载JSON文件失败: {e}', 'DEBUG')
         self._save(default)
         return default
 
@@ -2445,8 +2525,8 @@ class MoodManager:
                 })
                 self.state["history"] = self.state["history"][-30:]
                 self._save()
-        except Exception:
-            pass
+        except Exception as e:
+            log(f'非预期异常: {e}', 'WARN')
 
     def get_mood(self):
         """获取当前心情，优先自定义 > 随机 > 默认"""
@@ -2592,8 +2672,8 @@ class BotDiaryManager:
                 if "entries" not in data:
                     data["entries"] = []
                 return data
-            except (OSError, json.JSONDecodeError):
-                pass
+            except (OSError, json.JSONDecodeError) as e:
+                log(f'加载JSON文件失败: {e}', 'DEBUG')
         self._save(default)
         return default
 
@@ -2669,8 +2749,8 @@ class BotDiaryManager:
                         recent_count = sum(1 for _, inf in followed.items() if inf.get("followed_at", "?")[:10] >= cutoff)
                         if recent_count > 0:
                             ups_context += f"\n（最近7天内新关注: {recent_count}位）"
-            except Exception:
-                pass
+            except Exception as e:
+                log(f'非预期异常: {e}', 'WARN')
 
         prompt = (
             "请以bilibili_learning_bot第一人称写一篇简短日记，像 my-neuro 那类 AI 角色的连续性日志：记录记忆、情绪、目标和边界，不要鸡汤，不要装人类。\n"
@@ -2683,7 +2763,7 @@ class BotDiaryManager:
             f"关注的UP主:\n{ups_context}\n"
             f"最近事件:\n{events_text}"
         )
-        resp = openai.chat.completions.create(
+        resp = openai.ChatCompletion.create(
             model=MODEL_BRAIN,
             messages=[
                 {"role": "system", "content": "你是B站机器人bilibili_learning_bot的日记记录员，文字自然、克制、具体。"},
@@ -2767,7 +2847,7 @@ class SelfEvolutionManager:
             f"当前人格:\n{persona_block}\n"
             f"近期数据:\n{json.dumps(payload, ensure_ascii=False, indent=2)}"
         )
-        resp = openai.chat.completions.create(
+        resp = openai.ChatCompletion.create(
             model=MODEL_BRAIN,
             messages=[
                 {"role": "system", "content": "你是AI行为复盘器，只提出温和、可控、低风险的人格调整建议。"},
@@ -2856,6 +2936,7 @@ def show_main_menu():
     {Fore.LIGHTCYAN_EX}V.{Style.RESET_ALL} 📹 手动视频分析 (输入链接/标题/UP主，AI客观解析)
     {Fore.LIGHTMAGENTA_EX}K.{Style.RESET_ALL} 🔄 知识库重温 (选择已学视频，重新看/优化)
     {Fore.RED}R.{Style.RESET_ALL} 🔄 恢复出厂设置 (清除所有配置/登录/数据)
+    {Fore.YELLOW}S.{Style.RESET_ALL} 🛡️ 关键词审查开关 (当前: {'开启' if REPLY_SAFETY_ENABLED else '关闭'})
     {Fore.GREEN}E.{Style.RESET_ALL} 📤 导出配置 (备份所有设置到一个文件)
     {Fore.BLUE}I.{Style.RESET_ALL} 📥 导入配置 (从备份文件一键恢复所有设置)
     {Fore.LIGHTYELLOW_EX}O.{Style.RESET_ALL} 📂 一键整理知识库 (非3层文件→AI自动归类到3层)
@@ -2877,6 +2958,7 @@ def show_main_menu():
     • 会话限制: {Fore.GREEN + ("不限" if SESSION_MAX_VIDEOS <= 0 and SESSION_MAX_DURATION_MINUTES <= 0 else (f"{SESSION_MAX_VIDEOS}个视频" if SESSION_MAX_VIDEOS > 0 else "") + (" / " if SESSION_MAX_VIDEOS > 0 and SESSION_MAX_DURATION_MINUTES > 0 else "") + (f"{SESSION_MAX_DURATION_MINUTES}分钟" if SESSION_MAX_DURATION_MINUTES > 0 else "")) + Style.RESET_ALL}
     • UP主关注: {Fore.GREEN + "[*] 已开启" + Style.RESET_ALL if UP_FOLLOW_ENABLED else Fore.YELLOW + "💤 未开启" + Style.RESET_ALL}
     • 弹幕互动: {Fore.GREEN + "[MSG] 已开启" + Style.RESET_ALL if DANMAKU_ENABLED else Fore.YELLOW + "💤 未开启" + Style.RESET_ALL}
+    • 关键词审查: {Fore.GREEN + "🛡 已启用" + Style.RESET_ALL if REPLY_SAFETY_ENABLED else Fore.YELLOW + "⚠ 已关闭" + Style.RESET_ALL}
     • 备用API: {Fore.GREEN + "[REFRESH] " + FALLBACK_PROVIDER_NAME + "(" + (FALLBACK_PROVIDER_MODELS.get('chat','') or '?') + "/" + (FALLBACK_PROVIDER_MODELS.get('vision','') or '?') + ")" + Style.RESET_ALL if FALLBACK_PROVIDER_ENABLED else Fore.YELLOW + "💤 未启用" + Style.RESET_ALL}
     • 随机数限制: {Fore.GREEN + "🎲 已开启 (随机检定)" + Style.RESET_ALL if RANDOM_ENABLED else Fore.YELLOW + "🔒 已关闭 (纯分数)" + Style.RESET_ALL}
     • AI心情: {Fore.GREEN + ("🤖 随机心情" if MOOD_RANDOM_ENABLED else ("✏️ 自定义: " + MOOD_CUSTOM_VALUE if MOOD_CUSTOM_ENABLED and MOOD_CUSTOM_VALUE else "⚙️ 默认")) + Style.RESET_ALL}
@@ -2964,8 +3046,8 @@ def show_mood_menu():
             if os.path.exists(MOOD_STATE_FILE):
                 try:
                     os.remove(MOOD_STATE_FILE)
-                except Exception:
-                    pass
+                except Exception as e:
+                    log(f'非预期异常: {e}', 'WARN')
             print(f"{Fore.GREEN}已重置为默认心情模式{Style.RESET_ALL}")
         else:
             print(f"{Fore.RED}无效选项{Style.RESET_ALL}")
@@ -3541,8 +3623,8 @@ def _configure_asr_settings():
                 if 60 <= v <= 600:
                     asr_cfg["funasr_batch_size_s"] = v
                     ASR_FUNASR_BATCH_SIZE_S = v
-            except ValueError:
-                pass
+            except ValueError as e:
+                log(f'值错误: {e}', 'DEBUG')
 
         raw_hw = input(f"{Fore.YELLOW}热词（逗号分隔，如: 魔搭,AI,算法）: {Style.RESET_ALL}").strip()
         if raw_hw:
@@ -3584,8 +3666,8 @@ def _configure_asr_settings():
             if 60 <= v <= 14400:
                 asr_cfg["max_audio_duration"] = v
                 ASR_MAX_AUDIO_DURATION = v
-        except ValueError:
-            pass
+        except ValueError as e:
+            log(f'值错误: {e}', 'DEBUG')
 
     raw_conf = input(f"{Fore.YELLOW}最低置信度 (0.0-1.0, 回车保持): {Style.RESET_ALL}").strip()
     if raw_conf:
@@ -3594,8 +3676,8 @@ def _configure_asr_settings():
             if 0 <= v <= 1:
                 asr_cfg["min_confidence"] = v
                 ASR_MIN_CONFIDENCE = v
-        except ValueError:
-            pass
+        except ValueError as e:
+            log(f'值错误: {e}', 'DEBUG')
 
     toggle_music = input(f"{Fore.YELLOW}切换跳过音乐类视频？(y/N): {Style.RESET_ALL}").strip().lower()
     if toggle_music == "y":
@@ -3740,8 +3822,8 @@ def configure_interaction_params():
         if 0 <= new_value <= 10:
             config["interaction"]["coin_threshold"] = new_value
             print(f"{Fore.GREEN}[OK] 投币阈值已更新为 {new_value}!{Style.RESET_ALL}")
-    except (ValueError, TypeError):
-        pass
+    except (ValueError, TypeError) as e:
+        log(f'类型转换失败: {e}', 'DEBUG')
 
     print(f"\n当前收藏阈值: {FAV_THRESHOLD}")
     try:
@@ -3749,8 +3831,35 @@ def configure_interaction_params():
         if 0 <= new_value <= 10:
             config["interaction"]["fav_threshold"] = new_value
             print(f"{Fore.GREEN}[OK] 收藏阈值已更新为 {new_value}!{Style.RESET_ALL}")
-    except (ValueError, TypeError):
-        pass
+    except (ValueError, TypeError) as e:
+        log(f'类型转换失败: {e}', 'DEBUG')
+    
+    print(f"\n当前兴趣阈值 (低于此分跳过): {INTEREST_THRESHOLD}")
+    try:
+        new_value = float(input(f"{Fore.YELLOW}请输入新的兴趣阈值 (0-10, 直接回车保持原样): {Style.RESET_ALL}").strip())
+        if 0 <= new_value <= 10:
+            config["interaction"]["interest_threshold"] = new_value
+            print(f"{Fore.GREEN}[OK] 兴趣阈值已更新为 {new_value}!{Style.RESET_ALL}")
+    except (ValueError, TypeError) as e:
+        log(f'类型转换失败: {e}', 'DEBUG')
+    
+    print(f"\n当前学习归档最低分 (低于此分不归档): {LEARN_MIN_SCORE}")
+    try:
+        new_value = float(input(f"{Fore.YELLOW}请输入学习归档最低分 (0-10, 直接回车保持原样): {Style.RESET_ALL}").strip())
+        if 0 <= new_value <= 10:
+            config["interaction"]["learn_min_score"] = new_value
+            print(f"{Fore.GREEN}[OK] 学习归档最低分已更新为 {new_value}!{Style.RESET_ALL}")
+    except (ValueError, TypeError) as e:
+        log(f'类型转换失败: {e}', 'DEBUG')
+    
+    print(f"\n当前学习归档最低视频时长: {LEARN_MIN_DURATION_SECONDS}秒")
+    try:
+        new_value = int(input(f"{Fore.YELLOW}请输入最低时长(秒, 直接回车保持原样): {Style.RESET_ALL}").strip())
+        if new_value >= 0:
+            config["interaction"]["learn_min_duration_seconds"] = new_value
+            print(f"{Fore.GREEN}[OK] 最低视频时长已更新为 {new_value}秒!{Style.RESET_ALL}")
+    except (ValueError, TypeError) as e:
+        log(f'类型转换失败: {e}', 'DEBUG')
     
     print(f"\n当前评论他人评论概率: {PROB_COMMENT_OTHERS*100}%")
     try:
@@ -3759,8 +3868,8 @@ def configure_interaction_params():
             config["interaction"]["prob_comment_others"] = new_value
             PROB_COMMENT_OTHERS = new_value
             print(f"{Fore.GREEN}[OK] 评论概率已更新为 {new_value*100}%!{Style.RESET_ALL}")
-    except (ValueError, TypeError):
-        pass
+    except (ValueError, TypeError) as e:
+        log(f'类型转换失败: {e}', 'DEBUG')
     
     print(f"\n当前检查评论间隔: {COMMENT_CHECK_INTERVAL}秒")
     try:
@@ -3769,8 +3878,8 @@ def configure_interaction_params():
             config["interaction"]["comment_check_interval"] = new_value
             COMMENT_CHECK_INTERVAL = new_value
             print(f"{Fore.GREEN}[OK] 检查间隔已更新为 {new_value}秒!{Style.RESET_ALL}")
-    except (ValueError, TypeError):
-        pass
+    except (ValueError, TypeError) as e:
+        log(f'类型转换失败: {e}', 'DEBUG')
 
     print(f"\n当前评论检查总开关: {'[OK] 启用' if COMMENT_CHECK_ENABLED else '⏸️ 关闭'}")
     toggle = input(f"{Fore.YELLOW}切换？(y=切换, 直接回车保持): {Style.RESET_ALL}").strip().lower()
@@ -3807,8 +3916,8 @@ def configure_energy_params():
             config["interaction"]["max_energy"] = new_value
             MAX_ENERGY = new_value
             print(f"{Fore.GREEN}[OK] 精力最大值已更新为 {new_value}!{Style.RESET_ALL}")
-    except (ValueError, TypeError):
-        pass
+    except (ValueError, TypeError) as e:
+        log(f'类型转换失败: {e}', 'DEBUG')
     
     # 自动保存
     save_config(config)
@@ -3828,7 +3937,9 @@ def show_current_config():
     print(f"\n{Fore.YELLOW}[TARGET] 互动参数:{Style.RESET_ALL}")
     print(f"  • 投币阈值: {COIN_THRESHOLD}")
     print(f"  • 收藏阈值: {FAV_THRESHOLD}")
-    print(f"  • 兴趣阈值: {INTEREST_THRESHOLD}")
+    print(f"  • 兴趣阈值: {INTEREST_THRESHOLD}（低于此分不互动）")
+    print(f"  • 学习归档最低分: {LEARN_MIN_SCORE}（低于此分不归档）")
+    print(f"  • 学习归档最低时长: {LEARN_MIN_DURATION_SECONDS}秒")
     print(f"  • 每日最大投币: {MAX_COINS_DAILY}")
     print(f"  • 回复触发概率: {PROB_REPLY_TRIGGER*100}%")
     print(f"  • 评论他人概率: {PROB_COMMENT_OTHERS*100}%")
@@ -4751,7 +4862,8 @@ def show_entertainment_menu():
                         ENTERTAINMENT_PROB_FUN_ACTION = val
                         save_config(config)
                         print(f"{Fore.GREEN}[OK] 已更新{Style.RESET_ALL}")
-                except (ValueError, TypeError): pass
+                except (ValueError, TypeError) as e:
+                    log(f'类型转换失败: {e}', 'DEBUG')
             elif sub == "2":
                 print("  normal / spicy / chaos")
                 raw = input("模式: ").strip()
@@ -4769,7 +4881,8 @@ def show_entertainment_menu():
                         ENTERTAINMENT_MAX_DAILY_FORTUNE = val
                         save_config(config)
                         print(f"{Fore.GREEN}[OK] 已更新{Style.RESET_ALL}")
-                except (ValueError, TypeError): pass
+                except (ValueError, TypeError) as e:
+                    log(f'类型转换失败: {e}', 'DEBUG')
         
         elif choice == "8":
             if ENTERTAINMENT_AUTO_FORTUNE:
@@ -5074,10 +5187,11 @@ def show_knowledge_base_menu():
     {Fore.YELLOW}4.{Style.RESET_ALL} 🗑️  清理重复内容
     {Fore.BLUE}5.{Style.RESET_ALL} [UP] 查看学习记录
     {Fore.MAGENTA}6.{Style.RESET_ALL} 🤖 AI整理分类 (统一3层结构)
+    {Fore.LIGHTBLUE_EX}7.{Style.RESET_ALL} 🧠 重建向量索引 (语义搜索)
     {Fore.RED}0.{Style.RESET_ALL} ↩️  返回主菜单
         """)
 
-        choice = input(f"{Fore.CYAN}请输入选项 (0-6): {Style.RESET_ALL}").strip()
+        choice = input(f"{Fore.CYAN}请输入选项 (0-7): {Style.RESET_ALL}").strip()
 
         if choice == "0":
             break
@@ -5104,23 +5218,72 @@ def show_knowledge_base_menu():
                     print(f"{Fore.RED}[ERROR] AI整理失败: {e}{Style.RESET_ALL}")
             else:
                 print(f"{Fore.YELLOW}已取消{Style.RESET_ALL}")
+        elif choice == "7":
+            print(f"\n{Fore.CYAN}🧠 正在重建知识库向量索引...{Style.RESET_ALL}")
+            try:
+                if KBSearchEngine:
+                    from xingye_bot.settings import load_settings as _ls
+                    from xingye_bot.state import BotState as _bs
+                    _s = _ls()
+                    _engine = KBSearchEngine(ModelClient(_s, _bs()))
+                    count = _engine.build_index()
+                    stats = _engine.stats()
+                    print(f"{Fore.GREEN}[OK] 索引构建完成: {stats['vectorized']}/{stats['total_entries']} 条已向量化{Style.RESET_ALL}")
+                else:
+                    print(f"{Fore.YELLOW}[WARN] 向量引擎不可用（请先配置 API Key）{Style.RESET_ALL}")
+            except Exception as e:
+                print(f"{Fore.RED}[ERROR] 构建向量索引失败: {e}{Style.RESET_ALL}")
         else:
             print(f"{Fore.RED}[ERROR] 无效选项，请重新选择！{Style.RESET_ALL}")
 
 def count_knowledge_categories():
-    """统计知识库分类数量（从 file_index 多级路径统计，与 show_category_structure 一致）"""
+    """统计知识库分类数量（从 file_index 多级路径统计，自动清理失效条目）"""
     if not os.path.exists(KNOWLEDGE_BASE_DIR):
         return "0"
     try:
-        metadata_path = os.path.join(KNOWLEDGE_BASE_DIR, "knowledge_metadata.json")
-        if os.path.exists(metadata_path):
-            with open(metadata_path, 'r', encoding='utf-8') as f:
+        # [FIX] 使用正确路径（metadata 在 BASE_DIR 下，不在 KnowledgeBase 内）
+        if os.path.exists(KB_METADATA_FILE):
+            with open(KB_METADATA_FILE, 'r', encoding='utf-8') as f:
                 meta = json.load(f)
             file_index = meta.get("file_index", {})
-            # 统计有文件的所有分类（包括子分类）
+            
+            # [NEW] 清理 file_index 中文件已不存在于磁盘的条目
+            cleaned = False
+            new_file_index = {}
+            for fpath, entries in file_index.items():
+                if not entries:
+                    cleaned = True
+                    continue
+                valid_entries = []
+                for entry in entries:
+                    bvid = entry.get("bvid", "")
+                    cat_dir = os.path.join(KNOWLEDGE_BASE_DIR, fpath)
+                    bvid_prefix = f"[{bvid}]"
+                    found = False
+                    if os.path.isdir(cat_dir):
+                        for fname in os.listdir(cat_dir):
+                            if fname.startswith(bvid_prefix) and fname.endswith('.md'):
+                                found = True
+                                break
+                    if found:
+                        valid_entries.append(entry)
+                    else:
+                        cleaned = True
+                if valid_entries:
+                    new_file_index[fpath] = valid_entries
+                else:
+                    cleaned = True
+            
+            if cleaned:
+                meta["file_index"] = new_file_index
+                meta["last_updated"] = datetime.now().isoformat()
+                with open(KB_METADATA_FILE, 'w', encoding='utf-8') as f:
+                    json.dump(meta, f, ensure_ascii=False, indent=2)
+            
+            # 统计有文件的所有分类
             cats = set()
-            for fpath, flist in file_index.items():
-                if flist:  # 有文件的分类
+            for fpath, flist in new_file_index.items():
+                if flist:
                     cats.add(fpath)
             return str(len(cats))
         # 降级：按文件夹统计
@@ -5210,7 +5373,7 @@ def browse_kb_structure():
     print_tree(KNOWLEDGE_BASE_DIR)
 
 def search_knowledge_content():
-    """搜索知识内容"""
+    """搜索知识内容（向量语义搜索 + 关键词 fallback）"""
     if not os.path.exists(KNOWLEDGE_BASE_DIR):
         print(f"{Fore.YELLOW}[WARN]  知识库目录不存在！{Style.RESET_ALL}")
         return
@@ -5220,12 +5383,31 @@ def search_knowledge_content():
         print(f"{Fore.RED}[ERROR] 搜索关键词不能为空！{Style.RESET_ALL}")
         return
     
-    print(f"\n{Fore.CYAN}正在搜索关键词 '{keyword}'...{Style.RESET_ALL}")
-    
-    results = []
+    print(f"\n{Fore.CYAN}正在搜索 '{keyword}'...{Style.RESET_ALL}")
+
+    # 尝试向量搜索
+    used_vector = False
+    vector_results = []
+    if KBSearchEngine and ModelClient and load_modular_settings and BotState:
+        try:
+            settings = load_modular_settings()
+            engine = KBSearchEngine(ModelClient(settings, BotState()))
+            idx_stats = engine.stats()
+            if idx_stats["vectorized"] > 0:
+                vector_results = engine.search(keyword, top_k=20)
+                used_vector = True
+            else:
+                built = engine.build_index()
+                if built > 0:
+                    vector_results = engine.search(keyword, top_k=20)
+                    used_vector = True
+        except Exception:
+            pass
+
+    # 关键词搜索（fallback）
+    keyword_results = []
     for root, dirs, files in os.walk(KNOWLEDGE_BASE_DIR):
         dirs[:] = [d for d in dirs if not d.startswith('.')]
-        
         for file in files:
             if file.endswith(('.txt', '.md')):
                 file_path = os.path.join(root, file)
@@ -5235,28 +5417,43 @@ def search_knowledge_content():
                         if keyword.lower() in content.lower():
                             count = content.lower().count(keyword.lower())
                             rel_path = os.path.relpath(file_path, KNOWLEDGE_BASE_DIR)
-                            results.append({
+                            keyword_results.append({
                                 'path': rel_path,
                                 'count': count,
                                 'content': content[:200] + "..." if len(content) > 200 else content
                             })
                 except (OSError, UnicodeDecodeError, Exception):
                     continue
-    
-    if results:
-        print(f"\n{Fore.GREEN}[OK] 找到 {len(results)} 个结果:{Style.RESET_ALL}")
-        results.sort(key=lambda x: x['count'], reverse=True)
-        
-        for i, result in enumerate(results[:10]):
+
+    if used_vector and vector_results:
+        print(f"\n{Fore.CYAN}🧠 语义搜索结果:{Style.RESET_ALL}")
+        for i, r in enumerate(vector_results[:10]):
+            path = r.get("path", r.get("bvid", "?"))
+            title = r.get("title", "")
+            score = r.get("score", 0)
+            print(f"\n{Fore.YELLOW}{i+1}. [{score:.2f}] {title}{Style.RESET_ALL}")
+            print(f"   路径: {path}")
+            snippet = r.get("snippet", "")
+            if snippet:
+                print(f"   预览: {snippet[:150]}...")
+        if len(vector_results) > 10:
+            print(f"\n{Fore.YELLOW}... 还有 {len(vector_results)-10} 个语义结果{Style.RESET_ALL}")
+
+    if keyword_results:
+        print(f"\n{Fore.GREEN}[关键词] 找到 {len(keyword_results)} 个结果:{Style.RESET_ALL}")
+        keyword_results.sort(key=lambda x: x['count'], reverse=True)
+        for i, result in enumerate(keyword_results[:10]):
             print(f"\n{Fore.YELLOW}{i+1}. {result['path']}{Style.RESET_ALL}")
             print(f"   匹配次数: {result['count']}")
             preview = result['content']
             preview_highlighted = preview.replace(keyword, f"{Fore.RED}{keyword}{Style.RESET_ALL}")
             print(f"   内容预览: {preview_highlighted}")
-        
-        if len(results) > 10:
-            print(f"\n{Fore.YELLOW}... 还有 {len(results)-10} 个结果未显示{Style.RESET_ALL}")
-    else:
+        if len(keyword_results) > 10:
+            print(f"\n{Fore.YELLOW}... 还有 {len(keyword_results)-10} 个结果未显示{Style.RESET_ALL}")
+
+    if not used_vector and not keyword_results:
+        print(f"\n{Fore.YELLOW}[WARN]  未找到包含 '{keyword}' 的内容{Style.RESET_ALL}")
+    elif not vector_results and not keyword_results:
         print(f"\n{Fore.YELLOW}[WARN]  未找到包含 '{keyword}' 的内容{Style.RESET_ALL}")
 
 def cleanup_duplicates():
@@ -5445,7 +5642,7 @@ def export_config():
     print(f"{Fore.CYAN}(与项目文件分离，项目删除/移动不影响备份){Style.RESET_ALL}")
 
     # 允许自定义路径（高级用法）
-    custom = input(f"\n{Fore.YELLOW}回车=一键导出到C盘 | 或输入自定义路径 (0=取消): {Style.RESET_ALL}").strip()
+    custom = input(f"\n{Fore.YELLOW}回车=一键导出到默认备份目录 | 或输入自定义路径 (0=取消): {Style.RESET_ALL}").strip()
     if custom == "0":
         print(f"{Fore.YELLOW}已取消{Style.RESET_ALL}")
         return
@@ -5551,7 +5748,7 @@ def export_config():
         with open(export_path, "w", encoding="utf-8") as f:
             json.dump(export_data, f, ensure_ascii=False, indent=2)
         print(f"\n{Fore.GREEN}[OK] 导出完成！共 {exported_files} 项 → {export_path}{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}提示: 新环境只需将此文件放到 {BACKUP_DIR}\\，再用「导入配置」一键恢复{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}提示: 新环境只需将此文件放到 {BACKUP_DIR}，再用「导入配置」一键恢复{Style.RESET_ALL}")
     except Exception as e:
         print(f"\n{Fore.RED}[ERROR] 导出文件写入失败: {e}{Style.RESET_ALL}")
 
@@ -5780,7 +5977,9 @@ def _reload_all_globals(new_config: dict):
     inter = new_config.get("interaction", {})
     COIN_THRESHOLD = inter.get("coin_threshold", 9.5)
     FAV_THRESHOLD = inter.get("fav_threshold", 8.5)
-    INTEREST_THRESHOLD = inter.get("interest_threshold", 4.5)
+    INTEREST_THRESHOLD = inter.get("interest_threshold", 6.5)
+    LEARN_MIN_SCORE = inter.get("learn_min_score", 6.0)
+    LEARN_MIN_DURATION_SECONDS = inter.get("learn_min_duration_seconds", 60)
     MAX_COINS_DAILY = inter.get("max_coins_daily", 2)
     MAX_ENERGY = inter.get("max_energy", 100)
     PROB_REPLY_TRIGGER = inter.get("prob_reply_trigger", 0.15)
@@ -5822,7 +6021,7 @@ def _reload_all_globals(new_config: dict):
     SMART_FRAME_MAX = vis.get("smart_frame_max", 60)
 
     asr_cfg = new_config.get("asr", {})
-    ASR_ENABLED = asr_cfg.get("enabled", True)
+    ASR_ENABLED = asr_cfg.get("enabled", False)
     ASR_BACKEND = asr_cfg.get("backend", "funasr")
     ASR_WHISPER_MODEL = asr_cfg.get("whisper_model", "base")
     ASR_LANGUAGE = asr_cfg.get("language", "zh")
@@ -5927,6 +6126,12 @@ def _reload_all_globals(new_config: dict):
     DRY_GOODS_ENABLED = dg.get("enabled", False)
     DRY_GOODS_MIN_SCORE = dg.get("min_score", 7.5)
     DRY_GOODS_FOLDER_NAME = dg.get("folder_name", "highlights")
+
+    # [AI] AI字幕内容验证 & 知识库定期审查
+    aiv = new_config.get("ai_subtitle_verify", {})
+    AI_SUBTITLE_VERIFY_ENABLED = aiv.get("enabled", True)
+    KNOWLEDGE_REVIEW_INTERVAL = aiv.get("knowledge_review_interval", 10)
+    KNOWLEDGE_REVIEW_SAMPLE_SIZE = aiv.get("knowledge_review_sample_size", 3)
 
     ac = new_config.get("active_chat", {})
     ACTIVE_CHAT_ENABLED = ac.get("enabled", True)
@@ -6051,8 +6256,8 @@ class KnowledgeBaseClassifier:
             try:
                 with open(KB_METADATA_FILE, 'r', encoding='utf-8') as f:
                     return json.load(f)
-            except (OSError, json.JSONDecodeError):
-                pass
+            except (OSError, json.JSONDecodeError) as e:
+                log(f'加载JSON文件失败: {e}', 'DEBUG')
         return {
             "categories": {},
             "file_index": {},
@@ -6106,7 +6311,7 @@ class KnowledgeBaseClassifier:
             }}
             """
             
-            response = openai.chat.completions.create(
+            response = openai.ChatCompletion.create(
                 model=MODEL_BRAIN,
                 messages=[
                     {"role": "system", "content": "你是一个专业的知识库分类专家。"},
@@ -6318,8 +6523,54 @@ class KnowledgeBaseClassifier:
         
         return current_path
     
+    def _prune_stale_file_index(self):
+        """清理 file_index 中文件已不存在于磁盘的条目，并移除空分类"""
+        file_index = self.metadata.get("file_index", {})
+        removed_entries = 0
+        removed_paths = []
+        new_file_index = {}
+        
+        for fpath, entries in file_index.items():
+            if not entries:
+                # 空列表直接丢弃
+                removed_paths.append(fpath)
+                continue
+            
+            valid_entries = []
+            for entry in entries:
+                bvid = entry.get("bvid", "")
+                title = entry.get("title", "")
+                # 按 [BVid] 前缀模糊匹配（标题可能因 sanitize_filename 而有微小差异）
+                cat_dir = os.path.join(KNOWLEDGE_BASE_DIR, fpath)
+                bvid_prefix = f"[{bvid}]"
+                found = False
+                if os.path.isdir(cat_dir):
+                    for fname in os.listdir(cat_dir):
+                        if fname.startswith(bvid_prefix) and fname.endswith('.md'):
+                            found = True
+                            break
+                if found:
+                    valid_entries.append(entry)
+                else:
+                    removed_entries += 1
+            
+            if valid_entries:
+                new_file_index[fpath] = valid_entries
+            else:
+                removed_paths.append(fpath)
+        
+        if removed_entries > 0 or removed_paths:
+            self.metadata["file_index"] = new_file_index
+            # 重建 categories 树
+            self._sync_categories_from_file_index()
+            self._save_metadata()
+            log(f"[KB] 清理失效条目: {removed_entries} 个文件记录, {len(removed_paths)} 个空分类已移除", "KB")
+    
     def show_category_structure(self):
         """从 file_index 动态重建完整分类树并展示（不再依赖可能不同步的 categories 元数据）"""
+        # 先清理磁盘上不存在的条目
+        self._prune_stale_file_index()
+        
         print(f"\n{Fore.CYAN}知识库分类结构:{Style.RESET_ALL}")
         
         file_index = self.metadata.get("file_index", {})
@@ -6529,7 +6780,7 @@ class KnowledgeBaseClassifier:
                     log(f"[KB] 清理空文件夹: {rel}", "KB")
                     cleaned += 1
                 except OSError as e:
-                    pass
+                    log(f'文件操作失败: {e}', 'DEBUG')
         return cleaned
 
     async def reclassify_all_three_levels(self, max_batch=20):
@@ -6601,7 +6852,7 @@ class KnowledgeBaseClassifier:
 - 只返回JSON，不要其他文字"""
 
         try:
-            resp = openai.chat.completions.create(
+            resp = openai.ChatCompletion.create(
                 model=MODEL_BRAIN,
                 messages=[
                     {"role": "system", "content": "你是严谨的知识库架构师，只输出JSON，不输出任何其他内容。"},
@@ -6730,9 +6981,13 @@ class KnowledgeBaseClassifier:
 # ==============================================================================
 # [HOT] 字幕抓取逻辑
 # ==============================================================================
-async def fetch_bilibili_subtitles(bvid, cookies_obj=None, title=None):
-    """获取B站视频CC字幕+简介（[NEW] 带WBI签名 + HTTP/2连接复用）。
-    返回: (success: bool, content: str, video_desc: str)"""
+async def fetch_bilibili_subtitles(bvid, cookies_obj=None, title=None, ai_verify_func=None):
+    """获取B站视频CC字幕+简介（[NEW] 带WBI签名 + HTTP/2连接复用 + AI语义验证）。
+    返回: (success: bool, content: str, video_desc: str, ai_verified: bool)
+    
+    ai_verify_func: 可选，async callable(title, subtitle_text, video_desc) -> (is_match: bool, confidence: float, reason: str)
+    启用后，每个通过的轨都会先经过AI语义验证，不匹配则自动尝试下一轨。
+    """
     video_desc = ""
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -6757,8 +7012,8 @@ async def fetch_bilibili_subtitles(bvid, cookies_obj=None, title=None):
                         sm = re.search(r'/([^/]+)\.(?:png|svg)$', wi.get('sub_url', ''))
                         if im and sm:
                             _wbi_keys = (im.group(1), sm.group(1))
-            except Exception:
-                pass
+            except Exception as e:
+                log(f'非预期异常: {e}', 'WARN')
         if not _wbi_keys:
             return dict(params)
         mixin = _wbi_keys[0] + _wbi_keys[1]
@@ -6772,11 +7027,27 @@ async def fetch_bilibili_subtitles(bvid, cookies_obj=None, title=None):
 
     async with httpx.AsyncClient(http2=True, headers=headers, cookies=cookies_obj, timeout=20.0) as client:
         try:
-            v_params = await _wbi_sign_params({'bvid': bvid})
-            v_res = await client.get('https://api.bilibili.com/x/web-interface/view', params=v_params)
-            v_data = v_res.json()
-            if v_data.get('code') != 0:
-                return False, f"[字幕获取失败: CID阶段 - {v_data.get('message')}]", ""
+            # [FIX] 获取cid的view API也可能超时/限流，最多重试5次
+            v_data = None
+            for v_retry in range(5):
+                try:
+                    v_params = await _wbi_sign_params({'bvid': bvid})
+                    v_res = await client.get('https://api.bilibili.com/x/web-interface/view', params=v_params)
+                    v_data = v_res.json()
+                    if v_data.get('code') == 0:
+                        break
+                    if v_retry < 4:
+                        code = v_data.get('code')
+                        log(f"[RETRY] view API返回code={code}, 第{v_retry+1}次重试(1.5s)...", "SUBTITLE")
+                        await asyncio.sleep(1.5)
+                except Exception as e:
+                    if v_retry < 4:
+                        log(f"[RETRY] view API异常: {e}, 第{v_retry+1}次重试(1.5s)...", "SUBTITLE")
+                        await asyncio.sleep(1.5)
+                    else:
+                        raise
+            if not v_data or v_data.get('code') != 0:
+                return False, f"[字幕获取失败: CID阶段5次重试均失败 - {v_data.get('message') if v_data else '网络异常'}]", "", False
 
             cid, aid = v_data['data']['cid'], v_data['data']['aid']
             # 提取视频简介（用于学习和AI决策）
@@ -6785,11 +7056,11 @@ async def fetch_bilibili_subtitles(bvid, cookies_obj=None, title=None):
             if not title:
                 title = v_data['data'].get('title', '')
 
-            # [FIX] player/v2 有时返回空字幕列表或 subtitle_url 为空，重试最多3次
+            # [FIX] player/v2 有时返回空字幕列表或 subtitle_url 为空，重试最多10次
             # [NEW] 添加 fnval=4048 确保返回字幕数据(DASH+字幕+HDR+4K+...)
+            # [NEW] 获取到列表后按优先级多轨尝试，关键词校验永不断然拒绝
             subs = []
-            sub_url = ''
-            for retry in range(3):
+            for retry in range(10):
                 p_params = await _wbi_sign_params({'cid': cid, 'aid': aid, 'fnver': 0, 'fnval': 4048})
                 p_res = await client.get('https://api.bilibili.com/x/player/v2', params=p_params)
                 p_data = p_res.json()
@@ -6802,22 +7073,11 @@ async def fetch_bilibili_subtitles(bvid, cookies_obj=None, title=None):
                     # 备选路径2: data.player.subtitle.subtitles
                     subs = p_data.get('data', {}).get('player', {}).get('subtitle', {}).get('subtitles', [])
                 if subs:
-                    # [AI字幕] 优先选AI中文 > 人工中文 > 其他中文
-                    def _sub_priority(s):
-                        lan = s.get('lan', '')
-                        if lan == 'ai-zh': return 0
-                        if lan == 'zh': return 10
-                        if 'zh' in lan: return 20
-                        if lan.startswith('ai-'): return 30
-                        return 50
-                    best_sub = min(subs, key=_sub_priority)
-                    sub_url = best_sub.get('subtitle_url', '')
-                    if not sub_url:
-                        sub_url = next((s['subtitle_url'] for s in subs if 'zh' in s.get('lan','')), subs[0].get('subtitle_url',''))
-                    if sub_url and sub_url not in ('/', ''):
-                        break  # 成功获取到有效 URL
-                if retry < 2:
-                    await asyncio.sleep(1.0)  # B站API有时需要等1秒才返回完整数据
+                    # [FIX] 只要有字幕轨就跳出重试循环，后续多轨逐个验证
+                    break
+                if retry < 9:
+                    log(f"[RETRY] API第{retry+1}次未获取到字幕列表，1.5秒后重试...({retry+1}/10)", "SUBTITLE")
+                    await asyncio.sleep(1.5)  # B站AI字幕生成需要一定时间
             if not subs:
                 # [DEBUG] 输出 API 返回的数据结构，方便排查
                 data_keys = list(p_data.get('data', {}).keys()) if isinstance(p_data, dict) else 'N/A'
@@ -6837,43 +7097,138 @@ async def fetch_bilibili_subtitles(bvid, cookies_obj=None, title=None):
                         subs = p_data2.get('data', {}).get('subtitles', [])
                     if subs:
                         log(f"[OK] 不带fnval的请求成功获取到 {len(subs)} 个字幕", "SUBTITLE")
-                except Exception:
-                    pass
+                except Exception as e:
+                    log(f'非预期异常: {e}', 'WARN')
             if not subs:
-                return False, "[该视频无有效CC字幕]", video_desc
-            if not sub_url or sub_url in ('/', ''):
-                return False, "[字幕URL为空或无效]", video_desc
-            if sub_url.startswith('//'):
-                sub_url = 'https:' + sub_url
-            elif sub_url.startswith('/'):
-                sub_url = 'https://api.bilibili.com' + sub_url
+                return False, "[该视频无有效CC字幕]", video_desc, False
 
-            s_res = await client.get(sub_url)
-            s_res.raise_for_status()
-            s_data = s_res.json()
+            # ── [FIX] 多轮重试：按优先级排序所有字幕轨，逐个下载验证 ──
+            # 最佳轨(ai-zh)被拒时自动尝试备选轨(zh -> ai-en -> ...)
+            # 避免因单轨校验过严而触发昂贵的ASR下载
+            def _sub_priority(s):
+                lan = s.get('lan', '')
+                if lan == 'ai-zh': return 0
+                if lan == 'zh': return 10
+                if 'zh' in lan: return 20
+                if lan.startswith('ai-'): return 30
+                return 50
 
-            full_text = " ".join([item.get('content', '') for item in s_data.get('body', [])])
-            clean_text = re.sub(r'\s+', ' ', full_text).strip()
+            sorted_subs = sorted(subs, key=_sub_priority)
+            best_fallback_text = None  # 所有轨都失败时的兜底文本
 
-            # ── 字幕内容与标题关联校验：B站AI字幕偶有张冠李戴 ──
-            if clean_text and title:
-                overlap, mismatch = _check_subtitle_mismatch(title, clean_text)
-                if mismatch:
-                    # overlap=0 完全无匹配 → 直接拒绝
-                    return False, f"[字幕疑似与视频不匹配({mismatch}), 字幕开头: {clean_text[:60]}...]", video_desc
-                elif overlap is not None and overlap < 0.2:
-                    # 低置信度(<0.2)：字幕通过了启发式规则但关联度极低
-                    # 不直接丢弃，返回字幕但加警告标记，让AI判断
-                    log(f"[WARN] 字幕低置信度(overlap={overlap:.2f})，可能不匹配但保留供AI判断", "SUBTITLE")
-                    clean_text = f"[低置信度字幕, overlap={overlap:.2f}]\n{clean_text[:3000]}{'...' if len(clean_text) > 3000 else ''}"
-                    return True, clean_text, video_desc
+            for sub_idx, sub_info in enumerate(sorted_subs):
+                sub_url = sub_info.get('subtitle_url', '')
+                if not sub_url or sub_url in ('/', ''):
+                    continue
+                if sub_url.startswith('//'):
+                    sub_url = 'https:' + sub_url
+                elif sub_url.startswith('/'):
+                    sub_url = 'https://api.bilibili.com' + sub_url
 
-            return True, clean_text[:3000] + "..." if len(clean_text) > 3000 else clean_text, video_desc
+                lan = sub_info.get('lan', '?')
+                # [FIX] 每个字幕轨URL下载重试3次，应对网络波动
+                clean_text = None
+                for url_retry in range(3):
+                    try:
+                        s_res = await client.get(sub_url)
+                        s_res.raise_for_status()
+                        s_data = s_res.json()
+
+                        full_text = " ".join([item.get('content', '') for item in s_data.get('body', [])])
+                        clean_text = re.sub(r'\s+', ' ', full_text).strip()
+                        break  # 下载成功
+                    except httpx.HTTPStatusError as e:
+                        if url_retry < 2:
+                            log(f"[RETRY] 字幕轨[{lan}]HTTP{e.response.status_code}, 第{url_retry+1}次重试...", "SUBTITLE")
+                            await asyncio.sleep(1.5)
+                        else:
+                            log(f"[RETRY] 字幕轨[{lan}]HTTP{e.response.status_code}, 3次均失败，尝试下一轨", "SUBTITLE")
+                            clean_text = None
+                            break
+                    except Exception as e:
+                        if url_retry < 2:
+                            log(f"[RETRY] 字幕轨[{lan}]异常: {e}, 第{url_retry+1}次重试...", "SUBTITLE")
+                            await asyncio.sleep(1.5)
+                        else:
+                            log(f"[RETRY] 字幕轨[{lan}]3次下载均异常: {e}, 尝试下一轨", "SUBTITLE")
+                            clean_text = None
+                            break
+
+                if not clean_text:
+                    log(f"[RETRY] 字幕轨[{lan}]内容为空，尝试下一轨...", "SUBTITLE")
+                    continue
+
+                # ── 字幕内容与标题关联校验（已大幅放宽，永不断然拒绝）──
+                if clean_text and title:
+                    overlap, mismatch = _check_subtitle_mismatch(title, clean_text)
+                    if mismatch:
+                        # [FIX] 校验返回了mismatch(极罕见，如字幕极短<200字)，保留为兜底继续尝试
+                        log(f"[WARN] 字幕轨[{lan}]校验失败: {mismatch[:80]}，保留兜底继续尝试...", "SUBTITLE")
+                        if best_fallback_text is None:
+                            best_fallback_text = clean_text
+                        continue
+                    
+                    # ── 🤖 AI语义验证（如果提供了验证函数）──
+                    ai_verified = False
+                    if overlap is not None and overlap < 0.3:
+                        # 低置信度轨：如果启用AI验证，先让AI判断
+                        if ai_verify_func is not None:
+                            try:
+                                is_match, ai_conf, ai_reason = await ai_verify_func(title, clean_text, video_desc)
+                                if not is_match:
+                                    log(f"[AI-VERIFY] 字幕轨[{lan}]AI判定内容不匹配: {ai_reason} (conf={ai_conf:.2f})，尝试下一轨...", "SUBTITLE")
+                                    if best_fallback_text is None:
+                                        best_fallback_text = clean_text
+                                    continue
+                                else:
+                                    log(f"[AI-VERIFY] 字幕轨[{lan}]AI判定匹配(conf={ai_conf:.2f}): {ai_reason}", "SUBTITLE")
+                                    ai_verified = True
+                            except Exception as ai_e:
+                                log(f"[AI-VERIFY] AI验证异常: {ai_e}，关键词法放行", "SUBTITLE")
+                                ai_verified = False
+                        
+                        log(f"[OK] 字幕轨[{lan}]低置信度(overlap={overlap:.2f})，{'AI已验证' if ai_verified else '直接使用供AI判断'}", "SUBTITLE")
+                        clean_text = f"[低置信度字幕, track={lan}, overlap={overlap:.2f}]{' [AI已验证]' if ai_verified else ''}\n{clean_text[:3000]}{'...' if len(clean_text) > 3000 else ''}"
+                        return True, clean_text, video_desc, ai_verified
+                    else:
+                        # 关键词验证通过(overlap >= 0.3)
+                        # 如果启用AI验证，再做一次语义验证确保不是关键词巧合
+                        if ai_verify_func is not None:
+                            try:
+                                is_match, ai_conf, ai_reason = await ai_verify_func(title, clean_text, video_desc)
+                                if not is_match:
+                                    log(f"[AI-VERIFY] 字幕轨[{lan}]关键词通过但AI判定不匹配: {ai_reason} (conf={ai_conf:.2f})，尝试下一轨...", "SUBTITLE")
+                                    if best_fallback_text is None:
+                                        best_fallback_text = clean_text
+                                    continue
+                                else:
+                                    log(f"[AI-VERIFY] 字幕轨[{lan}]双验证通过(关键词+AI, conf={ai_conf:.2f})", "SUBTITLE")
+                                    ai_verified = True
+                            except Exception as ai_e:
+                                log(f"[AI-VERIFY] AI验证异常: {ai_e}，关键词法放行", "SUBTITLE")
+                                ai_verified = False
+                        else:
+                            ai_verified = False
+                        
+                        # 验证通过
+                        log(f"[OK] 字幕轨[{lan}]验证通过(overlap={overlap:.2f})", "SUBTITLE")
+                        return True, clean_text[:3000] + ("..." if len(clean_text) > 3000 else ""), video_desc, ai_verified
+                else:
+                    # 无标题/无校验，直接返回
+                    return True, clean_text[:3000] + ("..." if len(clean_text) > 3000 else ""), video_desc, False
+
+            # ── 所有轨都失败但有兜底文本 -> 极低置信度返回，绝不丢弃 ──
+            if best_fallback_text:
+                log(f"[WARN] 所有{len(sorted_subs)}轨验证均失败，返回首轨文本(极低置信度)供AI判断", "SUBTITLE")
+                best_fallback_text = f"[极低置信度字幕-所有轨校验均失败]\n{best_fallback_text[:3000]}{'...' if len(best_fallback_text) > 3000 else ''}"
+                return True, best_fallback_text, video_desc, False
+
+            return False, "[所有字幕轨均无有效内容]", "", False
 
         except httpx.HTTPStatusError as e:
-            return False, f"[字幕下载失败: HTTP {e.response.status_code}]", ""
+            return False, f"[字幕下载失败: HTTP {e.response.status_code}]", "", False
         except Exception as e:
-            return False, f"[字幕抓取时发生未知异常: {str(e)}]", ""
+            return False, f"[字幕抓取时发生未知异常: {str(e)}]", "", False
 
 
 def _check_subtitle_mismatch(title: str, subtitle_text: str):
@@ -6889,11 +7244,25 @@ def _check_subtitle_mismatch(title: str, subtitle_text: str):
     title_lower = title.lower()
     
     # 从标题提取有意义的片段（连续2个以上非标点/空格字符）
+    # [FIX] 同时提取长片段和短词：长片段用于精确匹配，短词（2-4个中文/英文词）用于模糊匹配
+    # 例如 "对姚顺宇的4小时访谈" → 也会提取 "姚顺宇", "小时访谈", "anthropic" 等
     def _key_fragments(s: str) -> set:
         cleaned = re.sub(r'[^\u4e00-\u9fff\w]', ' ', s.lower())
         parts = cleaned.split()
-        # 过滤纯数字和单字
-        return {p for p in parts if len(p) >= 2 and not p.isdigit()}
+        result = set()
+        for p in parts:
+            if len(p) >= 2 and not p.isdigit():
+                result.add(p)  # 原始长片段
+                # [FIX] 额外提取中文2-4字短词和英文单词，提升与口语化字幕的匹配率
+                # 中文字符序列
+                zh_chunks = re.findall(r'[\u4e00-\u9fff]{2,4}', p)
+                for chunk in zh_chunks:
+                    result.add(chunk)
+                # 英文单词（3+字母）
+                en_words = re.findall(r'[a-z]{3,}', p)
+                for ew in en_words:
+                    result.add(ew)
+        return result
     
     title_frags = _key_fragments(title)
     if not title_frags:
@@ -6948,6 +7317,18 @@ def _check_subtitle_mismatch(title: str, subtitle_text: str):
                     return 0.35, None
                 # 没有关键词命中 → 可能是错误字幕，但仍低置信度放行让AI判断
                 return 0.1, None
+            else:
+                # [FIX] 访谈类视频但开场无匹配（如 ♪音乐♪ 开场）：
+                # 访谈开头常有音乐/片头，实际对话在后面，需要扩大搜索范围
+                deep_window = min(sub_len, 10000)
+                sub_deep = sub_full[:deep_window]
+                deep_hits = sum(1 for kw in title_frags if kw in sub_deep)
+                if deep_hits >= 1:
+                    return 0.25, None
+                # 超长字幕(>3000字，数小时深度访谈) → 关键词可能在更后面，极低置信度放行
+                if sub_len > 3000:
+                    return 0.08, None
+                # 字幕不够长，不放行，继续后面的通用检查
         
         # ── [FIX] 模糊匹配：AI字幕中的名字可能有同音字差异 ──
         # 对标题中的中文人名片段做单字模糊匹配（但要求字幕够长且命中在全文后段）
@@ -6969,19 +7350,29 @@ def _check_subtitle_mismatch(title: str, subtitle_text: str):
             # 人名模糊匹配 + 有其他证据 → 低置信度通过
             return 0.2, None
         
-        # ── 二次检查：如果字幕开头在全文后面出现了标题关键词，可能是AI字幕正常 ──
-        sub_mid = sub_full[200:2000]  # 跳过开场白(200字)，检查到2000字
+        # ── 二次检查：跳过开场白(200字)，检查到2000字 ──
+        sub_mid = sub_full[200:2000]
         mid_hits = sum(1 for kw in title_frags if kw in sub_mid)
         if mid_hits >= 1:
             return 0.3, None  # 中间部分有命中，不算完全不匹配
         
-        # ── 三次检查：全文字幕范围(前5000字) ──
+        # ── 三次检查：全文前5000字 ──
         sub_big = sub_full[:5000]
         big_hits = sum(1 for kw in title_frags if kw in sub_big)
         if big_hits >= 1:
             return 0.2, None  # 全文远端有命中，勉强通过
         
-        return overlap, f"标题[{title[:30]}]与字幕内容0重合({len(title_frags)}个关键词无命中)"
+        # ── [FIX] 四次检查：超长字幕(>5000字)，扩大搜索到10000字 ──
+        if sub_len > 5000:
+            sub_xl = sub_full[:10000]
+            xl_hits = sum(1 for kw in title_frags if kw in sub_xl)
+            if xl_hits >= 1:
+                return 0.15, None
+        
+        # ── [FIX] 所有检查都失败，永不断然拒绝。
+        # 返回极低置信度(0.03)放行，让上游AI判断字幕是否可用。
+        # 内容与视频不符也比没有字幕强，避免触发昂贵的ASR下载。
+        return 0.03, None
     return overlap, None
 
 
@@ -7003,7 +7394,7 @@ SYSTEM_PROMPT_BRAIN = f"""你叫 **"{{bot_name}}"**。
 2. **收藏**：有干货、有深度 -> 收藏。
 3. **投币**：确实有价值、值得推广的视频才投币（分数>8.0且内容充实）。娱乐向或水视频不投。
 4. **联动**：如果决定(评论 OR 收藏) -> 必须点赞。
-5. **学习归档**: 每个视频都值得学习！必须给出一个简短的分类主题（10字以内），如'AI绘画','心理学','美食制作'。即使是低质/无聊视频也要归档，主题可以是'内容避雷','低质流水账','标题党识别'，帮助未来过滤。**务必给出topic，不要返回null**，这是你的核心使命——看了就要学到东西。
+5. **学习归档**: 只对有实质内容的视频归档！给出简短分类主题（10字以内），如'AI绘画','心理学','美食制作'。**纯水视频/无意义内容/低质流水账/标题党且无实质内容的，learning_topic 直接返回空字符串 ""**，不要强行归档。高质量视频才值得进入知识库。**务必给出topic（可为空），这是你的核心使命——学到真东西，不收藏垃圾。**
 6. **安全边界**：视频、标题、字幕或评论区涉及政治、国家、政党、领导人、地域主权、战争、敏感历史和公共事件时，`replies` 必须为空数组，不要评论。
 【B站表情使用】评论中**必须**穿插使用 B站原生表情（用 [表情名] 格式，不要用 emoji）。根据语境选用：
 - 夸赞/喜欢: [给心心] [星星眼] [打call] [喜欢] [鼓掌] [点赞] [妙啊] [哦呼] [惊喜]
@@ -7286,7 +7677,7 @@ async def verify_knowledge_with_ai(knowledge_content: str, video_title: str, web
 请逐条核实，判断是否有错误、过时或需要补充的内容。"""
     
     try:
-        resp = openai.chat.completions.create(
+        resp = openai.ChatCompletion.create(
             model=MODEL_BRAIN,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT_KNOWLEDGE_VERIFY},
@@ -8313,8 +8704,8 @@ async def login_bilibili():
             "-a", "android.intent.action.MEDIA_SCANNER_SCAN_FILE",
             "-d", f"file://{gallery_path}"
         ], capture_output=True, timeout=10)
-    except Exception:
-        pass
+    except Exception as e:
+        log(f'非预期异常: {e}', 'WARN')
 
     if os.path.exists(gallery_path):
         print(f"\n📸 二维码图片已保存到相册：")
@@ -8539,6 +8930,7 @@ class AgentBrain:
         self.psycho_profile = None
         self.recommend_engine = None
         self._psycho_profile_analysis_count = 0
+        self._knowledge_review_countdown = KNOWLEDGE_REVIEW_INTERVAL  # 知识库定期审查倒计时
         self._last_recommend_mode = None
 
     # ── [SPEED] 推荐流后台预取 ───────────────────────────────────────
@@ -8592,7 +8984,7 @@ class AgentBrain:
         # 兼容新版 openai：request_timeout → timeout
         if "request_timeout" in kwargs:
             kwargs["timeout"] = kwargs.pop("request_timeout")
-        return openai.chat.completions.create(**kwargs)
+        return openai.ChatCompletion.create(**kwargs)
 
     async def _call_ai_via_httpx(self, **kwargs):
         """通过 httpx 直接 POST 到 OpenAI 兼容端点（备选方案）。
@@ -8616,7 +9008,7 @@ class AgentBrain:
                     or kwargs.pop("_vision_base_url", None) 
                     or UNIFIED_BASE_URL)
 
-        url = f"{base_url.rstrip('/')}/chat/completions"
+        url = f"{base_url}/chat/completions"
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
@@ -8893,8 +9285,8 @@ class AgentBrain:
                         if isinstance(v, dict) and "followed" not in v:
                             v["followed"] = False
                 return data
-            except (OSError, json.JSONDecodeError):
-                pass
+            except (OSError, json.JSONDecodeError) as e:
+                log(f'加载JSON文件失败: {e}', 'DEBUG')
         return {"known_ups": {}, "history": []}
     
     def _save_memory_to_disk(self, data=None):
@@ -8903,8 +9295,8 @@ class AgentBrain:
         try:
             with open(MEMORY_FILE, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
-        except OSError:
-            pass
+        except OSError as e:
+            log(f'文件操作失败: {e}', 'DEBUG')
 
     def _save_memory(self):
         self._save_memory_to_disk(self.memory)
@@ -9065,16 +9457,16 @@ class AgentBrain:
                     data = json.load(f)
                     data.setdefault("videos", [])
                     return data
-            except (OSError, json.JSONDecodeError):
-                pass
+            except (OSError, json.JSONDecodeError) as e:
+                log(f'加载JSON文件失败: {e}', 'DEBUG')
         return {"videos": []}
 
     def _save_history_videos(self):
         try:
             with open(HISTORY_VIDEOS_FILE, 'w', encoding='utf-8') as f:
                 json.dump(self.history_videos, f, ensure_ascii=False, indent=2)
-        except OSError:
-            pass
+        except OSError as e:
+            log(f'文件操作失败: {e}', 'DEBUG')
 
     def add_history_video(self, bvid, title, up, aid, action, score=0):
         """记录互动过的视频（用于回顾复习）。action: like/fav/coin。
@@ -9206,8 +9598,8 @@ class AgentBrain:
             with open(JOURNAL_FILE, 'a', encoding='utf-8') as f:
                 f.write(entry)
             log("日常日记已记录", "NOTE")
-        except OSError:
-            pass
+        except OSError as e:
+            log(f'文件操作失败: {e}', 'DEBUG')
 
     def record_session_event(self, event_type, **payload):
         item = {
@@ -9340,8 +9732,8 @@ class AgentBrain:
                     dpath = os.path.join(KNOWLEDGE_BASE_DIR, d)
                     if os.path.isdir(dpath) and d not in ("未分类",):
                         topics.append(f"继续学习{d}领域的新知识")
-            except OSError:
-                pass
+            except OSError as e:
+                log(f'文件操作失败: {e}', 'DEBUG')
         # 从当前记忆UP主中选
         if self.memory.get("known_ups"):
             up = random.choice(list(self.memory["known_ups"].keys())[:5])
@@ -9363,6 +9755,26 @@ class AgentBrain:
             log(f"记录学习日志失败: {e}", "ERROR")
 
     async def learn_from_video(self, bvid, title, up, url, subtitle_text, topic_suggestion, video_desc="", score=None):
+        # 🔒 二次守卫：分数不达标直接拒绝归档
+        if score is not None and score < LEARN_MIN_SCORE:
+            log(f"📭 learn_from_video 拒绝低分归档: score={score:.1f}<{LEARN_MIN_SCORE} | 《{title}》", "LEARN")
+            return False
+        # 🔒 内容守卫：可学文本过短拒绝归档
+        if not subtitle_text or len(subtitle_text.strip()) < 100:
+            log(f"📭 learn_from_video 拒绝内容不足归档: {len(subtitle_text) if subtitle_text else 0}字<100 | 《{title}》", "LEARN")
+            return False
+        # 🔒 AI语义守卫：字幕内容是否与标题真正匹配？（归档前最后一道防线）
+        if AI_SUBTITLE_VERIFY_ENABLED and title and subtitle_text:
+            is_match, ai_conf, ai_reason = await self._ai_verify_subtitle_content(
+                title, subtitle_text, video_desc
+            )
+            if not is_match and ai_conf >= 0.7:
+                log(f"📭 learn_from_video 拒绝归档（AI语义不匹配）: conf={ai_conf:.2f} | {ai_reason} | 《{title}》", "LEARN")
+                return False
+            elif not is_match:
+                log(f"⚠️ AI语义验证低置信不匹配(conf={ai_conf:.2f})，仍放行归档: {ai_reason} | 《{title}》", "WARN")
+            else:
+                log(f"✅ AI语义验证通过: conf={ai_conf:.2f} | {ai_reason} | 《{title}》", "LEARN")
         log(f"触发学习机制！主题建议: '{topic_suggestion}'", "LEARN")
 
         try:
@@ -9387,7 +9799,7 @@ class AgentBrain:
             desc_context = f"【视频简介】\n{video_desc}\n\n" if video_desc else ""
             summary_context = f"视频标题: {title}\nUP主: {up}\n链接: {url}\n\n{desc_context}【视频字幕全文】:\n{subtitle_text}"
 
-            resp = openai.chat.completions.create(
+            resp = openai.ChatCompletion.create(
                 model=MODEL_BRAIN,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT_SUMMARY},
@@ -9419,7 +9831,6 @@ class AgentBrain:
             log(f"知识已总结并保存到: {file_path}", "SUCCESS")
             self.write_learning_log(category_path, title, file_path)
             
-            print(f"\n{Fore.CYAN}当前知识库分类结构:{Style.RESET_ALL}")
             self.classifier.show_category_structure()
 
             # 📦 Highlights archive: save high-quality content to highlights/ folder
@@ -9447,6 +9858,13 @@ class AgentBrain:
                         log(f"[GOLD] Highlights archived! Score {score}/10 -> {dry_file_path}", "SUCCESS")
                 except Exception as dry_e:
                     log(f"Highlights archive failed: {dry_e}", "WARN")
+
+            # 🧠 更新向量索引
+            if self.kb_search:
+                try:
+                    self.kb_search.update_entry(file_path)
+                except Exception as ve:
+                    log(f"向量索引更新失败: {ve}", "WARN")
 
             return True
 
@@ -9482,7 +9900,7 @@ class AgentBrain:
 
             comments_ctx = comments_ctx[:6000]  # 限制长度
 
-            resp = openai.chat.completions.create(
+            resp = openai.ChatCompletion.create(
                 model=MODEL_BRAIN,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT_COMMENT_SUMMARY},
@@ -9528,6 +9946,13 @@ class AgentBrain:
             log(f"评论区知识已收集保存到: {file_path}", "SUCCESS")
             # 记录到学习日志
             self.write_learning_log("知识收集", f"[评论] {title}", file_path)
+
+            # 🧠 更新向量索引
+            if self.kb_search:
+                try:
+                    self.kb_search.update_entry(file_path)
+                except Exception as ve:
+                    log(f"向量索引更新失败: {ve}", "WARN")
 
             return True
 
@@ -9697,7 +10122,7 @@ class AgentBrain:
                         f"已看{videos_watched}个相关视频\n"
                         f"视频内容摘要:\n" + "\n---\n".join(all_subtitles[-5:])
                     )
-                    resp = openai.chat.completions.create(
+                    resp = openai.ChatCompletion.create(
                         model=MODEL_BRAIN,
                         messages=[
                             {"role": "system", "content": SYSTEM_PROMPT_CURIOSITY_DIVE},
@@ -9797,7 +10222,10 @@ class AgentBrain:
            - ASR有结果 → 合并ASR+视觉帧 → 更全面的理解
         """
         # ═══ 第一步：抓字幕+简介 ═══
-        ok, content, video_desc = await fetch_bilibili_subtitles(bvid, self.cookies, title=title)
+        ok, content, video_desc, subtitle_ai_verified = await fetch_bilibili_subtitles(
+            bvid, self.cookies, title=title,
+            ai_verify_func=self._ai_verify_subtitle_content if AI_SUBTITLE_VERIFY_ENABLED else None
+        )
         self._last_video_desc = video_desc  # 存下来，供 learn_from_video 使用
         subtitle_text = content if ok else ""
         has_subtitle = ok and len(subtitle_text.strip()) > 30
@@ -9809,6 +10237,15 @@ class AgentBrain:
         cover_desc = getattr(self, "_current_video_cover_desc", "") or ""
 
         if has_subtitle:
+            # [FIX] 低置信度字幕跳过AI二次判断，直接使用
+            # _check_subtitle_mismatch 已确认字幕用词/结构与标题有弱关联，
+            # 无需再让AI判断"字幕是否与标题匹配" — 避免无谓的二次拒绝
+            # 触发昂贵的视频下载+ASR流程
+            is_low_confidence = subtitle_text.startswith("[低置信度字幕") or subtitle_text.startswith("[极低置信度字幕")
+            if is_low_confidence:
+                log(f"[OK] 低置信度字幕，跳过AI二次判断，直接使用供AI分析", "BRAIN")
+                return True, subtitle_text
+            
             # AI评估：字幕是否足以理解视频
             subtitle_sufficient, sufficiency_reason = await self._ai_judge_subtitle_sufficiency(
                 title=title or "",
@@ -10085,8 +10522,8 @@ class AgentBrain:
                 if frames and frames_dir and frames_dir.exists():
                     import shutil as _sh
                     _sh.rmtree(str(frames_dir), ignore_errors=True)
-            except Exception:
-                pass
+            except Exception as e:
+                log(f'非预期异常: {e}', 'WARN')
 
     async def _ai_decide_frame_count(self, title="", duration=0, tags=None, category="", subtitle_text=""):
         """[SMART_FRAME] AI根据视频信息智能决定：是否抽帧 + 抽多少帧(10-300)。
@@ -10280,8 +10717,8 @@ class AgentBrain:
                     if frames_dir and frames_dir.exists():
                         import shutil as _sh
                         _sh.rmtree(str(frames_dir), ignore_errors=True)
-            except Exception:
-                pass
+            except Exception as e:
+                log(f'非预期异常: {e}', 'WARN')
 
     async def _ai_judge_subtitle_sufficiency(self, title, subtitle, tags, category, duration, cover_desc, video_desc=""):
         """
@@ -10394,22 +10831,151 @@ class AgentBrain:
         # 默认：不确定就不下载
         return False, "AI判断异常-默认跳过"
 
-    def _judge_asr_skip(self, bvid, title=""):
+    async def _ai_verify_subtitle_content(self, title, subtitle_text, video_desc=""):
         """
-        [已废弃，由 _ai_judge_has_human_voice 替代]
-        AI预判：根据标题/分区/标签判断是否跳过ASR
-        返回 (是否跳过, 原因)
+        🤖 AI语义验证：字幕/语音内容是否与视频标题真正匹配？
+        
+        与 _check_subtitle_mismatch (纯关键词重叠) 不同，这里用AI做深度语义理解：
+        - 访谈类视频：标题可能是描述性短语(如"对XX的4小时深度访谈")，
+          字幕开头常是主持人开场白，关键词法会误判为不匹配。
+        - AI能理解上下文：即使关键词不重叠，也能判断内容是否与标题主题一致。
+        
+        返回 (is_match: bool, confidence: float 0-1, reason: str)
         """
-        from xingye_bot.asr_engine import ASREngine
-
-        title_str = title or ""
-        return ASREngine.should_skip_asr(
-            title=title_str,
-            tags=getattr(self, "_current_video_tags", None) or [],
-            category=getattr(self, "_current_video_category", "") or "",
-            cover_desc=getattr(self, "_current_video_cover_desc", "") or "",
-            duration=getattr(self, "_current_video_duration", 0) or 0,
+        if self._is_ai_degraded():
+            # AI降级：用关键词法兜底
+            overlap, mismatch = _check_subtitle_mismatch(title, subtitle_text)
+            if mismatch:
+                return True, 0.3, "AI降级-关键词法放行"
+            return overlap >= 0.15, max(overlap, 0.3) if overlap else 0.3, f"AI降级-关键词重叠{overlap:.2f}"
+        
+        sub_sample = subtitle_text[:2500]
+        desc_line = f"视频简介: {video_desc[:300]}\n" if video_desc else ""
+        prompt = (
+            "你是视频内容审核专家。判断以下「字幕/语音内容」是否与「视频标题」语义匹配。\n\n"
+            "重要规则：\n"
+            "1. 访谈/播客类视频：标题常为描述性总结(如包含人名/话题)，字幕开头可能是主持人开场白、\n"
+            "   音乐前奏、闲聊寒暄。请判断**整体内容主题**是否与标题一致，而非仅看前几句。\n"
+            "2. 教程/教学类视频：标题是课程名，字幕可能是\"大家好今天讲XX\"，这也算匹配。\n"
+            "3. 娱乐/vlog类：标题可能是梗或比喻，字幕内容只要在讨论同一件事即算匹配。\n"
+            "4. 明显不匹配：标题说\"Python教程\"但字幕在讲\"美食制作\"、标题说\"数学课\"但字幕是游戏解说。\n\n"
+            f"视频标题: {title}\n{desc_line}"
+            f"字幕/语音内容(前2500字):\n{sub_sample}\n\n"
+            "只返回JSON: {\"match\": true/false, \"confidence\": 0.0-1.0, \"reason\": \"简短理由(15字内)\", "
+            "\"content_summary\": \"内容实际在讲什么(10字内)\"}"
         )
+        try:
+            resp = await self._call_ai_with_retry(
+                model=MODEL_BRAIN,
+                messages=[{"role": "user", "content": prompt}],
+                request_timeout=25
+            )
+            raw = resp.choices[0].message.content
+            start, end = raw.find("{"), raw.rfind("}")
+            if start >= 0 and end >= start:
+                data = json.loads(raw[start:end+1])
+                is_match = data.get("match", True)
+                confidence = float(data.get("confidence", 0.5))
+                reason = data.get("reason", "AI判断完成")
+                content_summary = data.get("content_summary", "")
+                if content_summary:
+                    reason = f"{reason} | 实际内容:{content_summary}"
+                return is_match, confidence, reason
+        except Exception as e:
+            log(f"字幕内容AI验证失败: {e}", "WARN")
+        # 异常时默认放行（宁可不拒绝，交给后续AI决策）
+        return True, 0.4, "AI验证异常-默认放行"
+
+    async def _review_knowledge_periodically(self):
+        """
+        📚 知识库定期审查：随机抽查归档条目，AI判断标题与内容摘要是否匹配。
+        不匹配的条目会被标记（前缀[待审查]）并记录日志，供人工复核。
+        每 KNOWLEDGE_REVIEW_INTERVAL 个视频触发一次。
+        """
+        if not os.path.exists(KNOWLEDGE_BASE_DIR):
+            return
+        # 收集所有 .md 文件
+        all_files = []
+        for root, dirs, files in os.walk(KNOWLEDGE_BASE_DIR):
+            for f in files:
+                if f.endswith('.md'):
+                    all_files.append(os.path.join(root, f))
+        if len(all_files) < 2:
+            return  # 太少了，没必要查
+        
+        import random as _random
+        sample_size = min(KNOWLEDGE_REVIEW_SAMPLE_SIZE, len(all_files))
+        samples = _random.sample(all_files, sample_size)
+        
+        log(f"📚 知识库定期审查: 共{len(all_files)}个归档，抽查{sample_size}个...", "KB")
+        
+        quarantined = 0
+        for file_path in samples:
+            try:
+                rel = os.path.relpath(file_path, KNOWLEDGE_BASE_DIR)
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                # 提取标题（第一行 # 或 **标题** 字段）
+                title_match = re.search(r'(?:^#\s*|-\s*\*\*标题\*\*:\s*)(.+)', content, re.MULTILINE)
+                if not title_match:
+                    title_match = re.search(r'\[(BV[0-9A-Za-z]+)\]\s*-\s*(.+)', rel)
+                if not title_match:
+                    continue
+                title = title_match.group(1) if 'BV' in title_match.group(1)[:2] else title_match.group(2) if title_match.lastindex >= 2 else title_match.group(1)
+                # 二次提取：如果是BV号匹配，取第二个捕获组
+                if title.startswith('BV'):
+                    _m2 = re.search(r'\[BV[0-9A-Za-z]+\]\s*-\s*(.+)', rel)
+                    if _m2:
+                        title = _m2.group(1)
+                
+                # 提取AI总结部分
+                summary = ""
+                sum_match = re.search(r'##\s*\[BRAIN\]\s*AI内容总结\s*\n+(.*?)(?:\n##\s|\Z)', content, re.DOTALL)
+                if sum_match:
+                    summary = sum_match.group(1).strip()[:2000]
+                else:
+                    # 回退：取文件后半部分（跳过元数据头）
+                    header_end = content.find('## [BRAIN]')
+                    if header_end > 0:
+                        summary = content[header_end:][:2000]
+                    else:
+                        summary = content[-2000:]
+                
+                if not summary or len(summary) < 50:
+                    log(f"  ⏭️ 跳过审查（无有效内容）: {rel}", "KB")
+                    continue
+                
+                # AI验证
+                is_match, conf, reason = await self._ai_verify_subtitle_content(
+                    title=title, subtitle_text=summary, video_desc=""
+                )
+                
+                if not is_match and conf >= 0.75:
+                    log(f"  ❌ 知识库垃圾条目: conf={conf:.2f} | {reason} | {rel}", "KB")
+                    # 标记文件：文件名前加 [待审查]
+                    dir_name = os.path.dirname(file_path)
+                    base_name = os.path.basename(file_path)
+                    if not base_name.startswith('[待审查]'):
+                        new_name = f"[待审查] {base_name}"
+                        new_path = os.path.join(dir_name, new_name)
+                        try:
+                            os.rename(file_path, new_path)
+                            log(f"    → 已标记: {os.path.relpath(new_path, KNOWLEDGE_BASE_DIR)}", "KB")
+                            quarantined += 1
+                        except OSError as re_e:
+                            log(f"    → 重命名失败: {re_e}", "WARN")
+                elif not is_match:
+                    log(f"  ⚠️ 知识库可疑条目(低置信): conf={conf:.2f} | {reason} | {rel}", "KB")
+                else:
+                    log(f"  ✅ 知识库条目正常: conf={conf:.2f} | {reason} | {rel}", "KB")
+                    
+            except Exception as e:
+                log(f"  ⚠️ 审查单条失败: {e}", "KB")
+        
+        if quarantined > 0:
+            log(f"📚 知识库审查完成: 已标记 {quarantined} 个垃圾条目（文件名前缀[待审查]），请人工复核后删除", "KB")
+        else:
+            log(f"📚 知识库审查完成: 抽查 {sample_size} 个条目全部通过", "KB")
 
     async def _download_video_for_asr(self, bvid):
         """为ASR下载视频（完全对齐video_modes.py的下载逻辑：http2/Origin/Referer/长超时）"""
@@ -10443,8 +11009,8 @@ class AgentBrain:
                                 try:
                                     bili._wbi_keys = wkeys
                                     bili._wbi_keys_ts = time.time()
-                                except Exception:
-                                    pass
+                                except Exception as e:
+                                    log(f'非预期异常: {e}', 'WARN')
                 except Exception as e:
                     log(f"[WARN] ASR下载WBI密钥获取失败: {e}", "WARN")
 
@@ -10900,7 +11466,7 @@ B站等级: Lv.{target_level}
 """
             # [FIX] 用线程池异步执行，防止同步AI调用阻塞事件循环导致崩溃
             resp = await asyncio.to_thread(
-                openai.chat.completions.create,
+                openai.ChatCompletion.create,
                 model=MODEL_BRAIN,
                 messages=[
                     {"role": "system", "content": "你是B站上的一个普通用户。看了对方主页后再开口——围绕对方的投稿内容或签名展开话题。友好、有边界感、不油腻。"},
@@ -11313,6 +11879,12 @@ B站等级: Lv.{target_level}
             self.recommend_engine = None
 
     async def run(self):
+        # 🔒 单实例锁：防止多个 bot 进程同时运行
+        if not _acquire_bot_lock():
+            log("[LOCK] ❌ 已有 bot 实例正在运行，退出", "ERROR")
+            return
+        log("[LOCK] ✅ 单实例锁已获取", "INFO")
+        
         log("bilibili_learning_bot - 启动...", "SUCCESS")
         self.update_runtime_clock(starting=True)
         if self.previous_seen_at:
@@ -11558,8 +12130,8 @@ B站等级: Lv.{target_level}
                                 try:
                                     idx = rec_modes.index(self._last_recommend_mode)
                                     rec_modes = rec_modes[idx+1:] + rec_modes[:idx+1]
-                                except ValueError:
-                                    pass
+                                except ValueError as e:
+                                    log(f'值错误: {e}', 'DEBUG')
                             for mode in rec_modes[:2]:  # 尝试2种模式
                                 try:
                                     queries = await self.recommend_engine.generate_search_queries(mode=mode, count=2)
@@ -11848,7 +12420,7 @@ B站等级: Lv.{target_level}
 
                 self.energy -= 1
 
-                # [FIX] 学习归档：所有视频都学，低分学避雷，高分学知识（提在门槛之前）
+                # 🎯 学习归档：只归档高质量内容，低分/短时长/浅内容一律跳过
                 learning_topic = decision.get("learning_topic")
                 learn_success = False
                 learn_text = subtitle_text
@@ -11860,7 +12432,19 @@ B站等级: Lv.{target_level}
                     if danmaku_text: learn_text += f"【弹幕】{danmaku_text}\n"
                     if comment_text and comment_text != "[未读取评论]": learn_text += f"【评论】{comment_text}\n"
                     learn_text = learn_text.strip()
-                if learning_topic and learn_text and len(learn_text) > 20:
+                
+                # 🔒 三层质量门槛：分数 + 时长 + 内容长度
+                skip_reason = None
+                if score < LEARN_MIN_SCORE:
+                    skip_reason = f"分数过低({score:.1f}<{LEARN_MIN_SCORE})"
+                elif duration > 0 and duration < LEARN_MIN_DURATION_SECONDS:
+                    skip_reason = f"视频太短({duration}s<{LEARN_MIN_DURATION_SECONDS}s)"
+                elif not learn_text or len(learn_text) < 150:
+                    skip_reason = f"可学内容不足({len(learn_text) if learn_text else 0}字<150)"
+                
+                if skip_reason:
+                    log(f"📭 跳过学习归档: {skip_reason} | 《{title}》", "LEARN")
+                elif learning_topic and learn_text and len(learn_text) > 20:
                     try:
                         _desc = getattr(self, "_last_video_desc", "")
                         learn_success = await self.learn_from_video(bvid, title, up, video_url, learn_text, learning_topic, video_desc=_desc, score=score)
@@ -12154,6 +12738,16 @@ B站等级: Lv.{target_level}
 
                 await self.watch_and_sync_history(bvid)
 
+                # 📚 知识库定期审查：每N个视频后随机抽查归档质量
+                if KNOWLEDGE_REVIEW_INTERVAL > 0:
+                    self._knowledge_review_countdown -= 1
+                    if self._knowledge_review_countdown <= 0:
+                        self._knowledge_review_countdown = KNOWLEDGE_REVIEW_INTERVAL
+                        try:
+                            await self._review_knowledge_periodically()
+                        except Exception as review_e:
+                            log(f"知识库定期审查异常: {review_e}", "WARN")
+
             except asyncio.CancelledError:
                 log("主循环被取消 (CancelledError)，正常退出", "WARN")
                 raise  # 重新抛出，让 asyncio.run() 正确处理
@@ -12195,8 +12789,8 @@ async def _resolve_b23_short(short_code: str) -> str:
             m = re.search(r'BV[0-9A-Za-z]{10}', url)
             if m:
                 return m.group(0)
-    except Exception:
-        pass
+    except Exception as e:
+        log(f'非预期异常: {e}', 'WARN')
     return ""
 
 async def manual_video_analysis():
@@ -12254,8 +12848,8 @@ async def manual_video_analysis():
                     brain.cookies = json.load(f)
                 log(f"[AUTO] 从 bilibili_claw 项目加载到登录Cookie (UID: {brain.cookies.get('DedeUserID','?')})", "LOGIN")
                 cookie_loaded = True
-            except Exception:
-                pass
+            except Exception as e:
+                log(f'非预期异常: {e}', 'WARN')
     if not cookie_loaded:
         print(f"{Fore.YELLOW}[HINT] 未登录(Cookie文件不存在)，部分视频的AI字幕可能需要登录才能获取{Style.RESET_ALL}")
         print(f"{Fore.YELLOW}       建议先运行菜单 3 录入登录Cookie，以获取完整AI字幕功能{Style.RESET_ALL}")
@@ -12383,8 +12977,8 @@ async def manual_video_analysis():
             vinfo = meta.json()
             if vinfo.get('code') == 0:
                 _aid = vinfo.get('data', {}).get('aid', 0)
-        except Exception:
-            pass
+        except Exception as e:
+            log(f'非预期异常: {e}', 'WARN')
         await _agent_video_analysis(brain, bvid, title, up_name, video_url, _aid)
         return
 
@@ -12401,8 +12995,8 @@ async def manual_video_analysis():
     try:
         globals()['MOOD_CUSTOM_ENABLED'] = True
         globals()['MOOD_CUSTOM_VALUE'] = "客观冷静分析，专注内容质量，不带个人情绪"
-    except Exception:
-        pass
+    except Exception as e:
+        log(f'非预期异常: {e}', 'WARN')
 
     print(f"\n{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
     print(f"{Fore.CYAN}|  [模式] 客观分析 - 开始解析视频内容                           |{Style.RESET_ALL}")
@@ -12450,8 +13044,8 @@ async def manual_video_analysis():
                     f"  {dm.get('text','')}" for dm in danmaku_list[:15]
                 )
                 print(f"{Fore.GREEN}[OK] 获取到 {len(danmaku_list)} 条弹幕{Style.RESET_ALL}")
-        except Exception:
-            pass
+        except Exception as e:
+            log(f'非预期异常: {e}', 'WARN')
 
     # 3. AI决策分析（客观模式）
     print(f"\n{Fore.CYAN}[3/4] AI客观决策分析中...{Style.RESET_ALL}")
@@ -12523,8 +13117,8 @@ async def manual_video_analysis():
     try:
         globals()['MOOD_CUSTOM_ENABLED'] = original_custom
         globals()['MOOD_CUSTOM_VALUE'] = original_custom_value
-    except Exception:
-        pass
+    except Exception as e:
+        log(f'非预期异常: {e}', 'WARN')
 
     # 4. 如果干货 → 学习归档
     if score >= 6.0 or learning_topic:
@@ -12593,8 +13187,8 @@ def _scan_knowledge_base_md_files():
                     up_m = re.search(r'\*\*UP主\*\*:\s*(.+)', head)
                     if up_m:
                         up_name = up_m.group(1).strip()
-            except Exception:
-                pass
+            except Exception as e:
+                log(f'非预期异常: {e}', 'WARN')
             # 分类路径: 去掉文件名后的目录部分
             category_path = os.path.dirname(rel_path).replace(os.sep, '/')
             if not category_path or category_path == '.':
@@ -12833,30 +13427,47 @@ async def _agent_video_analysis(brain, bvid, title, up_name, video_url, aid=0):
         return result.strip()
 
     def _agent_search_knowledge(query):
-        """搜索知识库，匹配标题和文件内容"""
+        """搜索知识库（向量语义搜索 + 关键词匹配）"""
         all_files = _scan_knowledge_base_md_files()
         if not all_files:
             return "知识库为空"
+
+        # 尝试向量搜索
+        vector_hits = set()
+        try:
+            if KBSearchEngine:
+                from xingye_bot.settings import load_settings as _ls
+                from xingye_bot.state import BotState as _bs
+                _s = _ls()
+                _engine = KBSearchEngine(ModelClient(_s, _bs()))
+                _vec_results = _engine.search(query, top_k=10)
+                if _vec_results:
+                    for vr in _vec_results:
+                        if vr.get("bvid"):
+                            vector_hits.add(vr["bvid"])
+        except Exception:
+            pass
+
         q_lower = query.lower()
         matches = []
         for b, t, f, u, c in all_files:
             score = 0
+            if vector_hits and b in vector_hits:
+                score += 10  # 向量命中最高权重
             if q_lower in t.lower():
                 score += 3
-            # 简单关键词匹配
             for kw in q_lower.split():
                 if kw in t.lower():
                     score += 2
             if u and q_lower in u.lower():
                 score += 1
             if score > 0:
-                # 读文件前200字作为摘要
                 preview = ""
                 try:
                     with open(f, 'r', encoding='utf-8') as fh:
                         preview = fh.read(200).replace('\n', ' ')
-                except Exception:
-                    pass
+                except Exception as e:
+                    log(f'非预期异常: {e}', 'WARN')
                 matches.append((score, b, t, f, u, c, preview))
         matches.sort(key=lambda x: x[0], reverse=True)
         if not matches:
@@ -12904,8 +13515,8 @@ async def _agent_video_analysis(brain, bvid, title, up_name, video_url, aid=0):
         try:
             with open(full_path, 'r', encoding='utf-8') as fh:
                 preview = fh.read(300).replace('\n', ' ')
-        except Exception:
-            pass
+        except Exception as e:
+            log(f'非预期异常: {e}', 'WARN')
         action_desc = f"删除知识库文件: {rel_path}"
         detail = f"文件预览: {preview}..."
         result = await _agent_confirm("delete_file", action_desc, detail)
@@ -13008,8 +13619,8 @@ async def _agent_video_analysis(brain, bvid, title, up_name, video_url, aid=0):
             vinfo = meta.json()
             if vinfo.get('code') == 0:
                 desc = vinfo['data'].get('desc', '')[:500]
-        except Exception:
-            pass
+        except Exception as e:
+            log(f'非预期异常: {e}', 'WARN')
 
         # 评论
         comment_text = "[无评论]"
@@ -13017,8 +13628,8 @@ async def _agent_video_analysis(brain, bvid, title, up_name, video_url, aid=0):
         if aid:
             try:
                 comment_text, c_list = await brain._get_comments_context(aid)
-            except Exception:
-                pass
+            except Exception as e:
+                log(f'非预期异常: {e}', 'WARN')
 
         # 弹幕
         danmaku_text = ""
@@ -13026,8 +13637,8 @@ async def _agent_video_analysis(brain, bvid, title, up_name, video_url, aid=0):
             danmaku_list = await brain.maybe_read_danmaku(bvid)
             if danmaku_list:
                 danmaku_text = "\n".join(f"  {dm.get('text','')}" for dm in danmaku_list[:10])
-        except Exception:
-            pass
+        except Exception as e:
+            log(f'非预期异常: {e}', 'WARN')
 
         preview = f"""【视频信息】
 标题: {title}
@@ -13065,14 +13676,14 @@ UP主: {up_name}
         if aid:
             try:
                 comment_text, c_list = await brain._get_comments_context(aid)
-            except Exception:
-                pass
+            except Exception as e:
+                log(f'非预期异常: {e}', 'WARN')
             try:
                 danmaku_list = await brain.maybe_read_danmaku(bvid)
                 if danmaku_list:
                     danmaku_text = "\n".join(f"  {dm.get('text','')}" for dm in danmaku_list[:15])
-            except Exception:
-                pass
+            except Exception as e:
+                log(f'非预期异常: {e}', 'WARN')
 
         # 3. AI决策
         print(f"{Fore.CYAN}[Agent] [2/4] AI决策分析...{Style.RESET_ALL}")
@@ -13110,8 +13721,8 @@ UP主: {up_name}
             score = decision.get('score', 0)
             thought = decision.get('thought', '')
             learning_topic = decision.get('learning_topic', '')
-        except Exception:
-            pass
+        except Exception as e:
+            log(f'非预期异常: {e}', 'WARN')
 
         # 4. 学习归档
         print(f"{Fore.CYAN}[Agent] [3/4] 学习归档...{Style.RESET_ALL}")
@@ -13508,8 +14119,8 @@ async def revisit_knowledge_video(bvid, title, up_name, category_path, file_path
                     f"  {dm.get('text','')}" for dm in danmaku_list[:15]
                 )
                 print(f"{Fore.GREEN}[OK] 获取到 {len(danmaku_list)} 条弹幕{Style.RESET_ALL}")
-        except Exception:
-            pass
+        except Exception as e:
+            log(f'非预期异常: {e}', 'WARN')
 
     # ── [4/6] AI决策 ──
     print(f"\n{Fore.CYAN}[4/6] AI综合分析决策...{Style.RESET_ALL}")
@@ -13911,8 +14522,8 @@ async def organize_knowledge_base():
             try:
                 with open(fp, 'r', encoding='utf-8') as fh:
                     file_content = fh.read(3000)
-            except Exception:
-                pass
+            except Exception as e:
+                log(f'非预期异常: {e}', 'WARN')
 
             # AI分类
             try:
@@ -13973,8 +14584,8 @@ async def organize_knowledge_base():
                 if os.path.exists(old_dir) and not os.listdir(old_dir):
                     try:
                         os.rmdir(old_dir)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        log(f'非预期异常: {e}', 'WARN')
 
                 # 添加新分类路径到已知列表供后续分类使用
                 if final_cat not in all_cats:
@@ -13989,8 +14600,8 @@ async def organize_knowledge_base():
         classifier._sync_categories_from_file_index()
         classifier._save_metadata()
         classifier.cleanup_empty_folders()
-    except Exception:
-        pass
+    except Exception as e:
+        log(f'非预期异常: {e}', 'WARN')
 
     # ── 汇总 ──
     print(f"\n{Fore.LIGHTYELLOW_EX}╔══════════════════════════════════════════════════════════╗{Style.RESET_ALL}")
@@ -14005,15 +14616,15 @@ async def organize_knowledge_base():
     # 显示新的分类结构
     try:
         classifier.show_category_structure()
-    except Exception:
-        pass
+    except Exception as e:
+        log(f'非预期异常: {e}', 'WARN')
 
 
 async def _call_ai_with_retry_static(model, messages, request_timeout=30, max_retries=2):
     """静态AI调用辅助函数（不依赖brain实例），带重试"""
     for attempt in range(max_retries + 1):
         try:
-            resp = openai.chat.completions.create(
+            resp = openai.ChatCompletion.create(
                 model=model,
                 messages=messages,
                 timeout=request_timeout
@@ -14055,6 +14666,11312 @@ if __name__ == "__main__":
                 print(f"{Fore.RED}[ERROR] 机器人运行异常: {e}{Style.RESET_ALL}")
                 import traceback
                 traceback.print_exc()
+            finally:
+                # 🔒 确保锁文件被释放（atexit 只在 Python 退出时触发，
+                # 但主菜单循环会继续运行，所以需要显式释放）
+                _release_bot_lock()
+        elif choice == "2":
+            show_config_menu()
+        elif choice == "3":
+            show_login_menu()
+        elif choice == "4":
+            show_knowledge_base_menu()
+        elif choice == "5":
+            show_interest_menu()
+        elif choice == "6":
+            show_comment_menu()
+        elif choice == "7":
+            show_private_message_menu()
+        elif choice == "8":
+            show_diary_evolution_menu()
+        elif choice == "9":
+            show_agent_skill_menu()
+        elif choice.lower() == "f":
+            show_up_danmaku_menu()
+        elif choice.lower() == "g":
+            _configure_asr_settings()
+            if save_config(config):
+                print(f"{Fore.GREEN}[OK] ASR设置已保存{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.RED}[ERROR] ASR设置保存失败{Style.RESET_ALL}")
+        elif choice.lower() == "d":
+            _configure_dry_goods_settings()
+        elif choice.lower() == "m":
+            show_mood_menu()
+        elif choice.lower() == "v":
+            try:
+                asyncio.run(manual_video_analysis())
+            except KeyboardInterrupt:
+                print(f"\n{Fore.YELLOW}[WARN] 用户中断{Style.RESET_ALL}")
+            except Exception as e:
+                print(f"{Fore.RED}[ERROR] 手动视频分析异常: {e}{Style.RESET_ALL}")
+                import traceback
+                traceback.print_exc()
+        elif choice.lower() == "k":
+            try:
+                asyncio.run(revisit_knowledge_base_menu())
+            except KeyboardInterrupt:
+                print(f"\n{Fore.YELLOW}[WARN] 用户中断{Style.RESET_ALL}")
+            except Exception as e:
+                print(f"{Fore.RED}[ERROR] 知识库重温异常: {e}{Style.RESET_ALL}")
+                import traceback
+                traceback.print_exc()
+        elif choice.lower() == "r":
+            factory_reset_all()
+        elif choice.lower() == "e":
+            export_config()
+        elif choice.lower() == "i":
+            import_config()
+        elif choice.lower() == "o":
+            try:
+                asyncio.run(organize_knowledge_base())
+            except KeyboardInterrupt:
+                print(f"\n{Fore.YELLOW}[WARN] 用户中断{Style.RESET_ALL}")
+            except Exception as e:
+                print(f"{Fore.RED}[ERROR] 知识库整理异常: {e}{Style.RESET_ALL}")
+                import traceback
+                traceback.print_exc()
+        else:
+            print(f"{Fore.RED}[ERROR] 无效选项，请重新选择！{Style.RESET_ALL}")
+    def _judge_asr_skip(self, bvid, title=""):
+        """
+        [已废弃，由 _ai_judge_has_human_voice 替代]
+        AI预判：根据标题/分区/标签判断是否跳过ASR
+        返回 (是否跳过, 原因)
+        """
+        from xingye_bot.asr_engine import ASREngine
+
+        title_str = title or ""
+        return ASREngine.should_skip_asr(
+            title=title_str,
+            tags=getattr(self, "_current_video_tags", None) or [],
+            category=getattr(self, "_current_video_category", "") or "",
+            cover_desc=getattr(self, "_current_video_cover_desc", "") or "",
+            duration=getattr(self, "_current_video_duration", 0) or 0,
+        )
+
+    async def _download_video_for_asr(self, bvid):
+        """为ASR下载视频（完全对齐video_modes.py的下载逻辑：http2/Origin/Referer/长超时）"""
+        try:
+            import tempfile, hashlib as _h, time as _t
+            referer = f'https://www.bilibili.com/video/{bvid}'
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Referer': referer,
+                'Origin': 'https://www.bilibili.com',
+            }
+            async with httpx.AsyncClient(
+                http2=True,
+                headers=headers, cookies=self.cookies,
+                timeout=90.0, follow_redirects=True
+            ) as client:
+                # [FIX] WBI签名：独立获取，不依赖 self.bili._wbi_keys 避免 AttributeError
+                wkeys = None
+                try:
+                    nav = await client.get('https://api.bilibili.com/x/web-interface/nav')
+                    nd = nav.json()
+                    if nd.get('code') == 0:
+                        wi = nd['data'].get('wbi_img', {})
+                        im = re.search(r'/([^/]+)\.(?:png|svg)$', wi.get('img_url', ''))
+                        sm = re.search(r'/([^/]+)\.(?:png|svg)$', wi.get('sub_url', ''))
+                        if im and sm:
+                            wkeys = (im.group(1), sm.group(1))
+                            # 顺便缓存到 bili 实例（如果可用）
+                            bili = getattr(self, 'bili', None)
+                            if bili and hasattr(bili, '_wbi_keys'):
+                                try:
+                                    bili._wbi_keys = wkeys
+                                    bili._wbi_keys_ts = time.time()
+                                except Exception as e:
+                                    log(f'非预期异常: {e}', 'WARN')
+                except Exception as e:
+                    log(f"[WARN] ASR下载WBI密钥获取失败: {e}", "WARN")
+
+                params = {'bvid': bvid}
+                if wkeys:
+                    wts = int(_t.time())
+                    sp = dict(params)
+                    sp['wts'] = wts
+                    si = sorted(sp.items(), key=lambda x: x[0])
+                    qs = '&'.join(f'{k}={v}' for k, v in si)
+                    sp['w_rid'] = _h.md5((qs + wkeys[0] + wkeys[1]).encode()).hexdigest()
+                    params = sp
+
+                v_res = await client.get('https://api.bilibili.com/x/web-interface/view', params=params)
+                v_data = v_res.json()
+                if v_data.get('code') != 0:
+                    return None
+                info = v_data['data']
+                cid = info.get('cid', 0)
+
+                # 获取视频流
+                play_params = {'bvid': bvid, 'cid': cid, 'qn': 32, 'fnval': 0, 'fourk': 0}
+                if wkeys:
+                    wts = int(_t.time())
+                    sp = dict(play_params)
+                    sp['wts'] = wts
+                    si = sorted(sp.items(), key=lambda x: x[0])
+                    qs = '&'.join(f'{k}={v}' for k, v in si)
+                    sp['w_rid'] = _h.md5((qs + wkeys[0] + wkeys[1]).encode()).hexdigest()
+                    play_params = sp
+                play = await client.get(
+                    'https://api.bilibili.com/x/player/playurl',
+                    params=play_params
+                )
+                play_data = play.json()
+                durls = play_data.get('data', {}).get('durl', [])
+                if not durls:
+                    return None
+                video_url = durls[0]['url']
+
+                # 下载
+                out_dir = os.path.join(tempfile.gettempdir(), "bilibili_asr", bvid)
+                os.makedirs(out_dir, exist_ok=True)
+                out_path = os.path.join(out_dir, f"{bvid}.mp4")
+
+                async with client.stream("GET", video_url, headers=headers) as resp:
+                    resp.raise_for_status()
+                    with open(out_path, "wb") as f:
+                        async for chunk in resp.aiter_bytes(1024 * 256):
+                            f.write(chunk)
+
+                return out_path
+        except Exception as e:
+            log(f"ASR视频下载失败: {e}", "WARN")
+            return None
+
+    async def analyze_vision(self, pic_url):
+        if not pic_url: return "无封面", 0
+        if self._is_ai_degraded(): return "AI降级,跳过", 0
+        try:
+            resp = await self._call_ai_with_retry(
+                model=MODEL_VISION,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT_VISION},
+                    {"role": "user", "content": [
+                        {"type": "text", "text": "评价"},
+                        {"type": "image_url", "image_url": {"url": pic_url}}
+                    ]}
+                ],
+                request_timeout=90
+            )
+            content = resp.choices[0].message.content
+            score = 5.0
+            if "Score:" in content:
+                try:
+                    parts = content.split("Score:")
+                    desc = parts[0].strip()[:15]
+                    score = float(parts[1].strip())
+                except (ValueError, IndexError):
+                    desc = content[:15]
+            else:
+                desc = content[:15]
+            return desc, score
+        except Exception as e:
+            log(f"封面分析失败(已重试): {_mask_urls(str(e)[:80])}", "WARN")
+            return "分析失败", 0
+
+    async def judge_interest_with_ai(self, title, up, vis_desc, vis_score):
+        interests = self.interest_mgr.get_interests()
+        if not interests:
+            return True, [], "未设置兴趣，默认通过"
+
+        matched = self.interest_mgr.get_matching_interests(title, up)
+        if matched:
+            return True, matched, f"关键词匹配: {', '.join(matched)}"
+
+        prompt = f"""
+请判断这个B站视频是否符合用户兴趣。
+
+用户兴趣: {", ".join(interests)}
+视频标题: {title}
+UP主: {up}
+封面印象: {vis_desc}
+封面印象分: {vis_score}
+
+要求:
+1. 综合标题、UP主、封面印象判断，不要只做关键词匹配。
+2. 只输出JSON，格式为:
+{{"interested": true, "matched": ["兴趣1"], "reason": "一句话理由"}}
+3. 如果明显不相关，interested=false，matched=[]。
+"""
+        try:
+            resp = await self._call_ai_with_retry(
+                model=MODEL_BRAIN,
+                messages=[
+                    {"role": "system", "content": "你是B站视频兴趣筛选器，只输出合法JSON。"},
+                    {"role": "user", "content": prompt}
+                ],
+                request_timeout=90
+            )
+            raw = resp.choices[0].message.content.strip()
+            # [FIX] 多策略JSON提取：嵌套匹配 + rfind兜底
+            start = raw.find("{")
+            json_str = raw
+            if start >= 0:
+                # 嵌套匹配找闭合的 }
+                depth = 0
+                match_end = -1
+                for i in range(start, len(raw)):
+                    if raw[i] == '{':
+                        depth += 1
+                    elif raw[i] == '}':
+                        depth -= 1
+                        if depth == 0:
+                            match_end = i
+                            break
+                if match_end >= 0:
+                    json_str = raw[start:match_end + 1]
+                else:
+                    end = raw.rfind("}")
+                    if end >= start:
+                        json_str = raw[start:end + 1]
+            # ── 修复模型偶尔用单引号/不规范JSON的错误 ──
+            try:
+                data = json.loads(json_str)
+            except json.JSONDecodeError:
+                # 尝试修复常见问题：单引号→双引号
+                fixed = json_str.replace("'", '"')
+                # 修复 True/False/None 大小写（replace单引号后可能被误改）
+                fixed = re.sub(r'\bTrue\b', 'true', fixed)
+                fixed = re.sub(r'\bFalse\b', 'false', fixed)
+                fixed = re.sub(r'\bNone\b', 'null', fixed)
+                data = json.loads(fixed)
+            ai_matched = data.get("matched") or []
+            if isinstance(ai_matched, str):
+                ai_matched = [ai_matched]
+            reason = str(data.get("reason") or "AI综合判断")
+            return bool(data.get("interested")), ai_matched, reason
+        except Exception as e:
+            log(f"AI兴趣判断失败(已重试)，退回关键词判断: {str(e)[:80]}", "WARN")
+            return False, [], "关键词未匹配"
+
+    async def _get_comments_context(self, aid: int):
+        c_list_raw = await self.bili.get_hot_comments(aid, limit=8)
+        if not c_list_raw: return "暂无评论", []
+
+        # [SPEED] 两阶段并行：先收集所有评论基本信息，再并行分析图片
+        comment_entries = []
+        image_tasks = []
+        for i, c in enumerate(c_list_raw):
+            try:
+                cid, user, msg = c['rpid'], c['member']['uname'], c['content']['message']
+                entry = {"cid": cid, "user": user, "content": msg, "pic_info": ""}
+                if VISION_COMMENT_IMAGES_ENABLED:
+                    pictures = c.get('content', {}).get('pictures', [])
+                    if pictures:
+                        img_urls = [p.get('img_src', '') for p in pictures[:3] if p.get('img_src')]
+                        if img_urls:
+                            image_tasks.append(self._analyze_comment_images(cid, img_urls, user_msg=msg))
+                            entry["_img_idx"] = len(image_tasks) - 1
+                comment_entries.append(entry)
+            except (KeyError, TypeError):
+                continue
+
+        # 并行分析所有评论图片
+        pic_results = await asyncio.gather(*image_tasks, return_exceptions=True) if image_tasks else []
+
+        # 组装结果
+        context_str = "【热门评论】:\n"
+        c_list_clean = []
+        for entry in comment_entries:
+            cid, user, msg = entry["cid"], entry["user"], entry["content"]
+            pic_info = ""
+            if "_img_idx" in entry:
+                result = pic_results[entry["_img_idx"]]
+                if isinstance(result, str) and result:
+                    pic_info = f" [附图描述: {result}]"
+            context_str += f"ID:{cid} User:{user} Msg:{msg}{pic_info}\n"
+            c_list_clean.append({"id": cid, "user": user, "content": msg, "pic_info": pic_info.strip()})
+        return context_str, c_list_clean
+
+    async def _analyze_comment_images(self, cid, img_urls, user_msg=""):
+        """[VISION] 下载评论文图片并用视觉AI描述，同时展示评论文字+图片"""
+        if not img_urls or self._is_ai_degraded():
+            return ""
+        max_images = min(len(img_urls), VISION_MAX_COMMENT_IMAGES)
+        import httpx as _httpx, base64 as _b64
+
+        async def _dl_and_analyze(idx, url):
+            try:
+                async with _httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+                    r = await client.get(url, headers={
+                        'User-Agent': 'Mozilla/5.0',
+                        'Referer': 'https://www.bilibili.com'
+                    })
+                    if r.status_code != 200:
+                        return None
+                    data_url = "data:image/jpeg;base64," + _b64.b64encode(r.content).decode("ascii")
+                resp = await self._call_ai_with_retry(
+                    model=MODEL_VISION,
+                    messages=[{
+                        "role": "system",
+                        "content": "你是评论图片分析助手。用一句简短中文描述图片内容（是什么类型的图、主要内容、情绪倾向）。"
+                    }, {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "描述这张评论区的图片"},
+                            {"type": "image_url", "image_url": {"url": data_url}}
+                        ]
+                    }],
+                    request_timeout=20
+                )
+                desc = resp.choices[0].message.content.strip()[:80]
+                return f"[图{idx+1}]{desc}"
+            except Exception as e:
+                log(f"评论图片分析失败(cid={cid} img{idx}): {e}", "DEBUG")
+                return None
+
+        # [SPEED] 并行下载+分析所有图片
+        tasks = [_dl_and_analyze(i, url) for i, url in enumerate(img_urls[:max_images])]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        analyzed = [r for r in results if isinstance(r, str)]
+        if analyzed:
+            msg_preview = user_msg[:40] + "..." if len(user_msg) > 40 else user_msg
+            log(f"[EYE] 评论({msg_preview}) + 附图({len(analyzed)}张): {'; '.join(analyzed)}", "EYE")
+        return "; ".join(analyzed)
+
+    async def watch_and_sync_history(self, bvid):
+        sec = random.uniform(VIDEO_INTERVAL_MIN, VIDEO_INTERVAL_MAX)
+        log(f"短暂休息 {sec:.1f} 秒后继续...", "INFO")
+        try:
+            res = await self.bili.report_history(bvid, played_time=random.randint(60,120))
+            if res.get('code') == 0:
+                log("已同步观看历史 (手机可见)", "NOTE")
+            else:
+                log(f"历史记录同步失败: {res.get('message')}", "WARN")
+        except Exception as e:
+            log(f"上报历史时异常: {e}", "ERROR")
+
+        await asyncio.sleep(sec)
+
+    async def energy_recovery_session(self):
+        log(f"精力耗尽 ({self.energy}%)，进入恢复模式... [FAST]", "ENERGY")
+
+        recovery_rounds = random.randint(ROUNDS_MIN, ROUNDS_MAX)
+        log(f"预计恢复 {recovery_rounds} 轮，请耐心等待...", "ENERGY")
+
+        for round_num in range(1, recovery_rounds + 1):
+            energy_gain = random.randint(ENERGY_RECOVERY_MIN, ENERGY_RECOVERY_MAX)
+            self.energy = min(MAX_ENERGY, self.energy + energy_gain)
+
+            round_interval = random.randint(ROUND_INTERVAL_MIN, ROUND_INTERVAL_MAX)
+
+            log(f"第 {round_num}/{recovery_rounds} 轮恢复: +{energy_gain}% → {self.energy}% (等待{round_interval}秒)", "ENERGY")
+
+            if round_num < recovery_rounds:
+                # [SPEED] 一次性睡眠替代逐10秒循环
+                log(f"下次恢复倒计时: {round_interval}秒...", "ENERGY")
+                await asyncio.sleep(round_interval)
+
+            self.last_energy_recovery = datetime.now()
+
+        log(f"恢复完成！当前精力: {self.energy}%，准备继续工作！", "SUCCESS")
+
+    async def check_and_handle_comments(self):
+        """检查并处理新评论，返回处理数量"""
+        if not COMMENT_CHECK_ENABLED:
+            return 0
+        if not self.comment_mgr:
+            return 0
+        
+        now = datetime.now()
+        if self.last_comment_check and (now - self.last_comment_check).total_seconds() < COMMENT_CHECK_INTERVAL:
+            return 0
+        
+        try:
+            processed = await self.comment_mgr.process_new_comments(self.bili)
+            if processed > 0:
+                log(f"本次处理了 {processed} 条评论互动", "COMMENT")
+                # 消耗精力
+                self.energy -= processed
+                if self.energy < 0:
+                    self.energy = 0
+                log(f"评论互动消耗 {processed} 点精力，剩余: {self.energy}%", "ENERGY")
+            return processed
+        except Exception as e:
+            log(f"检查评论失败: {e}", "ERROR")
+            return 0
+        finally:
+            self.last_comment_check = now
+
+    async def check_and_handle_private_messages(self):
+        """检查并处理新私信"""
+        if not PRIVATE_MESSAGE_ENABLED:
+            return 0
+
+        now = datetime.now()
+        if self.last_private_message_check and (now - self.last_private_message_check).total_seconds() < PRIVATE_MESSAGE_CHECK_INTERVAL:
+            return 0
+
+        if not self.private_message_mgr:
+            return 0
+
+        try:
+            processed = await self.private_message_mgr.process_new_messages()
+            if processed > 0:
+                log(f"本次处理了 {processed} 条私信", "DM")
+            return processed
+        except Exception as e:
+            log(f"检查私信失败: {e}", "ERROR")
+            return 0
+        finally:
+            self.last_private_message_check = now
+
+    async def maybe_initiate_chat(self):
+        """[MSG] 偶尔主动找人聊天（学而时习之的社交版）。"""
+        if not ACTIVE_CHAT_ENABLED:
+            return
+        if not PRIVATE_MESSAGE_ENABLED or not PRIVATE_MESSAGE_AUTO_REPLY:
+            return
+        if not self.private_message_mgr:
+            return
+        if self._active_chat_count >= ACTIVE_CHAT_MAX_PER_SESSION:
+            return
+        cooldown_ok = (datetime.now() - self._last_active_chat_at).total_seconds() / 60 >= ACTIVE_CHAT_COOLDOWN_MINUTES
+        if not cooldown_ok:
+            return
+        # [FIX] 时间段守卫：深夜/凌晨不主动打扰别人（23:00-07:00）
+        hour = datetime.now().hour
+        if hour >= 23 or hour < 7:
+            return
+        if random.random() >= PROB_INITIATE_CHAT:
+            return
+
+        try:
+            # 随机从关注/粉丝列表里挑一个人
+            target_uid = None
+            target_name = ""
+            try:
+                # 优先从粉丝里找
+                followers = await self.private_message_mgr.toolbox.followers_search("", limit=20)
+                if followers and isinstance(followers, list) and len(followers) > 0:
+                    pick = random.choice(followers)
+                    target_uid = int(pick.get("mid") or 0)
+                    target_name = str(pick.get("name", ""))
+            except Exception as e:
+                log(f"[WARN] 获取粉丝列表失败: {e}", "WARN")
+            if not target_uid:
+                try:
+                    followings = await self.private_message_mgr.toolbox.followings_search("", limit=20)
+                    if followings and isinstance(followings, list) and len(followings) > 0:
+                        pick = random.choice(followings)
+                        target_uid = int(pick.get("mid") or 0)
+                        target_name = str(pick.get("name", ""))
+                except Exception as e:
+                    log(f"[WARN] 获取关注列表失败: {e}", "WARN")
+            if not target_uid or target_uid == self.bili.uid:
+                return
+
+            self._active_chat_count += 1
+            self._last_active_chat_at = datetime.now()
+            log(f"[MSG] 主动找 @{target_name}(uid:{target_uid}) 聊聊天... (第{self._active_chat_count}次)", "CHAT")
+
+            # ── 🔍 先看对方主页：拉取个人信息 + 最近投稿 ──
+            target_profile = {}
+            target_videos = []
+            try:
+                target_profile = await self.bili.get_up_info(target_uid) or {}
+                if not target_profile.get("error"):
+                    log(f"   📋 {target_name} 主页: Lv.{target_profile.get('level',0)} "
+                        f"签名={str(target_profile.get('sign',''))[:40]}", "DEBUG")
+            except Exception as e:
+                log(f"   [WARN] 无法获取 {target_name} 主页: {e}", "DEBUG")
+
+            try:
+                target_videos = await self.bili.get_up_videos(target_uid, limit=5) or []
+                if target_videos:
+                    titles = [v.get("title","")[:40] for v in target_videos[:3]]
+                    log(f"   [VIDEO] {target_name} 最近投稿: {'; '.join(titles)}", "DEBUG")
+            except Exception as e:
+                log(f"   [WARN] 无法获取 {target_name} 视频: {e}", "DEBUG")
+
+            # 构建目标用户画像
+            target_sign = str(target_profile.get("sign", "")).strip()
+            target_level = target_profile.get("level", 0)
+            target_follower = target_profile.get("follower", 0)
+            target_video_count = target_profile.get("video_count", 0)
+
+            video_summary = ""
+            if target_videos:
+                video_summary = "对方最近投稿: " + "；".join(
+                    [v.get("title","")[:50] for v in target_videos[:5]]
+                )
+
+            target_profile_block = f"""【目标用户主页信息】
+用户名: {target_name}
+个性签名: {target_sign if target_sign else "（无）"}
+B站等级: Lv.{target_level}
+粉丝数: {target_follower}
+投稿数: {target_video_count}
+{video_summary if video_summary else "（未拉取到投稿信息）"}
+"""
+
+            # 生成开场白
+            interests = self.interest_mgr.get_interests()
+            interest_str = "、".join(interests[:5]) if interests else "随便聊聊"
+            persona_block = self.persona_mgr.build_prompt_block()
+            mood_block = self.mood_mgr.build_prompt_block()
+
+            prompt = f"""
+你要给B站上的一个用户「{target_name}」发一条初次私信打招呼。
+这是主动发起聊天，不是回复别人的消息。
+
+{persona_block}
+{mood_block}
+你的兴趣: {interest_str}
+{target_profile_block}
+当前时间: {datetime.now().isoformat(timespec='seconds')}
+
+要求：
+1. 自然、轻松、不油腻，像普通B站用户之间的寒暄
+2. 🚫 不要聊你自己的兴趣爱好！先看看目标用户的签名和投稿内容——
+   - 如果对方投稿了具体领域的视频（游戏/动画/科技/音乐等），围绕对方的创作内容展开话题
+   - 如果对方签名里有信息，可以顺着签名聊
+   - 只有当对方主页完全空白时，才简单聊聊日常
+3. 不要太长，50字以内
+4. 不要用客服腔、不要自来熟、不要"大佬""up主"之类刻意恭维
+5. 禁止承诺做违法、刷量、侵权的事
+6. 结尾带上"{config.get('behavior', {}).get('ai_marker', '（内容由AI生成并由AI回复）')}"
+7. 如果看了对方主页实在不知道聊什么，返回空字符串
+
+只返回要发送的内容，不要解释。
+"""
+            # [FIX] 用线程池异步执行，防止同步AI调用阻塞事件循环导致崩溃
+            resp = await asyncio.to_thread(
+                openai.ChatCompletion.create,
+                model=MODEL_BRAIN,
+                messages=[
+                    {"role": "system", "content": "你是B站上的一个普通用户。看了对方主页后再开口——围绕对方的投稿内容或签名展开话题。友好、有边界感、不油腻。"},
+                    {"role": "user", "content": prompt}
+                ],
+                timeout=60
+            )
+            chat_text = resp.choices[0].message.content.strip()
+            if not chat_text or chat_text.upper() == "END":
+                log(f"AI判断不适合主动聊天 @{target_name}，跳过", "CHAT")
+                return
+
+            chat_text = ensure_ai_marker(chat_text)
+            ok, reason, hits = ReplySafetyGuard().review("(主动发起聊天)", chat_text)
+            if not ok:
+                log(f"主动聊天内容被拦截: {reason} | 命中: {', '.join(hits)}", "WARN")
+                return
+
+            await asyncio.sleep(human_reply_delay())
+            result = await self.private_message_mgr.send_reply(target_uid, chat_text)
+            log(f"[MSG] 已主动发消息给 @{target_name}: {chat_text[:60]}", "CHAT")
+
+            # 记录到日记
+            self.record_session_event(
+                "active_chat",
+                target_uid=target_uid,
+                target_name=target_name,
+                content=chat_text[:120]
+            )
+        except Exception as e:
+            log(f"主动聊天失败: {e}", "WARN")
+
+    # ── [*] UP主关注（AI自动关注喜欢的UP主）───────────────────────────────
+    def _reset_daily_follows(self):
+        today = datetime.now().strftime("%Y-%m-%d")
+        if self.daily_follows_date != today:
+            self.daily_follows = 0
+            self.daily_follows_date = today
+
+    def _reset_daily_danmaku_likes(self):
+        today = datetime.now().strftime("%Y-%m-%d")
+        if self.daily_danmaku_likes_date != today:
+            self.daily_danmaku_likes = 0
+            self.daily_danmaku_likes_date = today
+
+    def _reset_daily_danmaku_sent(self):
+        today = datetime.now().strftime("%Y-%m-%d")
+        if self.daily_danmaku_sent_date != today:
+            self.daily_danmaku_sent = 0
+            self.daily_danmaku_sent_date = today
+
+    async def maybe_follow_up(self, up_uid: int, up_name: str, score: float):
+        """根据AI评分和印象积累决定是否关注UP主。
+        
+        关注即认可，不是抽奖——设计理念：
+        1. 评分 ≥ UP_FOLLOW_MIN_SCORE（默认7分）才进入候选池
+        2. 需积累 ≥ UP_FOLLOW_MIN_IMPRESSIONS 次正面印象（首次观看不计）
+        3. 特别优秀（≥ UP_FOLLOW_EXCEPTIONAL_SCORE）可首看即关注
+        4. 已关注的不重复关注（followed 标志）
+        """
+        if not UP_FOLLOW_ENABLED or not up_uid or not up_name:
+            return False
+        
+        self._reset_daily_follows()
+        if self.daily_follows >= UP_FOLLOW_MAX_DAILY:
+            return False
+        
+        # 冷却检查
+        cooldown_ok = (datetime.now() - self.last_follow_at).total_seconds() / 60 >= UP_FOLLOW_COOLDOWN_MINUTES
+        if not cooldown_ok:
+            return False
+        
+        # ── [*] 核心强化：评分门槛 ──
+        # 不得因概率到了就关注评分平庸的 UP
+        exceptional = score >= UP_FOLLOW_EXCEPTIONAL_SCORE
+        if not exceptional and score < UP_FOLLOW_MIN_SCORE:
+            return False  # 评分不达标，直接拒绝
+        
+        # ── [*] 核心强化：已关注不重复 ──
+        up_entry = self.memory.setdefault("known_ups", {}).get(up_name, {})
+        if up_entry.get("followed"):
+            return False  # 已关注过
+        
+        # ── [*] 核心强化：印象积累 ──
+        views = up_entry.get("views", 0)
+        avg_score = up_entry.get("avg_score", score)
+        if not exceptional and views < UP_FOLLOW_MIN_IMPRESSIONS:
+            # 看的次数不够，不关注（但记录印象）
+            return False
+        
+        # ── 概率计算 ──
+        # 基础概率 × 评分因子 × 印象奖励（看得越多越可能关注，但有上限）
+        score_factor = min(score / 5.0, 2.0) if score > 0 else 1.0
+        impression_bonus = min(views / max(UP_FOLLOW_MIN_IMPRESSIONS, 1), 2.0)
+        adjusted_prob = UP_FOLLOW_AUTO_PROB * score_factor * impression_bonus
+        if not exceptional and random.random() >= adjusted_prob:
+            return False
+        
+        try:
+            avg_str = f", 均分:{avg_score:.1f}" if views else ""
+            log(f"[*] 正在关注 UP主 @{up_name} (UID:{up_uid})... (评分:{score}, 观看{views}次{avg_str}, 概率:{adjusted_prob:.3f})", "FOLLOW")
+            result = await self.bili.follow_up(up_uid)
+            if result.get("code") == 0:
+                self.daily_follows += 1
+                self.last_follow_at = datetime.now()
+                # 设置 followed 标志
+                up_entry["followed"] = True
+                up_entry["followed_at"] = datetime.now().isoformat()
+                if not up_entry.get("uid"):
+                    up_entry["uid"] = up_uid
+                self._save_memory()
+                log(f"[OK] 已关注 UP主 @{up_name}！今日已关注 {self.daily_follows}/{UP_FOLLOW_MAX_DAILY}", "SUCCESS")
+                self.record_session_event("follow_up", up_uid=up_uid, up_name=up_name, score=score, views=views, avg_score=round(avg_score, 1) if views else score)
+                return True
+            elif result.get("code") == 22014:
+                # 已经关注过（比如之前网页/App上关注的），同步本地内存即可
+                up_entry["followed"] = True
+                if not up_entry.get("uid"):
+                    up_entry["uid"] = up_uid
+                self._save_memory()
+                log(f"已关注过 UP主 @{up_name} (之前已关注，已同步记录)", "INFO")
+                return True
+            else:
+                log(f"关注失败: {result.get('msg')}", "WARN")
+        except Exception as e:
+            log(f"关注 UP主异常: {e}", "WARN")
+        return False
+
+    async def maybe_browse_up_videos(self, force_up_uid=None, up_name_hint=None):
+        """浏览UP主的主页视频，优先浏览喜欢的UP主，可作为推荐流替代目标。
+        
+        Returns: 单个视频dict（格式兼容主循环target）或 None
+        """
+        if not UP_FOLLOW_ENABLED:
+            return None
+        
+        # 冷却检查（force_up_uid 可跳过冷却）
+        elapsed = (datetime.now() - self.last_up_browse_at).total_seconds() / 60
+        if elapsed < UP_FOLLOW_COOLDOWN_MINUTES and not force_up_uid:
+            return None
+        
+        target_uid = force_up_uid
+        chosen_up_name = up_name_hint
+        is_favorite = False
+        
+        if not target_uid:
+            # ── [*] 优先浏览喜欢的UP主（更高概率）──
+            favorite_ups = self.get_favorite_ups()
+            if favorite_ups and random.random() < UP_FOLLOW_FAVORITE_PROB:
+                fav = random.choice(favorite_ups)
+                fav_uid = fav.get("uid")
+                if fav_uid:
+                    target_uid = int(fav_uid)
+                    chosen_up_name = fav.get("name")
+                    is_favorite = True
+                # 也检查全局配置中的喜爱UID列表
+                elif UP_FOLLOW_FAVORITE_UID_LIST and len(UP_FOLLOW_FAVORITE_UID_LIST) > 0:
+                    target_uid = random.choice(UP_FOLLOW_FAVORITE_UID_LIST)
+                    is_favorite = True
+            
+            # 回退：随机浏览已知UP主
+            if not target_uid:
+                if random.random() >= UP_FOLLOW_BROWSE_PROB:
+                    return None
+                known_ups = self.memory.get("known_ups", {})
+                if not known_ups:
+                    return None
+                # 随机选择一个已关注的UP主
+                chosen_up_name = random.choice(list(known_ups.keys()))
+                uid_from_mem = known_ups.get(chosen_up_name, {}).get("uid")
+                if uid_from_mem:
+                    target_uid = int(uid_from_mem)
+                else:
+                    # 尝试从user_profile获取UID
+                    profile = self.user_profile_mgr.get_profile(f"up::{chosen_up_name}")
+                    if profile and profile.get("uid"):
+                        target_uid = int(profile["uid"])
+                    else:
+                        return None
+            
+            if not target_uid:
+                return None
+        
+        self.last_up_browse_at = datetime.now()
+        tag = "[STAR]喜爱" if is_favorite else "📺"
+        log(f"{tag} 浏览 UP主 {'@'+chosen_up_name if chosen_up_name else ''} (UID:{target_uid}) 的主页视频...", "BROWSE")
+        
+        try:
+            videos = await self.bili.get_up_videos(target_uid, limit=UP_FOLLOW_MAX_BROWSE)
+            if videos:
+                log(f"获取到 {len(videos)} 个视频:", "BROWSE")
+                for v in videos:
+                    log(f"  • {v.get('title','')[:40]} | 播放:{v.get('play',0)}", "BROWSE")
+                # 返回一个随机视频作为可用的目标
+                chosen = random.choice(videos)
+                return {
+                    "bvid": chosen.get("bvid", ""),
+                    "title": chosen.get("title", ""),
+                    "owner": {"name": chosen_up_name or "", "mid": target_uid},
+                    "id": chosen.get("aid", 0),
+                    "aid": chosen.get("aid", 0),
+                    "pic": chosen.get("pic", ""),
+                    "_source": "up_browse",
+                    "_is_favorite_up": is_favorite
+                }
+            else:
+                log("该UP主暂无视频或获取失败", "INFO")
+        except Exception as e:
+            log(f"浏览UP主视频异常: {e}", "WARN")
+        return None
+
+    # ── [MSG] 弹幕互动 ──────────────────────────────────────────────────
+    async def maybe_read_danmaku(self, bvid: str):
+        """读取视频弹幕，融入AI决策上下文。"""
+        if not DANMAKU_ENABLED or not bvid:
+            return []
+        
+        if random.random() >= DANMAKU_READ_PROB:
+            return []
+        
+        try:
+            log("[MSG] 正在读取弹幕...", "DANMAKU")
+            cid, danmaku_list = await self.bili.get_danmakus(bvid, limit=30)
+            if danmaku_list:
+                self._last_danmaku_videos[bvid] = danmaku_list
+                self._last_danmaku_cids[bvid] = cid
+                # 清理旧缓存（保留最近10个视频的弹幕）
+                if len(self._last_danmaku_videos) > 10:
+                    oldest = list(self._last_danmaku_videos.keys())[0]
+                    del self._last_danmaku_videos[oldest]
+                
+                log(f"读取到 {len(danmaku_list)} 条弹幕 (cid={cid})", "DANMAKU")
+                # 显示几条代表性弹幕
+                for dm in danmaku_list[:5]:
+                    log(f"  弹幕: {dm.get('text','')[:40]}", "DANMAKU")
+                
+                # 同时触发点赞和发送
+                await self.maybe_like_danmaku(bvid, danmaku_list, cid)
+                await self.maybe_send_danmaku(bvid)
+                return danmaku_list
+        except Exception as e:
+            log(f"读取弹幕异常: {e}", "WARN")
+        return []
+
+    async def maybe_like_danmaku(self, bvid: str, danmaku_list: list, cid: int = 0):
+        """对有趣的弹幕进行点赞。cid 由 get_danmakus 返回。"""
+        if not DANMAKU_ENABLED or not danmaku_list:
+            return False
+        
+        if random.random() >= DANMAKU_LIKE_PROB:
+            return False
+        
+        self._reset_daily_danmaku_likes()
+        if self.daily_danmaku_likes >= DANMAKU_MAX_DAILY_LIKES:
+            return False
+        
+        if not cid:
+            # 降级尝试从缓存获取 cid
+            cid = self._last_danmaku_cids.get(bvid, 0)
+        if not cid:
+            return False
+        
+        try:
+            # 随机选一条弹幕点赞（必须用 id_str 字符串ID）
+            target_dm = random.choice(danmaku_list)
+            dm_id_str = target_dm.get("id_str", "")
+            dm_text = target_dm.get("text", "")
+            if not dm_id_str:
+                return False
+            
+            log(f"👍 点赞弹幕: {dm_text[:30]}... (id_str={dm_id_str[:16]}...)", "DANMAKU")
+            result = await self.bili.like_danmaku(dmid=dm_id_str, cid=cid, bvid=bvid)
+            if result.get("code") == 0:
+                self.daily_danmaku_likes += 1
+                log(f"弹幕点赞成功！今日已赞 {self.daily_danmaku_likes}/{DANMAKU_MAX_DAILY_LIKES}", "SUCCESS")
+                return True
+            else:
+                log(f"弹幕点赞未成功: {result.get('msg')}", "INFO")
+        except Exception as e:
+            log(f"弹幕点赞异常: {e}", "WARN")
+        return False
+
+    async def maybe_send_danmaku(self, bvid: str, title: str = "", subtitle_text: str = ""):
+        """生成并发送一条B站风格弹幕。"""
+        if not DANMAKU_ENABLED or not bvid:
+            return False
+        
+        if random.random() >= DANMAKU_SEND_PROB:
+            return False
+        
+        self._reset_daily_danmaku_sent()
+        if self.daily_danmaku_sent >= DANMAKU_MAX_DAILY_SEND:
+            return False
+        
+        try:
+            # 用AI生成一条弹幕
+            context = f"视频标题: {title}\n视频内容摘要: {subtitle_text[:200] if subtitle_text and '[未读取' not in subtitle_text else '未知'}"
+            persona_block = self.persona_mgr.build_prompt_block()
+            
+            resp = await self._call_ai_with_retry(
+                model=MODEL_BRAIN,
+                messages=[
+                    {"role": "system", "content": f"你是B站上的一个普通观众。{persona_block}请根据视频内容发送一条弹幕。要求：1. 简短（20字以内）2. 符合B站弹幕风格 3. 有趣或表达到位 4. 不要发送引战、敏感内容。只返回弹幕文字，不要解释。"},
+                    {"role": "user", "content": f"为这个视频发一条弹幕: {context}"}
+                ],
+                max_tokens=50,
+                request_timeout=60
+            )
+            dm_text = resp.choices[0].message.content.strip()
+            if not dm_text or len(dm_text) > 50:
+                return False
+            
+            log(f"📤 发送弹幕: {dm_text}", "DANMAKU")
+            result = await self.bili.send_danmaku(bvid, dm_text)
+            if result.get("code") == 0:
+                self.daily_danmaku_sent += 1
+                log(f"弹幕发送成功！今日已发 {self.daily_danmaku_sent}/{DANMAKU_MAX_DAILY_SEND}", "SUCCESS")
+                self.record_session_event("send_danmaku", bvid=bvid, text=dm_text)
+                return True
+            else:
+                log(f"弹幕发送失败: {result.get('msg')}", "WARN")
+        except Exception as e:
+            log(f"弹幕发送异常: {e}", "WARN")
+        return False
+
+    async def initialize_login(self):
+        self.bili.credential = self.bili._load_credential()
+
+        # 有 cookie 文件直接加载，跳过网络验证，秒进
+        if self.bili.credential and os.path.exists(COOKIE_FILE):
+            with open(COOKIE_FILE, 'r', encoding='utf-8') as f:
+                self.cookies = json.load(f)
+            self.credential = self.bili.credential
+            try:
+                self.bili.uid = int(self.cookies.get("DedeUserID", 0))
+            except Exception:
+                self.bili.uid = 0
+            log(f"登录已就绪 (UID: {self.bili.uid})", "SUCCESS")
+            self._init_psycho_engine()
+            self.comment_mgr = CommentInteractionManager(self.credential, self.bili.uid, since_ts=self.previous_seen_ts)
+            self.private_message_mgr = PrivateMessageManager(
+                self.credential,
+                self.bili.uid,
+                since_ts=self.previous_seen_ts,
+                previous_seen_at=self.previous_seen_at
+            )
+            return True
+
+        # 没有 cookie → 走完整登录流程
+        log("需要登录B站账号", "LOGIN")
+        print("\n" + "="*50)
+        print("           B站登录向导")
+        print("="*50)
+
+        login_success = await login_bilibili()
+        if not login_success:
+            log("登录失败，程序退出", "ERROR")
+            return False
+
+        self.bili.credential = self.bili._load_credential()
+        if not self.bili.credential:
+            log("登录后加载凭据失败", "ERROR")
+            return False
+
+        login_success = await self.bili.init_user_info()
+        if not login_success:
+            log("登录验证失败", "ERROR")
+            return False
+
+        with open(COOKIE_FILE, 'r', encoding='utf-8') as f:
+            self.cookies = json.load(f)
+
+        self.credential = Credential(
+            sessdata=self.cookies.get("SESSDATA"),
+            bili_jct=self.cookies.get("bili_jct"),
+            buvid3=self.cookies.get("buvid3"),
+            dedeuserid=self.cookies.get("DedeUserID"),
+        )
+        
+        # 初始化评论管理器
+        self._init_psycho_engine()
+        self.comment_mgr = CommentInteractionManager(self.credential, self.bili.uid, since_ts=self.previous_seen_ts)
+        self.private_message_mgr = PrivateMessageManager(
+            self.credential,
+            self.bili.uid,
+            since_ts=self.previous_seen_ts,
+            previous_seen_at=self.previous_seen_at
+        )
+
+        log("登录完成，准备开始工作！", "SUCCESS")
+        return True
+
+    def _init_psycho_engine(self):
+        """初始化心理画像引擎（登录后调用）
+        
+        即使 PSYCHO_ENGINE_ENABLED=False，也会初始化基础追踪和避雷系统，
+        只是跳过 AI 深度分析和智能推荐。
+        """
+        try:
+            self.psycho_profile = PsychoProfile(ai_caller=self._psycho_ai_caller if PSYCHO_ENGINE_ENABLED else None)
+            self.recommend_engine = RecommendationEngine(
+                psycho_profile=self.psycho_profile,
+                ai_caller=self._psycho_ai_caller if PSYCHO_ENGINE_ENABLED else None,
+            )
+            status = "[PSYCHO]已激活" if PSYCHO_ENGINE_ENABLED else "[NOTE]仅追踪(无AI分析)"
+            log(f"智能分析系统 {status} | 多维度追踪已激活", "SUCCESS")
+        except Exception as e:
+            log(f"智能分析系统初始化失败: {e}", "ERROR")
+            self.psycho_profile = None
+            self.recommend_engine = None
+
+    async def run(self):
+        # 🔒 单实例锁：防止多个 bot 进程同时运行
+        if not _acquire_bot_lock():
+            log("[LOCK] ❌ 已有 bot 实例正在运行，退出", "ERROR")
+            return
+        log("[LOCK] ✅ 单实例锁已获取", "INFO")
+        
+        log("bilibili_learning_bot - 启动...", "SUCCESS")
+        self.update_runtime_clock(starting=True)
+        if self.previous_seen_at:
+            log(f"上次运行最后记录时间: {self.previous_seen_at}，本次只处理之后的新评论/私信", "INFO")
+
+        os.makedirs(KNOWLEDGE_BASE_DIR, exist_ok=True)
+        log(f"知识库模块已加载，路径: {KNOWLEDGE_BASE_DIR}", "INFO")
+        
+        # 显示兴趣状态
+        interests = self.interest_mgr.get_interests()
+        if interests:
+            log(f"兴趣列表: {', '.join(interests)}", "INTEREST")
+        else:
+            log("兴趣列表为空，将对所有视频感兴趣", "INTEREST")
+        log(f"当前人格: {self.persona_mgr.get_active_persona_name()} | 当前心情: {self.mood_mgr.get_mood()}", "INFO")
+        
+        print(f"\n{Fore.CYAN}知识库分类系统已初始化:{Style.RESET_ALL}")
+        self.classifier.show_category_structure()
+        # 启动时清理空文件夹
+        cleaned = self.classifier.cleanup_empty_folders()
+        if cleaned > 0:
+            log(f"已清理 {cleaned} 个空文件夹", "KB")
+
+        login_success = await self.initialize_login()
+        if not login_success:
+            log("登录失败，程序退出", "ERROR")
+            return
+
+        log(f"初始化完成 | 最大精力: {MAX_ENERGY}% | 视频间隔: {VIDEO_INTERVAL_MIN}-{VIDEO_INTERVAL_MAX}秒", "INFO")
+        if SESSION_MAX_VIDEOS > 0:
+            log(f"会话限制: 最多处理 {SESSION_MAX_VIDEOS} 个视频后自动停止", "SESSION")
+        if SESSION_MAX_DURATION_MINUTES > 0:
+            log(f"会话限制: 最长运行 {SESSION_MAX_DURATION_MINUTES} 分钟后自动停止", "SESSION")
+        log(f"评论互动: {'已启用' if COMMENT_CHECK_ENABLED else '⏸️ 已关闭'} | 检查间隔: {COMMENT_CHECK_INTERVAL}秒", "COMMENT")
+        log(f"私信互动: {'已启用' if PRIVATE_MESSAGE_ENABLED else '⏸️ 已关闭'} | {'自动发送' if PRIVATE_MESSAGE_AUTO_REPLY else '仅拟不发送'} | 检查间隔: {PRIVATE_MESSAGE_CHECK_INTERVAL}秒", "DM")
+        log(f"日记: {'自动' if DIARY_ENABLED and DIARY_AUTO_ENABLED else '手动/关闭'} | 自我进化: {'自动应用' if EVOLUTION_ENABLED and EVOLUTION_AUTO_ENABLED and EVOLUTION_AUTO_APPLY else '手动/仅记录'}", "EVOLVE")
+        print("="*80)
+
+        # 🔵 Cookie 预热：模拟人类打开App行为，先访问一次首页暖机
+        log("🍪 Cookie预热：模拟打开B站首页...", "INFO")
+        try:
+            warmup_client = await self.bili._get_http_client()
+            await warmup_client.get(
+                'https://www.bilibili.com',
+                cookies=self.bili.raw_cookies,
+                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'},
+                timeout=15.0
+            )
+            log("🍪 Cookie预热完成", "SUCCESS")
+        except Exception as e:
+            log(f"Cookie预热跳过: {e}", "INFO")
+
+        # [WARN] 启动冷却：等待几秒再进入扫描循环，模拟真人打开App后的浏览节奏
+        try:
+            startup_cool = max(0.1, random.uniform(float(COOLDOWN_STARTUP_MIN or 1), float(COOLDOWN_STARTUP_MAX or 3)))
+        except (ValueError, TypeError):
+            startup_cool = 1.5
+        log(f"启动冷却 {startup_cool:.1f} 秒，模拟真人打开App后的浏览节奏...", "INFO")
+        await asyncio.sleep(startup_cool)
+
+        # [FIX] 启动守卫：前几轮主循环强制跳过Agent深度搜索（防止旧pyc缓存或冷却bug导致启动即触发）
+        _loop_count = 0
+
+        while True:
+            try:
+                _loop_count += 1
+                self.update_runtime_clock()
+
+                # ── 会话限制检查 ──
+                session_elapsed = (datetime.now() - self.session_start_time).total_seconds() / 60.0
+                limit_reached = False
+                limit_reason = ""
+
+                if SESSION_MAX_DURATION_MINUTES > 0 and session_elapsed >= SESSION_MAX_DURATION_MINUTES:
+                    limit_reached = True
+                    limit_reason = f"已达到最长运行时间 {SESSION_MAX_DURATION_MINUTES} 分钟（实际 {session_elapsed:.1f} 分钟）"
+                elif SESSION_MAX_VIDEOS > 0 and self.videos_processed >= SESSION_MAX_VIDEOS:
+                    limit_reached = True
+                    limit_reason = f"已处理 {self.videos_processed} 个视频（上限 {SESSION_MAX_VIDEOS}）"
+
+                if limit_reached:
+                    log(f"⏰ 会话限制触发: {limit_reason}", "SESSION")
+                    log(f"[STATS] 本次会话统计: 处理 {self.videos_processed} 个视频, 运行 {session_elapsed:.1f} 分钟", "SESSION")
+                    break
+
+                # [SPEED] 并行检查评论和私信（独立API，可并发提速）
+                comments_task = asyncio.create_task(self.check_and_handle_comments())
+                msgs_task = asyncio.create_task(self.check_and_handle_private_messages())
+                comments_processed, msgs_processed = await asyncio.gather(comments_task, msgs_task)
+                # [FIX] 只有实际处理了评论才睡冷却，无操作则跳过
+                if comments_processed > 0:
+                    await asyncio.sleep(max(0.1, random.uniform(
+                        float(COOLDOWN_POST_COMMENT_MIN or 1), float(COOLDOWN_POST_COMMENT_MAX or 3))))
+                
+                if self.energy <= 0:
+                    await self.energy_recovery_session()
+                    continue
+
+                session_info = ""
+                if SESSION_MAX_VIDEOS > 0:
+                    session_info += f" | 已看: {self.videos_processed}/{SESSION_MAX_VIDEOS}"
+                elif SESSION_MAX_DURATION_MINUTES > 0:
+                    session_info += f" | 已看: {self.videos_processed}"
+                log(f"精力: {self.energy}% | 今日已投: {self.coins_spent}/{MAX_COINS_DAILY} | 记忆UP: {len(self.memory['known_ups'])}{session_info}", "INFO")
+
+                # [FIX] 只有实际处理了私信才睡冷却，无操作则跳过
+                if msgs_processed > 0:
+                    await asyncio.sleep(max(0.1, random.uniform(
+                        float(COOLDOWN_POST_DM_MIN or 1), float(COOLDOWN_POST_DM_MAX or 3))))
+
+                # ── 🤖 Agent深度搜索：定期触发，深入了解某个主题 ──
+                # [FIX] 启动守卫：前3轮主循环硬跳过（防止旧pyc缓存/冷却bug导致启动即触发）
+                if AGENT_ENABLED and AGENT_DIVE_ENABLED and _loop_count > 3:
+                    agent_dive_elapsed = (datetime.now() - self.last_agent_run_at).total_seconds() / 60
+                    # [FIX] 必须至少看过3个视频+冷却到期+精力够+25%随机
+                    if (self.videos_processed >= 3 and agent_dive_elapsed >= max(AGENT_COOLDOWN_MINUTES, 5)
+                            and self.energy >= 15 and random.random() < 0.25):
+                        # 优先用刚看过的感兴趣视频主题，没有则从兴趣/知识库选
+                        dive_topic = await self._pick_agent_dive_topic()
+                        if dive_topic:
+                            log(f"🤖 Agent深度搜索启动！主题: '{dive_topic[:50]}'", "CONFIG")
+                            self.last_agent_run_at = datetime.now()  # [FIX] 立即记录，防止重复触发
+                            self.energy -= 8  # [FIX] 先扣精力，防止异步并发超扣
+                            # [FIX] 异步非阻塞：不卡主循环，后台默默搜索看视频
+                            async def _dive_async(topic=dive_topic):
+                                try:
+                                    run = await self.agent_runner.run_goal(topic)
+                                    ok_steps = sum(1 for item in run.get("results", []) if item.get("result", {}).get("ok"))
+                                    watched_count = 0
+                                    for item in run.get("results", []):
+                                        if item.get("step", {}).get("skill") == "watch_bilibili_videos":
+                                            watched_count = item.get("result", {}).get("count", 0)
+                                    log(f"🤖 Agent深度搜索完成: {ok_steps}/{len(run.get('results', []))}步骤, 看了{watched_count}个视频", "SUCCESS")
+                                except Exception as e:
+                                    log(f"🤖 Agent深度搜索异常: {e}", "WARN")
+                            task = asyncio.create_task(_dive_async())
+                            task.add_done_callback(_safe_task_callback("agent_dive_async"))
+
+                # ── 📂 [KB] 自动重分类"未分类"文件夹 ──
+                if AUTO_RECLASSIFY_ENABLED and _loop_count > 5:
+                    reclass_elapsed = (datetime.now() - getattr(self, '_last_reclassify_at', datetime.min)).total_seconds() / 60
+                    if reclass_elapsed >= AUTO_RECLASSIFY_INTERVAL_MINUTES and random.random() < 0.5:
+                        try:
+                            ok, fail = self.classifier.reclassify_uncategorized(max_per_run=3)
+                            if ok > 0 or fail > 0:
+                                self._last_reclassify_at = datetime.now()
+                                # 清理空文件夹
+                                cleaned = self.classifier.cleanup_empty_folders()
+                                if cleaned > 0:
+                                    log(f"[KB] 已清理 {cleaned} 个空文件夹", "KB")
+                        except Exception as e:
+                            log(f"[KB] 自动重分类异常: {e}", "ERROR")
+
+                # ── [SPEED] 并行：回顾复习 + 主动聊天，互不依赖 ──
+                revisit_target = None
+
+                async def _do_revisit():
+                    if not REVISIT_ENABLED or not self.history_videos.get("videos"):
+                        return None
+                    revisit_cooldown_ok = (datetime.now() - self.last_revisit_at).total_seconds() / 60 >= REVISIT_COOLDOWN_MINUTES
+                    if not revisit_cooldown_ok or random.random() >= PROB_REVISIT:
+                        return None
+                    candidate = self.get_revisit_candidate()
+                    if not candidate:
+                        return None
+                    try:
+                        log(f"📖 学而时习之：回顾复习《{candidate.get('title','')[:30]}》({candidate.get('action')}) ...", "REVISIT")
+                        await _bili_throttle("回顾复习-get_info")
+                        v = Video(bvid=candidate.get("bvid"), credential=self.credential)
+                        vid_info = await v.get_info()
+                        if vid_info:
+                            target = {
+                                "bvid": candidate["bvid"],
+                                "title": vid_info.get("title", candidate.get("title", "")),
+                                "owner": vid_info.get("owner", {}),
+                                "id": vid_info.get("aid") or candidate.get("aid"),
+                                "pic": vid_info.get("pic", ""),
+                                "aid": vid_info.get("aid") or candidate.get("aid"),
+                                "_is_revisit": True,
+                                "_original_action": candidate.get("action", "")
+                            }
+                            self.last_revisit_at = datetime.now()
+                            self.mark_revisited(candidate["bvid"])
+                            log(f"回顾复习锁定: 《{target['title']}》", "REVISIT")
+                            return target
+                        else:
+                            log(f"获取复习视频信息失败，跳过", "WARN")
+                    except Exception as e:
+                        log(f"回顾复习异常: {e}", "WARN")
+                    return None
+
+                async def _do_chat():
+                    try:
+                        await self.maybe_initiate_chat()
+                    except Exception as e:
+                        log(f"主动聊天模块异常(主循环): {e}", "ERROR")
+
+                revisit_target, _ = await asyncio.gather(_do_revisit(), _do_chat(), return_exceptions=True)
+                if isinstance(revisit_target, Exception):
+                    revisit_target = None
+
+                if revisit_target:
+                    # 使用复习视频代替推荐流
+                    target = revisit_target
+                    self.videos_processed += 1
+                    bvid = target['bvid']
+                    title = target.get('title', '无标题')
+                    up = target.get('owner', {}).get('name', '未知')
+                    up_uid = target.get('owner', {}).get('mid', 0)
+                    aid = target.get('id') or target.get('aid')
+                    pic_url = target.get('pic', '')
+                    video_url = f"https://www.bilibili.com/video/{bvid}"
+                    log(f"📖 复习目标:《{title}》- @{up}", "REVISIT")
+                    # 🔍 知识验证：回顾时联网核实知识的真实性和时效性（带异常回调）
+                    task = asyncio.create_task(self.verify_knowledge_file(bvid, title))
+                    task.add_done_callback(_safe_task_callback("verify_knowledge_file"))
+                    # 顺便浏览该UP的视频（副作用：记录到浏览历史）
+                    await self.maybe_browse_up_videos(force_up_uid=up_uid if up_uid else None, up_name_hint=up)
+                else:
+                    # ── [*] 优先浏览喜欢/已知UP主的新视频 ──
+                    up_browse_target = await self.maybe_browse_up_videos()
+                    if up_browse_target and up_browse_target.get("bvid"):
+                        target = up_browse_target
+                        self.videos_processed += 1
+                        bvid = target['bvid']
+                        title = target.get('title', '无标题')
+                        up = target.get('owner', {}).get('name', '未知')
+                        up_uid = target.get('owner', {}).get('mid', 0)
+                        aid = target.get('id') or target.get('aid')
+                        pic_url = target.get('pic', '')
+                        video_url = f"https://www.bilibili.com/video/{bvid}"
+                        source_tag = "[STAR]喜爱UP" if target.get("_is_favorite_up") else "📺已关注UP"
+                        log(f"{source_tag} 新视频:《{title}》- @{up}", "BROWSE")
+                    else:
+                        # [PSYCHO] 主动推荐：每N轮触发一次AI驱动的惊喜/探索/反茧房推荐
+                        rec_target = None
+                        if (self.recommend_engine 
+                            and self._psycho_profile_analysis_count > PSYCHO_MIN_VIEWS_BEFORE_RECOMMEND 
+                            and random.random() < PSYCHO_RECOMMEND_PROB):
+                            rec_modes = ["surprise", "explore", "anticocoon", "trend"]
+                            # 轮换模式，避免重复
+                            if self._last_recommend_mode:
+                                try:
+                                    idx = rec_modes.index(self._last_recommend_mode)
+                                    rec_modes = rec_modes[idx+1:] + rec_modes[:idx+1]
+                                except ValueError as e:
+                                    log(f'值错误: {e}', 'DEBUG')
+                            for mode in rec_modes[:2]:  # 尝试2种模式
+                                try:
+                                    queries = await self.recommend_engine.generate_search_queries(mode=mode, count=2)
+                                    if queries:
+                                        log(f"{get_mode_emoji(mode)} {get_mode_label(mode)}: 搜索「{queries[0]}」...", "RECOMMEND")
+                                        results = await self.bili.search_bilibili(queries[0])
+                                        if results:
+                                            # 过滤已看过的
+                                            fresh = [r for r in results if r.get("bvid") not in self.recommend_engine._seen_bvids]
+                                            if fresh:
+                                                chosen = random.choice(fresh[:5])
+                                                chosen["_rec_mode"] = mode
+                                                chosen["_rec_query"] = queries[0]
+                                                rec_target = chosen
+                                                self._last_recommend_mode = mode
+                                                self.recommend_engine._seen_bvids.add(chosen.get("bvid"))
+                                                # 生成推荐理由
+                                                chosen["_rec_reason"] = self.recommend_engine.explain_recommendation(
+                                                    {"title": chosen.get("title",""), "tags": chosen.get("tag","").split(",") if chosen.get("tag") else [],
+                                                     "up_name": chosen.get("author",""), "up_uid": chosen.get("mid",""),
+                                                     "category": chosen.get("typename",""), "bvid": chosen.get("bvid","")},
+                                                    mode
+                                                )
+                                                log(f"  → 推荐理由: {chosen['_rec_reason'][:80]}...", "RECOMMEND")
+                                                break
+                                except Exception as e:
+                                    log(f"推荐生成失败({mode}): {e}", "WARN")
+                        
+                        if rec_target and rec_target.get("bvid"):
+                            target = rec_target
+                            if not isinstance(target, dict):
+                                continue
+                            self.videos_processed += 1
+                            bvid = target.get('bvid', '')
+                            if not bvid:
+                                continue
+                            title = target.get('title', '无标题')
+                            owner = target.get('owner')
+                            if isinstance(owner, dict):
+                                up = target.get('author') or owner.get('name', '未知')
+                                up_uid = target.get('mid') or owner.get('mid', 0)
+                            else:
+                                up = target.get('author', '未知')
+                                up_uid = target.get('mid', 0)
+                            aid = target.get('aid') or target.get('id', 0)
+                            pic_url = target.get('pic', '')
+                            video_url = f"https://www.bilibili.com/video/{bvid}"
+                            log(f"{get_mode_emoji(target.get('_rec_mode','surprise'))} 主动推荐:《{title}》- @{up}", "RECOMMEND")
+                            if target.get("_rec_reason"):
+                                log(f"  [IDEA] 为什么推荐: {target['_rec_reason'][:120]}", "RECOMMEND")
+                            # 追踪推荐点击
+                            self.psycho_profile.tracker.record("recommend_click", 
+                                bvid=bvid, title=title, mode=target.get("_rec_mode",""))
+                        else:
+                            log("正在刷新推荐流...", "SCAN")
+                            items = await self._get_cached_recommendations()
+                            if not items or not isinstance(items, list):
+                                await asyncio.sleep(3)
+                                continue
+
+                            target = random.choice(items)
+                            if not isinstance(target, dict):
+                                log(f"推荐流返回异常元素类型: {type(target).__name__}", "WARN")
+                                continue
+                            self.videos_processed += 1
+                            bvid = target.get('bvid', '')
+                            if not bvid:
+                                log("推荐流元素缺少bvid，跳过", "WARN")
+                                continue
+                            title = target.get('title', '无标题')
+                            owner = target.get('owner')
+                            if isinstance(owner, dict):
+                                up = owner.get('name', '未知')
+                                up_uid = owner.get('mid', 0)
+                            else:
+                                up = '未知'
+                                up_uid = 0
+                            aid = target.get('id') or target.get('aid')
+                            pic_url = target.get('pic', '')
+                            video_url = f"https://www.bilibili.com/video/{bvid}"
+
+                            log(f"锁定目标:《{title}》- @{up}", "SCAN")
+
+                # [SPEED] 锁定后立即后台预取推荐流 + 短暂休息并行
+                prefetch_task = asyncio.create_task(self._prefetch_recommendations())
+                prefetch_task.add_done_callback(_safe_task_callback("prefetch_recs"))
+                await asyncio.sleep(random.uniform(0.3, 0.8))
+
+                # 提取标签、时长、分类（供心理画像引擎/避雷系统使用）
+                tags = []
+                raw_tag = target.get('tag', '')
+                if isinstance(raw_tag, str) and raw_tag:
+                    tags = [t.strip() for t in raw_tag.split(',') if t.strip()]
+                elif isinstance(raw_tag, list):
+                    tags = raw_tag
+                duration = target.get('duration', 0)
+                if isinstance(duration, str) and ':' in duration:
+                    try:
+                        parts = duration.split(':')
+                        duration = int(parts[0]) * 60 + int(parts[1])
+                    except Exception:
+                        duration = 0
+                elif isinstance(duration, str):
+                    try:
+                        duration = int(duration)
+                    except Exception:
+                        duration = 0
+                category = target.get('typename') or target.get('tname') or ''
+
+                # [ASR] 缓存视频元数据供 ASR AI预判使用
+                self._current_video_tags = tags
+                self._current_video_category = category
+                self._current_video_duration = duration
+
+                # ── 视频过滤模式 ──
+                if VIDEO_FILTER_MODE == "watch_all":
+                    vis_desc, vis_score = "全量模式，跳过封面分析", 0
+                    log(f"[FAST] 全量模式：不看封面标题，直接看视频", "MODE")
+                    interested = True
+                    matched_interests = []
+                    interest_reason = "全量模式(所有视频都看)"
+                else:
+                    # cover_and_title 模式：封面分析 + AI兴趣判断
+                    vis_desc, vis_score = await self.analyze_vision(pic_url)
+                    log(f"封面速览: {vis_desc} [印象分:{vis_score}]", "EYE")
+                    # [ASR] 缓存封面描述供 ASR AI预判
+                    self._current_video_cover_desc = vis_desc
+                    # [DEF] 避雷系统检查
+                    if self.psycho_profile:
+                        aversion_score, aversion_reasons = self.psycho_profile.aversion.get_aversion_score(
+                            title=title, tags=tags, up_uid=up_uid
+                        )
+                        if aversion_score >= PSYCHO_AVERSION_BLOCK_SCORE:
+                            log(f"[DEF] 避雷拦截: {title[:30]}... | 反感度{aversion_score:.1%} | {'; '.join(aversion_reasons)}", "AVERSION")
+                            self.psycho_profile.tracker.record_skip(bvid, title, reason=f"避雷: {'; '.join(aversion_reasons)}")
+                            continue
+                        elif aversion_score >= PSYCHO_AVERSION_WARN_SCORE:
+                            log(f"[DEF] 避雷提示: {title[:30]}... | 反感度{aversion_score:.1%} | {'; '.join(aversion_reasons)} (仍继续判断)", "AVERSION")
+                    
+                    interested, matched_interests, interest_reason = await self.judge_interest_with_ai(title, up, vis_desc, vis_score)
+                    if not interested:
+                        log(f"视频《{title}》与兴趣不匹配，跳过 | {interest_reason}", "INTEREST")
+                        await self.watch_and_sync_history(bvid)
+                        continue
+                    # 补充关键词匹配结果到展示列表中（确保所有命中兴趣都显示）
+                    kw_matched = self.interest_mgr.get_matching_interests(title, up)
+                    all_matched = list(dict.fromkeys((matched_interests or []) + kw_matched))  # 去重合并
+                    if all_matched:
+                        log(f"视频《{title}》匹配兴趣: {', '.join(all_matched)} | {interest_reason}", "INTEREST")
+                        # [FIX] 记住这个感兴趣的视频上下文，供Agent深度搜索使用
+                        self._last_interesting_topic = f"深入了解「{title[:40]}」（匹配: {', '.join(all_matched[:3])}）"
+                    else:
+                        log(f"视频《{title}》通过兴趣判断 | {interest_reason}", "INTEREST")
+
+                subtitle_text = "[未读取字幕]"
+                comment_text = "[未读取评论]"
+                danmaku_text = ""
+                c_list = []
+
+                # [SPEED] 并行读取字幕+评论+弹幕，减少串行等待
+                async def _read_subtitles_task():
+                    nonlocal subtitle_text
+                    mode_label = normalize_mode(VIDEO_UNDERSTANDING_MODE) if normalize_mode else VIDEO_UNDERSTANDING_MODE
+                    log(f"开始研究视频内容... 当前视频理解模式: {mode_label}", "BRAIN")
+                    success, result = await self.understand_video_for_decision(bvid, title=title)
+                    if success:
+                        subtitle_text = result
+                        log(f"视频理解GET: {subtitle_text[:80].strip()}...", "SUCCESS")
+                    else:
+                        subtitle_text = "[无可用字幕/语音内容]"
+                        log(f"视频理解遇到问题: {result}", "WARN")
+
+                async def _read_comments_task():
+                    nonlocal comment_text, c_list, danmaku_text
+                    log("看看大家都在说啥...", "BRAIN")
+                    comment_text, c_list = await self._get_comments_context(aid)
+                    # [MSG] 同时读取弹幕
+                    danmaku_list = await self.maybe_read_danmaku(bvid)
+                    danmaku_text = ""
+                    if danmaku_list:
+                        danmaku_text = f"【视频弹幕（共{len(danmaku_list)}条，随机采样）】:\n" + "\n".join(
+                            f"  {dm.get('text','')}" for dm in danmaku_list[:15]
+                        )
+                    if not c_list:
+                        log("评论区空空如也...", "COMMENT")
+                    else:
+                        preview_parts = []
+                        for i, c in enumerate(c_list[:5]):
+                            part = f"#{i+1}[{c['user']}]: {c['content'][:30]}"
+                            if c.get('pic_info'):
+                                # 截取图片描述的前15字作为标签
+                                pic_tag = c['pic_info'][:15] + "..." if len(c['pic_info']) > 15 else c['pic_info']
+                                part += f" [图:{pic_tag}]"
+                            preview_parts.append(part)
+                        preview = ", ".join(preview_parts)
+                        log(f"评论区速览({len(c_list)}条): {preview}", "COMMENT")
+
+                await asyncio.sleep(random.uniform(0.2, 0.5))
+                await asyncio.gather(_read_subtitles_task(), _read_comments_task())
+
+                log("信息整合，AI决策中...", "BRAIN")
+                sys_prompt = self.build_dynamic_brain_prompt(up)
+                # [FIX] 当视频理解失败时，提醒AI更多依赖评论区/弹幕/标题做判断
+                video_fallback_hint = ""
+                _st = str(subtitle_text)
+                if any(kw in _st for kw in ["【无字幕无人声】", "无可用字幕", "无可用字幕/语音", "[未读取"]):
+                    video_fallback_hint = "\n[WARN] 视频字幕/语音内容不可用，请主要根据评论区讨论、弹幕反应和标题来推断视频质量与价值。\n"
+                context = (f"视频标题: {title}\nUP主: {up}\n封面描述: {vis_desc}\n封面印象分: {vis_score}\n"
+                           f"{video_fallback_hint}"
+                           f"【📺 视频内容字幕】: {subtitle_text}\n"
+                           f"{comment_text}"
+                           f"{danmaku_text}")
+
+                try:
+                    resp = await self._call_ai_with_retry(
+                        model=MODEL_BRAIN,
+                        messages=[
+                            {"role": "system", "content": sys_prompt},
+                            {"role": "user", "content": context}
+                        ],
+                        request_timeout=60
+                    )
+                    raw = resp.choices[0].message.content
+                    # ── 提取JSON（模型可能返回前缀文本）──
+                    start = raw.find("{")
+                    end = raw.rfind("}")
+                    if start >= 0 and end >= start:
+                        json_str = raw[start:end + 1]
+                    else:
+                        raise ValueError(f"AI返回未找到JSON结构，原始内容: {raw[:200]}")
+                    # ── 修复模型偶尔用单引号/不规范JSON ──
+                    try:
+                        decision = json.loads(json_str)
+                    except json.JSONDecodeError:
+                        try:
+                            fixed = json_str.replace("'", '"')
+                            fixed = re.sub(r'\bTrue\b', 'true', fixed)
+                            fixed = re.sub(r'\bFalse\b', 'false', fixed)
+                            fixed = re.sub(r'\bNone\b', 'null', fixed)
+                            decision = json.loads(fixed)
+                        except (json.JSONDecodeError, Exception):
+                            # 二次修复仍失败，使用安全默认值
+                            decision = {"mode": "普通", "score": 5, "thought": "AI返回格式异常，使用默认决策", "comment_intent": False, "coin_intent": False, "like_intent": False, "collect_intent": False}
+                except Exception as e:
+                    log(f"AI决策模块异常(已重试): {_mask_urls(str(e)[:120])}", "ERROR")
+                    continue
+
+                mode = decision.get('mode', '普通')
+                thought = decision.get('thought', '...')
+                score = decision.get('score', 0)
+
+                log(f"[{mode}模式] AI想法: {thought}", "BRAIN")
+                log(f"AI最终评分: {score} / 10", "BRAIN")
+                self.user_profile_mgr.update_impression(f"up::{up}", up, thought)
+
+                # [*] 记录UP主印象 + 决定是否关注
+                if up_uid:
+                    self.record_up_impression(up, up_uid, score)
+                    await self.maybe_follow_up(up_uid, up, score)
+                
+                # [PSYCHO] 心理画像追踪：记录本次观看
+                if self.psycho_profile:
+                    self.psycho_profile.tracker.record_view(
+                        bvid=bvid, title=title, tags=tags or [],
+                        duration=duration, up_name=up, up_uid=up_uid,
+                        category=category or "", score=score,
+                        interested=(score >= INTEREST_THRESHOLD)
+                    )
+                    self.psycho_profile.update_surface_interest(
+                        title=title, tags=tags, category=category or "",
+                        duration=duration, up_uid=up_uid, up_name=up,
+                        score=score
+                    )
+                    # 触发茧房检测 + 启发式L2更新
+                    self._psycho_profile_analysis_count += 1
+                    if self._psycho_profile_analysis_count % PSYCHO_HEURISTIC_UPDATE_INTERVAL == 0:
+                        self.psycho_profile.heuristic_update_l2()
+                        metrics = self.psycho_profile.update_cocoon_metrics()
+                        if metrics.get("diversity_score", 1.0) < PSYCHO_COCOON_WARNING_THRESHOLD:
+                            log(f"[STATS] 内容多样性提醒: {metrics.get('cocoon_risk')} | 多样性={metrics.get('diversity_score')} | 稀少领域={metrics.get('underrepresented_areas', [])}", "WARN")
+                    # 触发深度AI分析
+                    if self._psycho_profile_analysis_count % PSYCHO_DEEP_ANALYZE_INTERVAL == 0:
+                        task = asyncio.create_task(self.psycho_profile.deep_analyze())
+                        task.add_done_callback(_safe_task_callback("deep_analyze"))
+                        self.psycho_profile.detect_interest_shifts()
+
+                self.energy -= 1
+
+                # 🎯 学习归档：只归档高质量内容，低分/短时长/浅内容一律跳过
+                learning_topic = decision.get("learning_topic")
+                learn_success = False
+                learn_text = subtitle_text
+                if not learn_text or "[未读取字幕]" in str(learn_text) or "[该视频无有效CC字幕]" in str(learn_text):
+                    learn_text = ""
+                    if title: learn_text += f"【视频标题】{title}\n"
+                    if up: learn_text += f"【UP主】{up}\n"
+                    if thought: learn_text += f"【AI判断】{thought}\n"
+                    if danmaku_text: learn_text += f"【弹幕】{danmaku_text}\n"
+                    if comment_text and comment_text != "[未读取评论]": learn_text += f"【评论】{comment_text}\n"
+                    learn_text = learn_text.strip()
+                
+                # 🔒 三层质量门槛：分数 + 时长 + 内容长度
+                skip_reason = None
+                if score < LEARN_MIN_SCORE:
+                    skip_reason = f"分数过低({score:.1f}<{LEARN_MIN_SCORE})"
+                elif duration > 0 and duration < LEARN_MIN_DURATION_SECONDS:
+                    skip_reason = f"视频太短({duration}s<{LEARN_MIN_DURATION_SECONDS}s)"
+                elif not learn_text or len(learn_text) < 150:
+                    skip_reason = f"可学内容不足({len(learn_text) if learn_text else 0}字<150)"
+                
+                if skip_reason:
+                    log(f"📭 跳过学习归档: {skip_reason} | 《{title}》", "LEARN")
+                elif learning_topic and learn_text and len(learn_text) > 20:
+                    try:
+                        _desc = getattr(self, "_last_video_desc", "")
+                        learn_success = await self.learn_from_video(bvid, title, up, video_url, learn_text, learning_topic, video_desc=_desc, score=score)
+                        if learn_success:
+                            self.mood_mgr.shift("学到有价值内容", 2)
+                            if score >= INTEREST_THRESHOLD:
+                                self.energy -= 2
+                                log(f"学习归档消耗2点精力，当前剩余精力: {self.energy}%", "INFO")
+                    except Exception as learn_e:
+                        log(f"学习归档异常: {learn_e}", "WARN")
+
+                # ★ 评论区知识收集：从讨论中提取有价值的信息
+                if c_list and len(c_list) >= 3 and (comment_text and comment_text != "[未读取评论]"):
+                    try:
+                        comment_learn_success = await self.learn_from_comments(
+                            bvid, title, up, video_url, comment_text, c_list,
+                            topic_suggestion=learning_topic or (decision.get("learning_topic") or "评论知识")
+                        )
+                        if comment_learn_success:
+                            log("评论区知识收集消耗1点精力", "INFO")
+                            self.energy -= 1
+                    except Exception as clearn_e:
+                        log(f"评论区知识收集异常: {clearn_e}", "WARN")
+
+                if score < INTEREST_THRESHOLD:
+                    self.mood_mgr.shift("刷到低分视频", -1)
+                    log(f"分数({score})过低，不感兴趣，划走~ (消耗1点精力, 剩余: {self.energy}%)", "INFO")
+                    # [PSYCHO] 心理画像：记录跳过 + 避雷学习
+                    if self.psycho_profile:
+                        self.psycho_profile.tracker.record_skip(bvid, title, reason=f"低于兴趣阈值(score={score})")
+                        self.psycho_profile.aversion.report_aversion(
+                            bvid=bvid, title=title, reason=f"低分({score})",
+                            tags=tags, up_uid=up_uid, up_name=up
+                        )
+                    self.record_session_event(
+                        "video_skipped",
+                        title=title,
+                        up=up,
+                        score=score,
+                        thought=thought,
+                        reason="低于兴趣阈值",
+                        url=video_url
+                    )
+                    await self.maybe_auto_diary()
+                    await self.maybe_self_evolve()
+                    await self.watch_and_sync_history(bvid)
+                    continue
+
+                action_log = []
+                v = Video(bvid=bvid, credential=self.credential)
+
+                # 随机检定：RANDOM_ENABLED=False 时全部通过（只看分数阈值），True 时进行概率检定
+                coin_check = random.random() < PROB_COIN if RANDOM_ENABLED else True
+                fav_check = random.random() < PROB_FAV if RANDOM_ENABLED else True
+                reply_check = random.random() < PROB_REPLY_TRIGGER if RANDOM_ENABLED else True
+                like_solo_check = random.random() < PROB_LIKE_SOLO if RANDOM_ENABLED else True
+
+                ai_wants_coin = decision.get('coin_intention', False)
+                ai_wants_fav = decision.get('fav_intention', False)
+                ai_wants_reply = bool(decision.get('replies', []))
+                video_comment_allowed, video_comment_reason, video_comment_hits = ReplySafetyGuard().review_video_for_comment(
+                    title=title,
+                    up=up,
+                    subtitle=subtitle_text,
+                    comments=json.dumps(c_list[:5], ensure_ascii=False)
+                )
+                if not video_comment_allowed:
+                    if ai_wants_reply:
+                        log(f"视频命中涉政/敏感内容，强制清空评论意图: {video_comment_reason} | 命中: {', '.join(video_comment_hits)}", "WARN")
+                    decision["replies"] = []
+                    ai_wants_reply = False
+
+                do_coin = ai_wants_coin and score >= COIN_THRESHOLD and self.coins_spent < MAX_COINS_DAILY and coin_check
+                do_fav = ai_wants_fav and score >= FAV_THRESHOLD and fav_check
+                do_replies = decision.get('replies', []) if (ai_wants_reply and reply_check) else []
+                do_like_trigger = do_fav or do_coin or bool(do_replies) or (score >= 6.5 and like_solo_check)
+
+                if RANDOM_ENABLED:
+                    log(f"🎲 投币 | 意图:{'✓' if ai_wants_coin else '✗'} 分数:{'✓' if score >= COIN_THRESHOLD else '✗'} 限额:{'✓' if self.coins_spent < MAX_COINS_DAILY else '✗'} 检定({int(PROB_COIN*100)}%):{'✓' if coin_check else '✗'} => {'执行' if do_coin else '跳过'}", "DIAG")
+                    log(f"🎲 收藏 | 意图:{'✓' if ai_wants_fav else '✗'} 分数:{'✓' if score >= FAV_THRESHOLD else '✗'} 检定({int(PROB_FAV*100)}%):{'✓' if fav_check else '✗'} => {'执行' if do_fav else '跳过'}", "DIAG")
+                    log(f"🎲 评论 | 意图:{'✓' if ai_wants_reply else '✗'} 检定({int(PROB_REPLY_TRIGGER*100)}%):{'✓' if reply_check else '✗'} => {'执行' if bool(do_replies) else '跳过'}", "DIAG")
+                    log(f"🎲 点赞 | 收藏:{'✓' if do_fav else '✗'} 投币:{'✓' if do_coin else '✗'} 评论:{'✓' if bool(do_replies) else '✗'} 单独(分数/检定):{'✓' if score >= 6.5 else '✗'}/{'✓' if like_solo_check else '✗'} => {'执行' if do_like_trigger else '跳过'}", "DIAG")
+                else:
+                    log(f"🔒 投币 | 意图:{'✓' if ai_wants_coin else '✗'} 分数:{'✓' if score >= COIN_THRESHOLD else '✗'} 限额:{'✓' if self.coins_spent < MAX_COINS_DAILY else '✗'} => {'执行' if do_coin else '跳过'}", "DIAG")
+                    log(f"🔒 收藏 | 意图:{'✓' if ai_wants_fav else '✗'} 分数:{'✓' if score >= FAV_THRESHOLD else '✗'} => {'执行' if do_fav else '跳过'}", "DIAG")
+                    log(f"🔒 评论 | 意图:{'✓' if ai_wants_reply else '✗'} => {'执行' if bool(do_replies) else '跳过'}", "DIAG")
+                    log(f"🔒 点赞 | 收藏:{'✓' if do_fav else '✗'} 投币:{'✓' if do_coin else '✗'} 评论:{'✓' if bool(do_replies) else '✗'} 单独(分数):{'✓' if score >= 6.5 else '✗'} => {'执行' if do_like_trigger else '跳过'}", "DIAG")
+
+                # [FIX] 学习归档已提前执行（在分数门槛之前，所有视频都学）
+                if learn_success:
+                    action_log.append("学习归档")
+                    # 异步非阻塞：后台Agent继续探索
+                    self.last_agent_run_at = datetime.now()
+                    goal1 = f"继续了解这个主题：{learning_topic}。搜索相关视频，先看1-3个，如果内容有价值再继续多看。"
+                    task = asyncio.create_task(self._agent_goal_async(goal1, score=score))
+                    task.add_done_callback(_safe_task_callback("agent_goal1"))
+
+                # 🧭 好奇心驱动深度搜索：遇到感兴趣/不了解的内容，B站搜索深入学（动态2-10个视频）
+                if CURIOSITY_DEEP_DIVE_ENABLED and score >= CURIOSITY_DEEP_DIVE_MIN_SCORE:
+                    dive_cooldown_ok = (datetime.now() - self._last_curiosity_dive_at).total_seconds() / 60 >= CURIOSITY_DEEP_DIVE_COOLDOWN_MINUTES
+                    today_str = datetime.now().strftime("%Y%m%d")
+                    if self._curiosity_dive_date != today_str:
+                        self._curiosity_dive_count_today = 0
+                        self._curiosity_dive_date = today_str
+                    
+                    # 触发条件：高分视频AND(有学习主题OR AI表示想深入了解OR随机触发)
+                    dive_trigger = (learning_topic or
+                                   any(w in (thought + title).lower() for w in ["想了解", "深入", "探索", "好奇", "不懂", "学习", "研究"]) or
+                                   random.random() < CURIOSITY_DEEP_DIVE_PROB)
+                    
+                    if dive_trigger and dive_cooldown_ok and self._curiosity_dive_count_today < 3 and self.energy >= 10:
+                        dive_topic = learning_topic or title[:20]
+                        log(f"🧭 触发好奇心深度搜索！主题: '{dive_topic}' (评分:{score})", "LEARN")
+                        self._last_curiosity_dive_at = datetime.now()
+                        self._curiosity_dive_count_today += 1
+                        self.energy -= 3
+                        await self.curiosity_deep_dive(dive_topic, trigger_title=title, trigger_bvid=bvid)
+
+                if score >= AGENT_AUTO_MIN_SCORE and any(word in title.lower() + " " + thought.lower() for word in ["模型", "ai", "gpt", "agent", "机器人", "开源", "教程", "工具", "开发"]):
+                    # [FIX] 异步非阻塞：后台探索，不卡主循环
+                    self.last_agent_run_at = datetime.now()
+                    goal2 = f"深入了解这个主题：{title}。搜索相关视频，先看1-3个，有价值再继续。"
+                    task = asyncio.create_task(self._agent_goal_async(goal2, score=score))
+                    task.add_done_callback(_safe_task_callback("agent_goal2"))
+
+                if decision.get('remember_up') and up not in self.memory['known_ups']:
+                    self.remember_up(up, uid=up_uid)
+
+                # [*] 自动喜欢UP主：高分视频且UP主有趣 → 标记为喜欢
+                if score >= 8.0 and up_uid and up and not self.is_favorite_up(up):
+                    fav_prob = 0.12 + (score - 8.0) * 0.08  # score=8→12%, score=10→28%
+                    if random.random() < fav_prob:
+                        self.favorite_up(up, uid=up_uid)
+                        action_log.append("[STAR]喜欢UP主")
+                        log(f"[STAR] 自动标记喜欢的UP主: @{up} (UID:{up_uid}) [评分:{score}, 概率:{fav_prob:.0%}]", "FAVORITE")
+
+                if do_like_trigger:
+                    try:
+                        await asyncio.sleep(random.uniform(2, 4))
+                        has_liked = await v.has_liked()
+                        if not has_liked:
+                            log("正在尝试点赞...", "ACT")
+                            aid = v.get_aid()
+                            await _bili_throttle()  # 🔒 全局节流
+                            await request("POST", "https://api.bilibili.com/x/web-interface/archive/like",
+                                data={"aid": aid, "bvid": bvid, "like": 1},
+                                credential=self.credential)
+                            log("点赞成功！", "SUCCESS")
+                            action_log.append("点赞")
+                            if self.psycho_profile:
+                                self.psycho_profile.tracker.record_interaction("like", bvid, title, up)
+                                self.psycho_profile.update_surface_interest(
+                                    title=title, tags=tags, up_uid=up_uid, up_name=up,
+                                    liked=True, score=score
+                                )
+                            self.user_profile_mgr.adjust_affinity(f"up::{up}", up, 1, "点赞视频")
+                            # 存入互动历史，供回顾复习（带评分）
+                            self.add_history_video(str(bvid), title, up, aid, "like", score)
+                        else:
+                            log("视频已经点过赞了。", "INFO")
+                    except Exception as e:
+                        log(f"点赞失败 (可能受限): {e}", "ERROR")
+
+                if do_fav:
+                    try:
+                        await asyncio.sleep(random.uniform(0.5, 1.5))
+                        has_favorited = await v.has_favoured()
+
+                        if not has_favorited:
+                            await _bili_throttle("收藏夹列表")  # 🔒 全局节流
+                            fav_list_data = await favorite_list.get_video_favorite_list(uid=self.credential.dedeuserid, credential=self.credential)
+                            if fav_list_data and fav_list_data.get('list'):
+                                default_folder_id = fav_list_data['list'][0]['id']
+                                log(f"正在尝试收藏到默认收藏夹...", "ACT")
+                                aid = v.get_aid()
+                                await _bili_throttle()  # 🔒 全局节流
+                                await request("POST", "https://api.bilibili.com/x/v3/fav/resource/deal",
+                                    data={"aid": aid, "bvid": bvid, "rid": aid, "type": 2,
+                                          "add_media_ids": str(default_folder_id)},
+                                    credential=self.credential)
+                                log("收藏成功！", "SUCCESS")
+                                action_log.append("收藏")
+                                if self.psycho_profile:
+                                    self.psycho_profile.tracker.record_interaction("favorite", bvid, title, up)
+                                    self.psycho_profile.update_surface_interest(
+                                        title=title, tags=tags, up_uid=up_uid, up_name=up,
+                                        favorited=True, score=score
+                                )
+                                self.user_profile_mgr.adjust_affinity(f"up::{up}", up, 2, "收藏视频")
+                                # 存入互动历史，供回顾复习（带评分）
+                                self.add_history_video(str(bvid), title, up, aid, "fav", score)
+                            else:
+                                log("未能获取到收藏夹列表，无法收藏。", "WARN")
+                        else:
+                            log("视频已在收藏夹中。", "INFO")
+                    except Exception as e:
+                        log(f"收藏失败: {e}", "ERROR")
+
+                if do_coin:
+                    try:
+                        await asyncio.sleep(random.uniform(2, 4))
+                        aid = v.get_aid()
+                        await _bili_throttle()  # 🔒 全局节流
+                        await request("POST", "https://api.bilibili.com/x/web-interface/coin/add",
+                            data={"aid": aid, "bvid": bvid, "multiply": 1, "select_like": 1},
+                            credential=self.credential)
+                        self.coins_spent += 1
+                        log(f"投币成功！今日已投 {self.coins_spent} 枚。", "COIN")
+                        action_log.append("投币")
+                        if self.psycho_profile:
+                            self.psycho_profile.tracker.record_interaction("coin", bvid, title, up)
+                            self.psycho_profile.update_surface_interest(
+                                title=title, tags=tags, up_uid=up_uid, up_name=up,
+                                coined=True, score=score
+                            )
+                        self.user_profile_mgr.adjust_affinity(f"up::{up}", up, 3, "投币支持")
+                    except Exception as e:
+                        log(f"投币失败: {e}", "ERROR")
+
+                # 回复他人评论的功能
+                if do_replies and PROB_COMMENT_OTHERS > 0:
+                    for reply in do_replies:
+                        try:
+                            target_id = reply.get('target_id', 0)
+                            reply_content = reply.get('content', '')
+                            
+                            if target_id and reply_content:
+                                target_comment = next((item for item in c_list if str(item.get("id")) == str(target_id)), {})
+                                incoming_text = target_comment.get("content", "")
+                                pacing_ok, pacing_reason = self.comment_mgr._should_reply_user(target_comment.get("user_id"), incoming_text) if self.comment_mgr else (True, "通过")
+                                if not pacing_ok:
+                                    log(f"视频评论节奏控制跳过 ID:{target_id}: {pacing_reason}", "COMMENT")
+                                    continue
+                                reply_content = ensure_ai_marker(reply_content)
+                                ok, reason, hits = ReplySafetyGuard().review(incoming_text, reply_content)
+                                if not ok:
+                                    log(f"已拦截视频评论回复 ID:{target_id}: {reason} | 命中: {', '.join(hits)}", "WARN")
+                                    if self.comment_mgr:
+                                        self.comment_mgr.log_blocked_reply(target_id, incoming_text, reply_content, reason, hits, target_comment.get("user", "视频评论"))
+                                    continue
+
+                                log(f"正在回复评论 ID:{target_id}: {reply_content[:50]}...", "COMMENT")
+                                await asyncio.sleep(human_reply_delay())
+                                if COMMENT_MODE == "simulate":
+                                    log(f"[模拟] 拟回复视频评论 ID:{target_id}: {reply_content[:50]}...", "SIMULATE")
+                                else:
+                                    await _bili_throttle()  # 🔒 全局节流
+                                    await comment.send_comment(
+                                        text=reply_content,
+                                        oid=aid,
+                                        type_=CommentResourceType.VIDEO,
+                                        root=target_id,
+                                        parent=target_id,
+                                        credential=self.credential
+                                    )
+                                    log("回复评论成功！", "SUCCESS")
+                                action_log.append(f"回复评论({target_id})")
+                                self.mood_mgr.shift("成功参与评论区互动", 1)
+                                
+                                # 记录评论日志
+                                if self.comment_mgr:
+                                    self.comment_mgr.log_interaction(target_id, "reply", reply_content, "视频评论")
+                                    self.comment_mgr._mark_user_replied(target_comment.get("user_id"))
+                                
+                                await asyncio.sleep(random.uniform(1, 3))
+                        except Exception as e:
+                            log(f"回复评论失败: {e}", "ERROR")
+
+                if action_log:
+                    self.energy -= 3
+                    self.mood_mgr.shift("主动互动完成", 1)
+                    log(f"深度交互额外消耗3点精力，当前剩余精力: {self.energy}%", "INFO")
+                    self.write_journal(title, up, score, f"[{mode}] {thought}", " + ".join(action_log), video_url)
+                else:
+                    self.mood_mgr.shift("观望未互动", -1)
+                    log("所有互动检定均未通过或无需操作，本次不进行额外操作。", "INFO")
+
+                self.record_session_event(
+                    "video_processed",
+                    title=title,
+                    up=up,
+                    score=score,
+                    mode=mode,
+                    thought=thought,
+                    actions=action_log,
+                    mood=self.mood_mgr.get_mood(),
+                    url=video_url
+                )
+                await self.maybe_auto_diary()
+                await self.maybe_self_evolve()
+
+                await self.watch_and_sync_history(bvid)
+
+                # 📚 知识库定期审查：每N个视频后随机抽查归档质量
+                if KNOWLEDGE_REVIEW_INTERVAL > 0:
+                    self._knowledge_review_countdown -= 1
+                    if self._knowledge_review_countdown <= 0:
+                        self._knowledge_review_countdown = KNOWLEDGE_REVIEW_INTERVAL
+                        try:
+                            await self._review_knowledge_periodically()
+                        except Exception as review_e:
+                            log(f"知识库定期审查异常: {review_e}", "WARN")
+
+            except asyncio.CancelledError:
+                log("主循环被取消 (CancelledError)，正常退出", "WARN")
+                raise  # 重新抛出，让 asyncio.run() 正确处理
+            except KeyboardInterrupt:
+                log("主循环收到中断信号，正常退出", "WARN")
+                raise
+            except Exception as e:
+                log(f"主循环发生严重错误: {e}", "ERROR")
+                import traceback
+                traceback.print_exc()
+                await asyncio.sleep(3)
+
+
+# ==============================================================================
+# [V] 手动视频分析 — 用户输入链接/标题/UP主名，AI客观解析
+# ==============================================================================
+def _extract_bvid(text: str):
+    """从文本中提取 BV 号。
+    支持: 完整URL、短链接、纯BV号
+    """
+    # 纯 BV 号
+    m = re.search(r'\b(BV[0-9A-Za-z]{10})\b', text)
+    if m:
+        return m.group(1)
+    # b23.tv 短链接
+    m = re.search(r'b23\.tv/([0-9A-Za-z]+)', text)
+    if m:
+        return m.group(1)
+    return None
+
+async def _resolve_b23_short(short_code: str) -> str:
+    """解析 b23.tv 短链接为完整 BV 号"""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            resp = await client.get(f"https://b23.tv/{short_code}",
+                                    headers={"User-Agent": "Mozilla/5.0"})
+            url = str(resp.url)
+            m = re.search(r'BV[0-9A-Za-z]{10}', url)
+            if m:
+                return m.group(0)
+    except Exception as e:
+        log(f'非预期异常: {e}', 'WARN')
+    return ""
+
+async def manual_video_analysis():
+    """手动视频分析：用户输入链接/标题/UP主名，AI客观解析视频内容。"""
+    print(f"\n{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}|               📹 手动视频分析 - 客观AI解析                    |{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
+    print(f"{Fore.YELLOW}[INFO] 支持: B站视频链接 | BV号 | 视频标题 | UP主名字{Style.RESET_ALL}")
+    print(f"{Fore.YELLOW}[INFO] 此模式下AI不带心情/人格滤镜，纯客观分析{Style.RESET_ALL}")
+
+    user_input = input(f"\n{Fore.CYAN}请输入视频链接/标题/UP主名字: {Style.RESET_ALL}").strip()
+    if not user_input:
+        print(f"{Fore.YELLOW}[WARN] 输入为空，已取消{Style.RESET_ALL}")
+        return
+
+    # ── 第一步：判断输入类型 ──
+    bvid = None
+    title = None
+    up_name = None
+    up_uid = None
+    from_search = False
+
+    raw_bvid = _extract_bvid(user_input)
+    if raw_bvid:
+        # 可能是 b23.tv 短链接
+        if 'b23.tv' in user_input.lower():
+            resolved = await _resolve_b23_short(raw_bvid)
+            if resolved:
+                bvid = resolved
+                log(f"短链接解析: b23.tv/{raw_bvid} -> {bvid}", "RESOLVE")
+            else:
+                print(f"{Fore.RED}[ERROR] 短链接解析失败，尝试直接搜索...{Style.RESET_ALL}")
+                from_search = True
+        else:
+            bvid = raw_bvid
+
+    if not bvid and not from_search:
+        from_search = True
+
+    # ── 提前创建 AgentBrain，加载凭证用于搜索 ──
+    brain = AgentBrain()
+    brain.bili._load_credential()
+    # [FIX] 同时加载 cookies，否则 fetch_bilibili_subtitles 无 cookie 无法获取AI字幕
+    cookie_loaded = False
+    if os.path.exists(COOKIE_FILE):
+        with open(COOKIE_FILE, 'r', encoding='utf-8') as f:
+            brain.cookies = json.load(f)
+        cookie_loaded = True
+    else:
+        # [AUTO] 尝试从 bilibili_claw 兄弟目录加载 cookie（用户可能只在一个项目登录过）
+        sibling_cookie = os.path.join(os.path.dirname(BASE_DIR), "bilibili_claw", "Data", "bilibili_cookies.json")
+        if os.path.exists(sibling_cookie):
+            try:
+                with open(sibling_cookie, 'r', encoding='utf-8') as f:
+                    brain.cookies = json.load(f)
+                log(f"[AUTO] 从 bilibili_claw 项目加载到登录Cookie (UID: {brain.cookies.get('DedeUserID','?')})", "LOGIN")
+                cookie_loaded = True
+            except Exception as e:
+                log(f'非预期异常: {e}', 'WARN')
+    if not cookie_loaded:
+        print(f"{Fore.YELLOW}[HINT] 未登录(Cookie文件不存在)，部分视频的AI字幕可能需要登录才能获取{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}       建议先运行菜单 3 录入登录Cookie，以获取完整AI字幕功能{Style.RESET_ALL}")
+
+    # ── 从搜索中选择视频 ──
+    if from_search:
+        print(f"\n{Fore.CYAN}正在B站搜索: {user_input}...{Style.RESET_ALL}")
+        results = await brain.bili.search_bilibili(user_input, limit=12)
+        if not results:
+            print(f"{Fore.RED}[ERROR] 未找到相关视频或UP主{Style.RESET_ALL}")
+            return
+
+        print(f"\n{Fore.GREEN}找到 {len(results)} 个相关结果，请选择:{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}{'─' * 80}{Style.RESET_ALL}")
+        for i, r in enumerate(results):
+            dur = r.get("duration", "??")
+            play = r.get("play", 0)
+            play_str = f"{play/10000:.1f}w" if play >= 10000 else str(play)
+            title_display = r['title'][:50]
+            author = r.get('author', '?')
+            print(f"  {Fore.YELLOW}{i+1:>2}.{Style.RESET_ALL} {title_display}")
+            print(f"      {Fore.LIGHTBLACK_EX}@{author}  |  ▶ {play_str}  |  ⏱ {dur}{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}{'─' * 80}{Style.RESET_ALL}")
+        print(f"  {Fore.YELLOW} 0.{Style.RESET_ALL} 取消")
+        print(f"  {Fore.CYAN}输入UP主名字可搜索TA的最新视频{Style.RESET_ALL}")
+
+        choice = input(f"\n{Fore.CYAN}请选择视频编号 (1-{len(results)}): {Style.RESET_ALL}").strip()
+
+        if choice == "0" or choice == "":
+            print(f"{Fore.YELLOW}[WARN] 已取消{Style.RESET_ALL}")
+            return
+
+        # 判断是数字选择还是UP主名
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < len(results):
+                chosen = results[idx]
+                bvid = chosen.get("bvid")
+                title = chosen.get("title", "")
+                up_name = chosen.get("author", "")
+                up_uid = chosen.get("mid")
+                print(f"{Fore.GREEN}[OK] 已选择: {title} - @{up_name}{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.RED}[ERROR] 无效选项{Style.RESET_ALL}")
+                return
+        except ValueError:
+            # 非数字 -> 搜索UP主，取TA最新视频
+            print(f"{Fore.CYAN}搜索UP主: {choice}...{Style.RESET_ALL}")
+            try:
+                data = await bili_search.search_by_type(
+                    choice,
+                    search_type=bili_search.SearchObjectType.USER,
+                    page=1
+                )
+                user_items = data.get("result") or []
+                if not user_items:
+                    print(f"{Fore.RED}[ERROR] 未找到UP主: {choice}{Style.RESET_ALL}")
+                    return
+                best = user_items[0]
+                up_uid = best.get("mid") or best.get("uid")
+                up_name = best.get("uname") or best.get("name") or choice
+                if up_uid:
+                    up_uid = int(up_uid)
+                    print(f"{Fore.GREEN}[OK] 找到UP主: {up_name} (UID: {up_uid}){Style.RESET_ALL}")
+                    print(f"{Fore.CYAN}获取 @{up_name} 的最新视频...{Style.RESET_ALL}")
+                    latest = await brain.bili.get_up_videos(up_uid, limit=1)
+                    if latest:
+                        bvid = latest[0].get("bvid")
+                        title = latest[0].get("title", "")
+                        if not up_name:
+                            up_name = choice
+                        print(f"{Fore.GREEN}[OK] 最新视频: {title}{Style.RESET_ALL}")
+                    else:
+                        print(f"{Fore.RED}[ERROR] 该UP主没有投稿视频{Style.RESET_ALL}")
+                        return
+                else:
+                    print(f"{Fore.RED}[ERROR] 无法获取UP主UID{Style.RESET_ALL}")
+                    return
+            except Exception as e:
+                print(f"{Fore.RED}[ERROR] 搜索UP主失败: {e}{Style.RESET_ALL}")
+                return
+
+    # ── 获取视频信息 ──
+    if not title or not up_name:
+        print(f"{Fore.CYAN}获取视频信息...{Style.RESET_ALL}")
+        try:
+            meta = await brain.bili._wbi_get(
+                'https://api.bilibili.com/x/web-interface/view',
+                params={'bvid': bvid}
+            )
+            vinfo = meta.json()
+            if vinfo.get('code') == 0:
+                vdata = vinfo['data']
+                title = title or vdata.get('title', '')
+                up_name = up_name or vdata.get('owner', {}).get('name', '未知')
+                up_uid = up_uid or vdata.get('owner', {}).get('mid', 0)
+            else:
+                print(f"{Fore.RED}[ERROR] 获取视频信息失败: code={vinfo.get('code')}{Style.RESET_ALL}")
+                return
+        except Exception as e:
+            print(f"{Fore.RED}[ERROR] 获取视频信息失败: {e}{Style.RESET_ALL}")
+            return
+
+    video_url = f"https://www.bilibili.com/video/{bvid}"
+    print(f"\n{Fore.GREEN}+------------------------------------------------------------+{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}|  视频: {title[:45]}{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}|  UP主: @{up_name}{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}|  链接: {video_url}{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}+------------------------------------------------------------+{Style.RESET_ALL}")
+
+    # ── 第二步：选择分析模式 ──
+    print(f"\n{Fore.CYAN}选择分析模式:{Style.RESET_ALL}")
+    print(f"  {Fore.GREEN}Enter (回车){Style.RESET_ALL} = 直接分析：输入一句话意图，自动看视频归档")
+    print(f"  {Fore.LIGHTMAGENTA_EX}A (Agent){Style.RESET_ALL}  = Agent对话：多轮对话确定目标、搜索知识库、增删改查文件")
+    mode_choice = input(f"\n{Fore.CYAN}模式 (回车=A-直接分析 / Agent对话): {Style.RESET_ALL}").strip().lower()
+
+    if mode_choice == "a":
+        # 提前获取 aid 供 Agent 使用
+        _aid = 0
+        try:
+            meta = await brain.bili._wbi_get(
+                'https://api.bilibili.com/x/web-interface/view',
+                params={'bvid': bvid}
+            )
+            vinfo = meta.json()
+            if vinfo.get('code') == 0:
+                _aid = vinfo.get('data', {}).get('aid', 0)
+        except Exception as e:
+            log(f'非预期异常: {e}', 'WARN')
+        await _agent_video_analysis(brain, bvid, title, up_name, video_url, _aid)
+        return
+
+    # ── 直接分析模式：用户意图输入 ──
+    intent = input(f"\n{Fore.CYAN}你的意图/要求 (如:帮我总结知识点/分析UP主风格/回车跳过): {Style.RESET_ALL}").strip()
+    if intent:
+        print(f"{Fore.GREEN}[OK] 意图: {intent}{Style.RESET_ALL}")
+    else:
+        print(f"{Fore.YELLOW}[INFO] 无额外意图，默认分析模式{Style.RESET_ALL}")
+
+    # ── 第三步：客观分析视频（覆盖心情为客观模式）──
+    original_custom = MOOD_CUSTOM_ENABLED
+    original_custom_value = MOOD_CUSTOM_VALUE
+    try:
+        globals()['MOOD_CUSTOM_ENABLED'] = True
+        globals()['MOOD_CUSTOM_VALUE'] = "客观冷静分析，专注内容质量，不带个人情绪"
+    except Exception as e:
+        log(f'非预期异常: {e}', 'WARN')
+
+    print(f"\n{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}|  [模式] 客观分析 - 开始解析视频内容                           |{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
+
+    # 1. 视频理解
+    print(f"\n{Fore.CYAN}[1/4] 理解视频内容 (字幕/ASR)...{Style.RESET_ALL}")
+    success, subtitle_text = await brain.understand_video_for_decision(bvid, title=title)
+    if success:
+        preview = subtitle_text[:200].replace('\n', ' ')
+        print(f"{Fore.GREEN}[OK] 视频内容获取成功: {preview}...{Style.RESET_ALL}")
+    else:
+        subtitle_text = f"[理解受限] {subtitle_text}"
+        print(f"{Fore.YELLOW}[WARN] 视频理解受限: {subtitle_text[:120]}{Style.RESET_ALL}")
+
+    # 2. 评论+弹幕
+    print(f"\n{Fore.CYAN}[2/4] 获取评论区讨论...{Style.RESET_ALL}")
+    try:
+        meta = await brain.bili._wbi_get(
+            'https://api.bilibili.com/x/web-interface/view',
+            params={'bvid': bvid}
+        )
+        vinfo = meta.json()
+        aid = vinfo.get('data', {}).get('aid', 0) if vinfo.get('code') == 0 else 0
+    except Exception:
+        aid = 0
+
+    comment_text = "[未读取评论]"
+    c_list = []
+    danmaku_text = ""
+    if aid:
+        try:
+            comment_text, c_list = await brain._get_comments_context(aid)
+            if c_list:
+                print(f"{Fore.GREEN}[OK] 获取到 {len(c_list)} 条评论{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.YELLOW}[WARN] 评论区无内容{Style.RESET_ALL}")
+        except Exception as e:
+            print(f"{Fore.YELLOW}[WARN] 评论获取失败: {e}{Style.RESET_ALL}")
+
+        try:
+            danmaku_list = await brain.maybe_read_danmaku(bvid)
+            if danmaku_list:
+                danmaku_text = f"【弹幕（共{len(danmaku_list)}条）】:\n" + "\n".join(
+                    f"  {dm.get('text','')}" for dm in danmaku_list[:15]
+                )
+                print(f"{Fore.GREEN}[OK] 获取到 {len(danmaku_list)} 条弹幕{Style.RESET_ALL}")
+        except Exception as e:
+            log(f'非预期异常: {e}', 'WARN')
+
+    # 3. AI决策分析（客观模式）
+    print(f"\n{Fore.CYAN}[3/4] AI客观决策分析中...{Style.RESET_ALL}")
+
+    # 构建不含心情/人格的客观prompt（手动分析模式：客观评价，不掷硬币）
+    objective_prompt = SYSTEM_PROMPT_BRAIN.replace("{bot_name}", get_bot_name()).replace("{memory_ups}", str(brain.get_known_up_names()))
+    # 覆盖随机性格：手动分析模式强制客观分析，不掷硬币
+    objective_prompt = objective_prompt.replace(
+        "【性格模式】掷硬币决定：- **夸夸模式**：真诚赞美。 - **吐槽模式**：犀利毒舌。",
+        "【性格模式】客观分析模式：基于内容质量公正评分，不随机切换夸夸/吐槽。评分标准：标题与内容匹配度、信息密度、观点深度、制作质量。"
+    )
+    if intent:
+        objective_prompt += f"\n\n【用户额外要求】{intent}"
+
+    context = (f"视频标题: {title}\nUP主: {up_name}\n"
+               f"【📺 视频内容字幕】: {subtitle_text}\n"
+               f"{comment_text}"
+               f"{danmaku_text}")
+
+    try:
+        resp = await brain._call_ai_with_retry(
+            model=MODEL_BRAIN,
+            messages=[
+                {"role": "system", "content": objective_prompt},
+                {"role": "user", "content": context}
+            ],
+            request_timeout=120
+        )
+        raw = resp.choices[0].message.content
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start >= 0 and end >= start:
+            json_str = raw[start:end + 1]
+        else:
+            raise ValueError(f"AI返回未找到JSON: {raw[:200]}")
+
+        try:
+            decision = json.loads(json_str)
+        except json.JSONDecodeError:
+            fixed = json_str.replace("'", '"')
+            fixed = re.sub(r'\bTrue\b', 'true', fixed)
+            fixed = re.sub(r'\bFalse\b', 'false', fixed)
+            fixed = re.sub(r'\bNone\b', 'null', fixed)
+            decision = json.loads(fixed)
+
+        score = decision.get('score', 0)
+        thought = decision.get('thought', '')
+        mode = decision.get('mode', '')
+        learning_topic = decision.get('learning_topic', '')
+
+        print(f"\n{Fore.CYAN}+------------------------------------------------------------+{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}|  [分析结果]                                                  |{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}+------------------------------------------------------------+{Style.RESET_ALL}")
+        print(f"  AI评分: {Fore.YELLOW}{score}/10{Style.RESET_ALL}")
+        print(f"  AI想法: {thought}")
+        if mode:
+            print(f"  模式: {mode}")
+        if learning_topic:
+            print(f"  主题: {learning_topic}")
+        print(f"{Fore.CYAN}+------------------------------------------------------------+{Style.RESET_ALL}")
+
+    except Exception as e:
+        print(f"{Fore.RED}[ERROR] AI决策失败: {_mask_urls(str(e)[:200])}{Style.RESET_ALL}")
+        score = 0
+        thought = ""
+        learning_topic = ""
+
+    # ── 恢复心情设置 ──
+    try:
+        globals()['MOOD_CUSTOM_ENABLED'] = original_custom
+        globals()['MOOD_CUSTOM_VALUE'] = original_custom_value
+    except Exception as e:
+        log(f'非预期异常: {e}', 'WARN')
+
+    # 4. 如果干货 → 学习归档
+    if score >= 6.0 or learning_topic:
+        print(f"\n{Fore.CYAN}[4/4] 检测到有价值内容，触发学习归档...{Style.RESET_ALL}")
+        learn_text = subtitle_text
+        if not learn_text or "[无可用字幕" in str(learn_text) or "[未读取" in str(learn_text):
+            learn_text = f"【视频标题】{title}\n【AI判断】{thought}\n"
+            if danmaku_text:
+                learn_text += f"{danmaku_text}\n"
+            if comment_text and comment_text != "[未读取评论]":
+                learn_text += f"{comment_text}\n"
+            learn_text = learn_text.strip()
+
+        if not learning_topic:
+            learning_topic = title[:15] if title else "手动分析"
+
+        if learn_text and len(learn_text) > 20:
+            try:
+                _desc = getattr(brain, "_last_video_desc", "")
+                learn_success = await brain.learn_from_video(bvid, title, up_name, video_url, learn_text, learning_topic, video_desc=_desc, score=score)
+                if learn_success:
+                    print(f"{Fore.GREEN}[OK] 知识已归档到知识库！{Style.RESET_ALL}")
+                else:
+                    print(f"{Fore.YELLOW}[INFO] 该知识可能已存在，跳过归档{Style.RESET_ALL}")
+            except Exception as e:
+                print(f"{Fore.RED}[ERROR] 学习归档失败: {e}{Style.RESET_ALL}")
+        else:
+            print(f"{Fore.YELLOW}[INFO] 可学习内容不足，跳过归档{Style.RESET_ALL}")
+    else:
+        print(f"\n{Fore.CYAN}[4/4] 评分 {score}/10 < 6.0，内容质量一般，跳过学习归档{Style.RESET_ALL}")
+
+    print(f"\n{Fore.GREEN}+============================================================+{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}|  手动视频分析完成！                                         |{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}+============================================================+{Style.RESET_ALL}")
+
+
+# ==============================================================================
+# [REVISIT] 知识库视频重温优化
+# ==============================================================================
+
+def _scan_knowledge_base_md_files():
+    """扫描 KnowledgeBase/ 下所有 .md 文件，提取 [BVxxx] 视频信息。
+    返回: [(bvid, title, file_path, up, category_path), ...]"""
+    results = []
+    if not os.path.exists(KNOWLEDGE_BASE_DIR):
+        return results
+
+    for root, dirs, files in os.walk(KNOWLEDGE_BASE_DIR):
+        dirs[:] = [d for d in dirs if not d.startswith('.')]
+        for fname in files:
+            if not fname.endswith('.md'):
+                continue
+            fpath = os.path.join(root, fname)
+            # 提取 BV 号: [BVxxx] - 标题.md
+            bv_match = re.match(r'^\[(BV[0-9A-Za-z]{10})\]\s*-\s*(.+)\.md$', fname)
+            if not bv_match:
+                continue
+            bvid = bv_match.group(1)
+            title = bv_match.group(2).strip()
+            rel_path = os.path.relpath(fpath, KNOWLEDGE_BASE_DIR)
+            # 尝试从文件头部读取 UP主 信息
+            up_name = ""
+            try:
+                with open(fpath, 'r', encoding='utf-8') as f:
+                    head = f.read(800)
+                    up_m = re.search(r'\*\*UP主\*\*:\s*(.+)', head)
+                    if up_m:
+                        up_name = up_m.group(1).strip()
+            except Exception as e:
+                log(f'非预期异常: {e}', 'WARN')
+            # 分类路径: 去掉文件名后的目录部分
+            category_path = os.path.dirname(rel_path).replace(os.sep, '/')
+            if not category_path or category_path == '.':
+                category_path = '未分类'
+            results.append((bvid, title, fpath, up_name, category_path))
+    # 按分类路径排序
+    results.sort(key=lambda x: (x[4], x[1]))
+    return results
+
+
+# Agent模式可用工具的常量定义
+AGENT_TOOLS_HELP = """你拥有以下工具能力，在回复中使用 [TOOL:工具名] 参数 的格式来调用。可以同时调用多个工具：
+
+1. [TOOL:fetch_subtitles]
+   获取视频的AI字幕/CC字幕文本（仅获取字幕，不做AI分析）。
+   **是视频内容分析的第一步，拿到字幕后才能判断后续操作。**
+
+2. [TOOL:search_knowledge] 搜索词
+   在知识库中搜索相关内容，返回匹配的文件路径和摘要
+   
+3. [TOOL:read_file] 相对路径
+   读取知识库中的指定文件内容，路径相对于 KnowledgeBase/ 目录
+   例: [TOOL:read_file] 科技/AI工具/video_creation/[BVxxx] - 标题.md
+
+4. [TOOL:list_files] 可选分类路径
+   列出知识库文件，不传参数=列出全部，传路径=列出子目录
+   例: [TOOL:list_files] 科技
+
+5. [TOOL:delete_file] 相对路径
+   删除知识库中的指定文件（需确认，会提示用户）
+
+6. [TOOL:update_file] 相对路径
+   ---新内容---
+   替换/更新知识库文件的全部内容（需确认）
+   例: [TOOL:update_file] 科技/AI工具/[BVxxx] - 标题.md
+   ---
+   新的完整Markdown内容...
+
+7. [TOOL:analyze_video]
+   触发完整的视频分析：封面+字幕/ASR/视觉帧+评论+弹幕 → AI决策 → 学习归档
+   **仅在已拿到字幕且确实需要深度分析时使用。**
+
+8. [TOOL:quick_preview]
+   只看标题/简介/评论/弹幕，不做完整视频分析，快速了解视频热度/反馈
+   **不获取视频字幕/内容！想分析内容先调用 fetch_subtitles。**
+
+9. [TOOL:open_file] 文件绝对路径
+   用系统默认程序打开任意文件（md→记事本/Typora, html→浏览器 等）
+   例: [TOOL:open_file] C:\\Users\\用户名\\Desktop\\视频总结.md
+   **仅在update_file写文件成功后使用。路径必须用双反斜杠 \\\\ 分隔。**
+
+[DONE] 完成任务后输出此标记结束对话
+
+工作流程：
+- 用户提到"字幕"/"内容"/"分析视频/总结"等 → 第一步必须先 [TOOL:fetch_subtitles]
+- 用户只要热度/评论反馈 → 可以用 [TOOL:quick_preview]
+- 拿到字幕后，按用户要求分析/总结/归档
+- 可一次调用多个工具以提高效率"""
+
+
+async def _agent_video_analysis(brain, bvid, title, up_name, video_url, aid=0):
+    """Agent对话模式：多轮对话确定目标、搜索知识库、增删改查文件、智能分析视频。
+    
+    工具:
+    - search_knowledge: 搜索知识库文件
+    - read_file: 读取指定 .md 文件
+    - list_files: 列出知识库文件
+    - update_file: 更新/替换知识库文件
+    - delete_file: 删除知识库文件
+    - analyze_video: 触发完整视频分析管道
+    - quick_preview: 只看标题/简介/评论/弹幕
+    """
+    print(f"\n{Fore.LIGHTMAGENTA_EX}+============================================================+{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTMAGENTA_EX}|  🤖 Agent对话模式 - 多轮对话 + 文件CRUD + 智能分析          |{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTMAGENTA_EX}+============================================================+{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}[Agent] 视频: {title[:50]}{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}[Agent] 输入你的要求，AI会提问/搜索知识库/增删改查文件/决定如何分析{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}[Agent] 命令: /help 帮助 | /exit 退出 | /files 列文件 | /done 直接分析{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTMAGENTA_EX}+------------------------------------------------------------+{Style.RESET_ALL}")
+
+    # 缓存已分析结果
+    analysis_cache = {
+        "analyzed": False,
+        "subtitle_text": "",
+        "comment_text": "",
+        "c_list": [],
+        "danmaku_text": "",
+        "score": 0,
+        "thought": "",
+        "learning_topic": "",
+    }
+
+    # 本次会话自动允许的工具集合（用户选了"一直允许"后加入）
+    auto_allow_tools = set()
+
+    # 对话历史
+    messages = [
+        {"role": "system", "content": f"""你是bilibili_learning_bot的Agent助手，负责帮用户分析B站视频并管理知识库。
+
+当前视频信息:
+- 标题: {title}
+- UP主: {up_name}
+- BV号: {bvid}
+- 链接: {video_url}
+
+{AGENT_TOOLS_HELP}
+
+重要规则:
+1. 用中文回复，简洁专业
+2. 先理解用户意图，可以反问缩小目标
+3. 善用搜索/读取知识库，对比已有知识
+4. 文件操作(update/delete)前要说明理由并等待用户确认
+5. 可以同时调用多个工具，尤其 fetch_subtitles+search_knowledge 可并行
+6. 任务完成或用户满意时输出 [DONE]
+
+工作流程（与"直接分析模式"一致）：
+- 用户要求分析视频/总结内容 → 第一步 [TOOL:fetch_subtitles] 获取字幕
+- 拿到字幕后 → 调用 [TOOL:analyze_video] 做完整评分分析（含评论弹幕+AI决策+归档）
+- 分析完成后 → 根据用户要求输出总结/写文件/打开文件
+- 用户如中途要调整方向（如只总结某部分/改输出格式），在上一步完成后提出来即可
+- 不要用 quick_preview 替代 fetch_subtitles（quick_preview 不看视频内容！）
+- 写文件后如果用户要求打开，用 [TOOL:open_file] 绝对路径 打开它
+
+自动连续模式（重要！）：
+- 用户一句话包含了"分析+总结+写桌面+打开"这种多步需求时，你在同一轮回复中依次列出所有 [TOOL:] 步骤
+- 例如用户说"帮我分析视频总结到桌面并打开" → 你回复:
+  好的，我来一步到位：
+  [TOOL:fetch_subtitles]
+  （系统会自动继续执行后续工具，你只需列出第一步）
+- 如果工具执行结果返回后任务未完成，系统会自动再次调用你继续，无需等待用户输入
+- 所有步骤完成后输出 [DONE] 结束"""},
+    ]
+
+    # ── Agent 确认函数：4选1（本次允许 / 一直允许 / 不允许 / AI审查） ──
+    async def _agent_confirm(tool_name: str, action_desc: str, detail: str = "") -> str:
+        """通用确认对话框，返回: 'allow' | 'always' | 'deny' | 'ai_review'
+        
+        - allow: 仅本次允许
+        - always: 一直允许（当前视频会话内该工具自动放行）
+        - deny: 拒绝本次操作
+        - ai_review: 让AI自动审查安全性后决定
+        """
+        # 如果该工具已被加入"一直允许"，直接放行
+        if tool_name in auto_allow_tools:
+            return "always"
+
+        print(f"\n{Fore.YELLOW}╔══════════════════════════════════════════════════════════╗{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}║  [Agent权限确认] {tool_name}{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}╠══════════════════════════════════════════════════════════╣{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}║  {action_desc}{Style.RESET_ALL}")
+        if detail:
+            # 截断过长细节
+            detail_short = detail[:200] + ("..." if len(detail) > 200 else "")
+            print(f"{Fore.CYAN}║  详情: {detail_short}{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}╠══════════════════════════════════════════════════════════╣{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}║{Style.RESET_ALL}  {Fore.GREEN}1.{Style.RESET_ALL} 本次允许    {Fore.LIGHTGREEN_EX}2.{Style.RESET_ALL} 一直允许(本视频)    {Fore.RED}3.{Style.RESET_ALL} 不允许")
+        print(f"{Fore.YELLOW}║{Style.RESET_ALL}  {Fore.CYAN}4.{Style.RESET_ALL} AI自动审查")
+        print(f"{Fore.YELLOW}╚══════════════════════════════════════════════════════════╝{Style.RESET_ALL}")
+
+        choice = input(f"{Fore.CYAN}[Agent] 选择 (1-4, 回车=1): {Style.RESET_ALL}").strip()
+
+        if choice == "2":
+            auto_allow_tools.add(tool_name)
+            print(f"{Fore.GREEN}[Agent] 已设置: 本视频会话内 {tool_name} 自动放行{Style.RESET_ALL}")
+            return "always"
+        elif choice == "3":
+            print(f"{Fore.RED}[Agent] 已拒绝本次操作{Style.RESET_ALL}")
+            return "deny"
+        elif choice == "4":
+            print(f"{Fore.CYAN}[Agent] 启动AI安全审查...{Style.RESET_ALL}")
+            return "ai_review"
+        else:
+            # 默认=本次允许（包括回车和输入1）
+            return "allow"
+
+    async def _agent_ai_review(tool_name: str, action_desc: str, detail: str = "") -> bool:
+        """AI自动审查：调用AI判断该操作是否安全合理"""
+        review_prompt = f"""你是安全审查助手。Agent要执行以下操作，请判断是否安全合理：
+
+工具: {tool_name}
+操作: {action_desc}
+详情: {detail[:500]}
+
+判断标准：
+- 删除/修改知识库文件是否合理（不会误删重要数据）
+- 操作范围是否在知识库目录内
+- 是否可能造成数据丢失
+
+只返回JSON: {{"safe": true/false, "reason": "简短理由(20字内)"}}"""
+
+        try:
+            resp = await brain._call_ai_with_retry(
+                model=MODEL_BRAIN,
+                messages=[{"role": "user", "content": review_prompt}],
+                request_timeout=30
+            )
+            raw = resp.choices[0].message.content
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if start >= 0 and end >= start:
+                decision = json.loads(raw[start:end+1])
+                safe = decision.get("safe", True)
+                reason = decision.get("reason", "无")
+                if safe:
+                    print(f"{Fore.GREEN}[Agent] AI审查通过: {reason}{Style.RESET_ALL}")
+                    return True
+                else:
+                    print(f"{Fore.RED}[Agent] AI审查不通过: {reason}{Style.RESET_ALL}")
+                    return False
+            else:
+                print(f"{Fore.YELLOW}[Agent] AI审查无法解析，默认放行{Style.RESET_ALL}")
+                return True
+        except Exception as e:
+            print(f"{Fore.YELLOW}[Agent] AI审查异常({e})，默认放行{Style.RESET_ALL}")
+            return True
+
+    def _agent_list_files(cat_path=""):
+        """列出知识库文件"""
+        all_files = _scan_knowledge_base_md_files()
+        if not all_files:
+            return "知识库为空，没有已学习的视频"
+        if cat_path:
+            filtered = [(b,t,f,u,c) for b,t,f,u,c in all_files if c.startswith(cat_path)]
+            if not filtered:
+                return f"分类 '{cat_path}' 下没有文件"
+            result = f"分类 '{cat_path}' 下的文件 ({len(filtered)}个):\n"
+            for b, t, f, u, c in filtered:
+                result += f"  [{b}] {t[:50]} | {c}\n"
+            return result.strip()
+        # 按分类统计
+        from collections import Counter
+        cats = Counter(c for _,_,_,_,c in all_files)
+        result = f"知识库共 {len(all_files)} 个文件:\n"
+        for cat, cnt in sorted(cats.items()):
+            result += f"  {cat}/ ({cnt}个)\n"
+        return result.strip()
+
+    def _agent_search_knowledge(query):
+        """搜索知识库（向量语义搜索 + 关键词匹配）"""
+        all_files = _scan_knowledge_base_md_files()
+        if not all_files:
+            return "知识库为空"
+
+        # 尝试向量搜索
+        vector_hits = set()
+        try:
+            if KBSearchEngine:
+                from xingye_bot.settings import load_settings as _ls
+                from xingye_bot.state import BotState as _bs
+                _s = _ls()
+                _engine = KBSearchEngine(ModelClient(_s, _bs()))
+                _vec_results = _engine.search(query, top_k=10)
+                if _vec_results:
+                    for vr in _vec_results:
+                        if vr.get("bvid"):
+                            vector_hits.add(vr["bvid"])
+        except Exception:
+            pass
+
+        q_lower = query.lower()
+        matches = []
+        for b, t, f, u, c in all_files:
+            score = 0
+            if vector_hits and b in vector_hits:
+                score += 10  # 向量命中最高权重
+            if q_lower in t.lower():
+                score += 3
+            for kw in q_lower.split():
+                if kw in t.lower():
+                    score += 2
+            if u and q_lower in u.lower():
+                score += 1
+            if score > 0:
+                preview = ""
+                try:
+                    with open(f, 'r', encoding='utf-8') as fh:
+                        preview = fh.read(200).replace('\n', ' ')
+                except Exception as e:
+                    log(f'非预期异常: {e}', 'WARN')
+                matches.append((score, b, t, f, u, c, preview))
+        matches.sort(key=lambda x: x[0], reverse=True)
+        if not matches:
+            return f"未找到与 '{query}' 相关的知识文件"
+        result = f"搜索 '{query}' 找到 {len(matches)} 个相关文件:\n"
+        for i, (s, b, t, f, u, c, p) in enumerate(matches[:10]):
+            result += f"  {i+1}. [{b}] {t[:45]} | {c} | 摘要: {p[:60]}...\n"
+        return result.strip()
+
+    def _agent_read_file(rel_path):
+        """读取知识库文件"""
+        full_path = os.path.join(KNOWLEDGE_BASE_DIR, rel_path)
+        if not os.path.exists(full_path):
+            # 尝试模糊匹配
+            all_files = _scan_knowledge_base_md_files()
+            best = None
+            for b, t, f, u, c in all_files:
+                if rel_path in f or rel_path in t:
+                    best = f
+                    break
+                if b in rel_path:
+                    best = f
+                    break
+            if best:
+                full_path = best
+                print(f"{Fore.CYAN}[Agent] 模糊匹配到: {os.path.relpath(full_path, KNOWLEDGE_BASE_DIR)}{Style.RESET_ALL}")
+            else:
+                return f"文件不存在: {rel_path}\n可用 /files 命令查看所有文件"
+        try:
+            with open(full_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            if len(content) > 5000:
+                content = content[:5000] + "\n\n... (文件过长，已截断至5000字)"
+            return f"文件内容 ({os.path.relpath(full_path, KNOWLEDGE_BASE_DIR)}):\n---\n{content}\n---"
+        except Exception as e:
+            return f"读取失败: {e}"
+
+    async def _agent_delete_file(rel_path):
+        """删除知识库文件（需4选1确认）"""
+        full_path = os.path.join(KNOWLEDGE_BASE_DIR, rel_path)
+        if not os.path.exists(full_path):
+            return f"文件不存在: {rel_path}"
+        # 先预览文件内容
+        preview = ""
+        try:
+            with open(full_path, 'r', encoding='utf-8') as fh:
+                preview = fh.read(300).replace('\n', ' ')
+        except Exception as e:
+            log(f'非预期异常: {e}', 'WARN')
+        action_desc = f"删除知识库文件: {rel_path}"
+        detail = f"文件预览: {preview}..."
+        result = await _agent_confirm("delete_file", action_desc, detail)
+        if result == "deny":
+            return "用户取消删除"
+        if result == "ai_review":
+            if not await _agent_ai_review("delete_file", action_desc, detail):
+                return "AI审查不通过，取消删除"
+        try:
+            os.remove(full_path)
+            return f"已删除: {rel_path}"
+        except Exception as e:
+            return f"删除失败: {e}"
+
+    async def _agent_update_file(rel_path, new_content):
+        """更新/新建知识库文件（需4选1确认）"""
+        full_path = os.path.join(KNOWLEDGE_BASE_DIR, rel_path)
+        exists = os.path.exists(full_path)
+        action = "替换" if exists else "新建"
+        action_desc = f"{action}知识库文件: {rel_path}"
+        detail = f"新内容({len(new_content)}字): {new_content[:150]}..."
+        result = await _agent_confirm("update_file", action_desc, detail)
+        if result == "deny":
+            return f"用户取消{action}"
+        if result == "ai_review":
+            if not await _agent_ai_review("update_file", action_desc, detail):
+                return f"AI审查不通过，取消{action}"
+        try:
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            with open(full_path, 'w', encoding='utf-8') as f:
+                f.write(new_content)
+            return f"已{action}: {rel_path} ({len(new_content)}字)"
+        except Exception as e:
+            return f"写入失败: {e}"
+
+    async def _agent_open_file(file_path: str):
+        """用系统默认程序打开文件"""
+        import subprocess, platform
+        fp = file_path.strip()
+        if not os.path.isabs(fp):
+            # 尝试在桌面找
+            desktop = os.path.join(os.path.expanduser("~"), "Desktop")
+            fp = os.path.join(desktop, fp)
+        if not os.path.exists(fp):
+            return f"文件不存在: {fp}"
+        try:
+            if platform.system() == "Windows":
+                os.startfile(fp)
+            elif platform.system() == "Darwin":
+                subprocess.run(["open", fp])
+            else:
+                subprocess.run(["xdg-open", fp])
+            return f"已用系统默认程序打开: {fp}"
+        except Exception as e:
+            return f"打开失败: {e}"
+
+    async def _agent_fetch_subtitles():
+        """获取视频字幕（AI字幕优先，CC字幕备选），缓存结果供后续分析复用"""
+        print(f"\n{Fore.CYAN}[Agent] 获取视频字幕...{Style.RESET_ALL}")
+        # 已缓存则直接返回
+        if analysis_cache.get("subtitle_text"):
+            cached_len = len(analysis_cache["subtitle_text"])
+            print(f"{Fore.GREEN}[Agent] 使用缓存字幕 ({cached_len}字){Style.RESET_ALL}")
+            return analysis_cache["subtitle_text"]
+
+        subtitle_text = ""
+        try:
+            # 优先直接获取B站AI/CC字幕（快，不走LLM）
+            # fetch_bilibili_subtitles 是模块级函数，返回 (success, content, desc)
+            cookies = getattr(brain, 'cookies', None)
+            ok, subs, _desc = await fetch_bilibili_subtitles(bvid, cookies)
+            if ok and subs and len(subs) > 100:
+                subtitle_text = subs
+                print(f"{Fore.GREEN}[Agent] 获取到B站字幕 ({len(subs)}字){Style.RESET_ALL}")
+            else:
+                # 字幕不足，走完整管道（可能触发ASR下载）
+                print(f"{Fore.YELLOW}[Agent] B站字幕不足({len(subs) if subs else 0}字)，尝试完整视频理解...{Style.RESET_ALL}")
+                success, st = await brain.understand_video_for_decision(bvid, title=title)
+                if success and st:
+                    subtitle_text = st
+        except Exception as e:
+            print(f"{Fore.RED}[Agent] 字幕获取异常: {e}{Style.RESET_ALL}")
+            subtitle_text = f"[字幕获取失败] {e}"
+
+        # 缓存
+        if subtitle_text:
+            analysis_cache["subtitle_text"] = subtitle_text
+        return subtitle_text or "[无字幕]"
+
+    async def _agent_quick_preview():
+        """快速预览：获取标题/简介/评论/弹幕"""
+        print(f"\n{Fore.CYAN}[Agent] 快速预览视频信息...{Style.RESET_ALL}")
+        # 获取简介
+        desc = ""
+        try:
+            meta = await brain.bili._wbi_get(
+                'https://api.bilibili.com/x/web-interface/view',
+                params={'bvid': bvid}
+            )
+            vinfo = meta.json()
+            if vinfo.get('code') == 0:
+                desc = vinfo['data'].get('desc', '')[:500]
+        except Exception as e:
+            log(f'非预期异常: {e}', 'WARN')
+
+        # 评论
+        comment_text = "[无评论]"
+        c_list = []
+        if aid:
+            try:
+                comment_text, c_list = await brain._get_comments_context(aid)
+            except Exception as e:
+                log(f'非预期异常: {e}', 'WARN')
+
+        # 弹幕
+        danmaku_text = ""
+        try:
+            danmaku_list = await brain.maybe_read_danmaku(bvid)
+            if danmaku_list:
+                danmaku_text = "\n".join(f"  {dm.get('text','')}" for dm in danmaku_list[:10])
+        except Exception as e:
+            log(f'非预期异常: {e}', 'WARN')
+
+        preview = f"""【视频信息】
+标题: {title}
+UP主: {up_name}
+简介: {desc[:300] if desc else '无'}
+
+【评论区摘要】
+{comment_text[:500]}
+
+【弹幕摘录】
+{danmaku_text[:300] if danmaku_text else '无弹幕数据'}"""
+        return preview
+
+    async def _agent_analyze_video():
+        """完整视频分析管道"""
+        print(f"\n{Fore.CYAN}[Agent] 触发完整视频分析管道...{Style.RESET_ALL}")
+
+        # 1. 视频理解（复用缓存字幕）
+        print(f"{Fore.CYAN}[Agent] [1/4] 视频内容理解 (字幕/ASR/视觉帧)...{Style.RESET_ALL}")
+        if analysis_cache.get("subtitle_text"):
+            print(f"{Fore.GREEN}[Agent] 复用已获取的字幕 ({len(analysis_cache['subtitle_text'])}字){Style.RESET_ALL}")
+            subtitle_text = analysis_cache["subtitle_text"]
+            success = True
+        else:
+            success, subtitle_text = await brain.understand_video_for_decision(bvid, title=title)
+            if success and subtitle_text:
+                analysis_cache["subtitle_text"] = subtitle_text
+        if not success:
+            subtitle_text = f"[理解受限] {subtitle_text}"
+
+        # 2. 评论+弹幕
+        comment_text = "[未读取评论]"
+        c_list = []
+        danmaku_text = ""
+        if aid:
+            try:
+                comment_text, c_list = await brain._get_comments_context(aid)
+            except Exception as e:
+                log(f'非预期异常: {e}', 'WARN')
+            try:
+                danmaku_list = await brain.maybe_read_danmaku(bvid)
+                if danmaku_list:
+                    danmaku_text = "\n".join(f"  {dm.get('text','')}" for dm in danmaku_list[:15])
+            except Exception as e:
+                log(f'非预期异常: {e}', 'WARN')
+
+        # 3. AI决策
+        print(f"{Fore.CYAN}[Agent] [2/4] AI决策分析...{Style.RESET_ALL}")
+        objective_prompt = SYSTEM_PROMPT_BRAIN.replace("{bot_name}", get_bot_name()).replace("{memory_ups}", str(brain.get_known_up_names()))
+        # Agent 模式特有提示：关注用户交互意图
+        objective_prompt += "\n\n【Agent模式】用户会通过对话指定分析目标，请结合对话上下文和用户意图做决策。"
+        # 覆盖随机性格：手动分析模式强制客观分析，不掷硬币
+        objective_prompt = objective_prompt.replace(
+            "【性格模式】掷硬币决定：- **夸夸模式**：真诚赞美。 - **吐槽模式**：犀利毒舌。",
+            "【性格模式】客观分析模式：基于内容质量公正评分，不随机切换夸夸/吐槽。评分标准：标题与内容匹配度、信息密度、观点深度、制作质量。"
+        )
+
+        context = (f"视频标题: {title}\nUP主: {up_name}\n"
+                   f"【视频内容】: {subtitle_text}\n"
+                   f"{comment_text}")
+
+        score, thought, learning_topic = 0, "", ""
+        try:
+            resp = await brain._call_ai_with_retry(
+                model=MODEL_BRAIN,
+                messages=[
+                    {"role": "system", "content": objective_prompt},
+                    {"role": "user", "content": context}
+                ],
+                request_timeout=120
+            )
+            raw = resp.choices[0].message.content
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if start >= 0 and end >= start:
+                json_str = raw[start:end + 1]
+            else:
+                json_str = "{}"
+            decision = json.loads(json_str)
+            score = decision.get('score', 0)
+            thought = decision.get('thought', '')
+            learning_topic = decision.get('learning_topic', '')
+        except Exception as e:
+            log(f'非预期异常: {e}', 'WARN')
+
+        # 4. 学习归档
+        print(f"{Fore.CYAN}[Agent] [3/4] 学习归档...{Style.RESET_ALL}")
+        archived_file = ""
+        if score >= 6.0 or learning_topic:
+            learn_text = subtitle_text
+            if not learn_text or len(learn_text) < 30:
+                learn_text = f"【视频标题】{title}\n【AI判断】{thought}"
+            if not learning_topic:
+                learning_topic = title[:15] if title else "手动分析"
+            try:
+                _desc = getattr(brain, "_last_video_desc", "")
+                learn_success = await brain.learn_from_video(
+                    bvid, title, up_name, video_url, learn_text, learning_topic, video_desc=_desc, score=score
+                )
+                if learn_success:
+                    print(f"{Fore.GREEN}[Agent] 已归档到知识库{Style.RESET_ALL}")
+                    archived_file = f"已归档: [{bvid}] - {title[:30]}.md"
+                else:
+                    print(f"{Fore.YELLOW}[Agent] 可能已存在，跳过归档{Style.RESET_ALL}")
+            except Exception as e:
+                print(f"{Fore.RED}[Agent] 归档失败: {e}{Style.RESET_ALL}")
+        else:
+            print(f"{Fore.YELLOW}[Agent] 评分 {score}/10 < 6.0，未触发归档{Style.RESET_ALL}")
+
+        # 缓存结果
+        analysis_cache["analyzed"] = True
+        analysis_cache["subtitle_text"] = subtitle_text
+        analysis_cache["comment_text"] = comment_text
+        analysis_cache["c_list"] = c_list
+        analysis_cache["danmaku_text"] = danmaku_text
+        analysis_cache["score"] = score
+        analysis_cache["thought"] = thought
+        analysis_cache["learning_topic"] = learning_topic
+
+        result = f"""【视频分析完成】
+AI评分: {score}/10
+AI判断: {thought}
+学习主题: {learning_topic if learning_topic else '无'}
+视频内容摘要: {subtitle_text[:300]}...
+评论数: {len(c_list)}条
+弹幕数: {len(danmaku_text.split(chr(10))) if danmaku_text else 0}条
+{archived_file}"""
+        return result
+
+    # =========================================================
+    # Agent对话主循环
+    # =========================================================
+    turn = 0
+    MAX_TURNS = 20
+
+    while turn < MAX_TURNS:
+        turn += 1
+        try:
+            user_msg = input(f"\n{Fore.LIGHTMAGENTA_EX}[Agent] 你 > {Style.RESET_ALL}").strip()
+        except (EOFError, KeyboardInterrupt):
+            print(f"\n{Fore.YELLOW}[Agent] 输入中断，退出Agent模式{Style.RESET_ALL}")
+            break
+
+        if not user_msg:
+            continue
+
+        # 快捷命令
+        if user_msg.lower() == "/exit":
+            print(f"{Fore.YELLOW}[Agent] 退出Agent模式{Style.RESET_ALL}")
+            break
+        if user_msg.lower() == "/help":
+            print(f"\n{Fore.CYAN}[Agent] 可用命令:{Style.RESET_ALL}")
+            print(f"  /exit  - 退出Agent模式")
+            print(f"  /files - 列出知识库所有文件")
+            print(f"  /search 关键词 - 搜索知识库")
+            print(f"  /done  - 直接触发完整视频分析")
+            print(f"  {Fore.YELLOW}直接输入你的要求，AI会智能响应{Style.RESET_ALL}")
+            continue
+        if user_msg.lower() == "/files":
+            result = _agent_list_files()
+            print(f"\n{Fore.GREEN}[Agent] {result}{Style.RESET_ALL}")
+            continue
+        if user_msg.lower().startswith("/search "):
+            query = user_msg[8:].strip()
+            result = _agent_search_knowledge(query)
+            print(f"\n{Fore.GREEN}[Agent] {result}{Style.RESET_ALL}")
+            continue
+        if user_msg.lower() == "/done":
+            # 直接运行完整分析管道（与Enter模式一致）
+            print(f"\n{Fore.CYAN}[Agent] /done: 自动运行完整分析管道...{Style.RESET_ALL}")
+            # Step 1: 获取字幕
+            if not analysis_cache.get("subtitle_text"):
+                sub_result = await _agent_fetch_subtitles()
+                if sub_result and not sub_result.startswith("[无字幕]") and not sub_result.startswith("[字幕获取失败]"):
+                    messages.append({"role": "system", "content": f"[已获取视频字幕 ({len(sub_result)}字)]"})
+            # Step 2: 完整分析
+            tool_result = await _agent_analyze_video()
+            print(f"\n{Fore.GREEN}[Agent] {tool_result}{Style.RESET_ALL}")
+            # 把分析结果加入对话，AI可以基于此回复
+            messages.append({"role": "system", "content": f"[自动分析完成]:\n{tool_result}\n\n请向用户汇报分析结果。如需输出文件请用update_file工具。"})
+            continue
+
+        # 添加用户消息
+        messages.append({"role": "user", "content": user_msg})
+
+        # 首轮意图检测：如果用户明确要求分析/总结/写桌面/打开，自动白名单相关工具
+        if turn == 1:
+            intent_keywords = {
+                "分析": ["fetch_subtitles", "analyze_video"],
+                "总结": ["fetch_subtitles", "analyze_video", "update_file"],
+                "桌面": ["update_file", "open_file"],
+                "打开": ["open_file"],
+                "md": ["update_file"],
+                "markdown": ["update_file"],
+                "写": ["update_file"],
+                "输出": ["update_file"],
+            }
+            for kw, tools in intent_keywords.items():
+                if kw in user_msg:
+                    for t in tools:
+                        auto_allow_tools.add(t)
+            if auto_allow_tools:
+                print(f"{Fore.CYAN}[Agent] 检测到意图关键词，自动放行工具: {', '.join(auto_allow_tools)}{Style.RESET_ALL}")
+
+        # 内层自动连续循环：AI调用 → 工具执行 → 自动继续（无需等用户输入）
+        sub_turn = 0
+        MAX_SUB_TURNS = 10  # 单次用户输入最多自动连续10轮
+        task_done = False
+
+        while sub_turn < MAX_SUB_TURNS:
+            sub_turn += 1
+
+            # 调用AI
+            print(f"{Fore.CYAN}[Agent] AI思考中...{Style.RESET_ALL}")
+            try:
+                resp = await brain._call_ai_with_retry(
+                    model=MODEL_BRAIN,
+                    messages=messages,
+                    request_timeout=90
+                )
+                ai_text = resp.choices[0].message.content
+            except Exception as e:
+                print(f"{Fore.RED}[Agent] AI调用失败: {e}{Style.RESET_ALL}")
+                break
+
+            messages.append({"role": "assistant", "content": ai_text})
+
+            # 解析AI回复中的工具调用
+            tool_pattern = re.compile(r'\[TOOL:(\w+)\]\s*(.*?)(?=\[TOOL:|\[DONE\]|$)', re.DOTALL)
+            stop_pattern = re.compile(r'\[DONE\]')
+
+            done_match = stop_pattern.search(ai_text)
+            tool_matches = tool_pattern.findall(ai_text)
+
+            # 先显示AI的文字回复（去掉工具调用和DONE标记）
+            display_text = ai_text
+            for tool_name, tool_body in tool_matches:
+                display_text = display_text.replace(f"[TOOL:{tool_name}] {tool_body}", "")
+            if done_match:
+                display_text = display_text.replace("[DONE]", "")
+            display_text = display_text.strip()
+            if display_text:
+                print(f"\n{Fore.LIGHTGREEN_EX}[Agent] AI > {Style.RESET_ALL}{display_text}")
+
+            if done_match and not tool_matches:
+                # 纯DONE，无工具，结束
+                print(f"\n{Fore.GREEN}[Agent] 对话结束{Style.RESET_ALL}")
+                task_done = True
+                break
+
+            # 执行工具调用（逐个执行，每次执行后把结果加入对话）
+            for tool_name, tool_body in tool_matches:
+                tool_body = tool_body.strip()
+                print(f"\n{Fore.YELLOW}[Agent] 执行工具: {tool_name}...{Style.RESET_ALL}")
+
+                tool_result = ""
+
+                if tool_name == "search_knowledge":
+                    tool_result = _agent_search_knowledge(tool_body)
+                elif tool_name == "read_file":
+                    tool_result = _agent_read_file(tool_body)
+                elif tool_name == "list_files":
+                    tool_result = _agent_list_files(tool_body)
+                elif tool_name == "delete_file":
+                    tool_result = await _agent_delete_file(tool_body)
+                elif tool_name == "update_file":
+                    # 格式: 相对路径\n---新内容---
+                    parts = tool_body.split('\n', 1)
+                    if len(parts) == 2:
+                        file_path = parts[0].strip()
+                        content = parts[1].strip()
+                        # 去掉可能的前导 --- 标记
+                        if content.startswith('---'):
+                            content = content[3:].strip()
+                        tool_result = await _agent_update_file(file_path, content)
+                    else:
+                        tool_result = "update_file格式错误: 需要 相对路径\\n新内容"
+                elif tool_name == "analyze_video":
+                    # 重量级操作，需要确认
+                    action_desc = f"完整分析视频《{title[:30]}》(ASR+视觉帧+评论+弹幕→归档)"
+                    result = await _agent_confirm("analyze_video", action_desc, "预计耗时30-90秒，消耗API配额")
+                    if result == "deny":
+                        tool_result = "用户取消完整分析"
+                    elif result == "ai_review":
+                        if await _agent_ai_review("analyze_video", action_desc, "完整视频分析管道"):
+                            print(f"{Fore.CYAN}[Agent] AI审查通过，开始完整视频分析...{Style.RESET_ALL}")
+                            tool_result = await _agent_analyze_video()
+                        else:
+                            tool_result = "AI审查不通过，取消完整分析"
+                    else:
+                        print(f"{Fore.CYAN}[Agent] 开始完整视频分析...{Style.RESET_ALL}")
+                        tool_result = await _agent_analyze_video()
+                elif tool_name == "fetch_subtitles":
+                    tool_result = await _agent_fetch_subtitles()
+                elif tool_name == "quick_preview":
+                    tool_result = await _agent_quick_preview()
+                elif tool_name == "open_file":
+                    tool_result = await _agent_open_file(tool_body)
+                else:
+                    tool_result = f"未知工具: {tool_name}"
+
+                # 显示工具结果
+                result_preview = tool_result[:500] + ("..." if len(tool_result) > 500 else "")
+                print(f"{Fore.GREEN}[Agent] 工具结果: {result_preview}{Style.RESET_ALL}")
+
+                # 把工具结果作为system消息加入对话
+                context_note = f"[工具 {tool_name} 执行结果]:\n{tool_result}"
+                # 根据已执行工具附加状态提示
+                if tool_name == "fetch_subtitles" and not tool_result.startswith("[无字幕]") and not tool_result.startswith("[字幕获取失败]"):
+                    context_note += f"\n\n[数据上下文] 已获取完整字幕({len(tool_result)}字)。下一步通常调用 analyze_video 做评分归档，或直接基于字幕回答用户问题。请勿再次调用 fetch_subtitles。"
+                elif tool_name == "analyze_video":
+                    context_note += "\n\n[数据上下文] 视频完整分析已完成（含字幕+评论+弹幕+AI评分+归档）。可以基于这些结果回复用户，或按用户要求生成总结/写文件。"
+                context_note += "\n\n请基于以上结果继续回复用户，如需更多工具可继续调用。"
+                messages.append({
+                    "role": "system",
+                    "content": context_note
+                })
+
+            # 工具执行完毕，决定下一步
+            if done_match:
+                # DONE + 工具已执行（如 open_file 后标 DONE）
+                print(f"\n{Fore.GREEN}[Agent] 任务完成{Style.RESET_ALL}")
+                task_done = True
+                break
+
+            if tool_matches:
+                # 还有工作没做完 → 自动继续
+                print(f"\n{Fore.CYAN}[Agent] 自动继续...{Style.RESET_ALL}")
+                messages.append({"role": "user", "content": "[系统自动继续] 请基于工具结果继续执行下一步，无需等待用户输入。如果所有步骤已完成，输出 [DONE]。"})
+                # 不 break，回到 inner while 顶部继续调 AI
+            else:
+                # 无工具调用，回到等待用户输入
+                break
+
+        # 内层循环结束
+        if task_done:
+            break
+
+    if not task_done and turn >= MAX_TURNS:
+        print(f"\n{Fore.YELLOW}[Agent] 达到最大对话轮次 ({MAX_TURNS})，自动退出{Style.RESET_ALL}")
+
+    print(f"\n{Fore.LIGHTMAGENTA_EX}+============================================================+{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTMAGENTA_EX}|  Agent对话结束                                               |{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTMAGENTA_EX}+============================================================+{Style.RESET_ALL}")
+
+
+async def revisit_knowledge_video(bvid, title, up_name, category_path, file_path, mode="full"):
+    """重温已学视频：完整管道(封面/标题/简介/评论/弹幕/视频内容/ASR/视觉帧) → AI决策 → 学习归档
+    Args:
+        mode: "full" = 重新看视频+优化, "optimize" = 只优化(用现有字幕/AI总结)
+    """
+    print(f"\n{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}|  🔄 知识库重温: {title[:40]}                          {Style.RESET_ALL}")
+    print(f"{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
+    print(f"  BV号: {bvid}")
+    print(f"  分类: {category_path}")
+    if up_name:
+        print(f"  UP主: {up_name}")
+    mode_label = "完整重温(重新看视频+优化)" if mode == "full" else "仅优化(用现有知识)"
+    print(f"  模式: {Fore.YELLOW}{mode_label}{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}+------------------------------------------------------------+{Style.RESET_ALL}")
+
+    video_url = f"https://www.bilibili.com/video/{bvid}"
+
+    # 创建 AgentBrain，加载凭证+ cookies
+    brain = AgentBrain()
+    brain.bili._load_credential()
+    # [FIX] 同时加载 cookies，否则 fetch_bilibili_subtitles 无 cookie 无法获取AI字幕
+    if os.path.exists(COOKIE_FILE):
+        with open(COOKIE_FILE, 'r', encoding='utf-8') as f:
+            brain.cookies = json.load(f)
+
+    # ── 获取视频元信息 ──
+    try:
+        meta = await brain.bili._wbi_get(
+            'https://api.bilibili.com/x/web-interface/view',
+            params={'bvid': bvid}
+        )
+        vinfo = meta.json()
+        if vinfo.get('code') == 0:
+            vdata = vinfo['data']
+            title = title or vdata.get('title', '')
+            up_name = up_name or vdata.get('owner', {}).get('name', '未知')
+            up_uid = vdata.get('owner', {}).get('mid', 0)
+            aid = vdata.get('aid', 0)
+            pic_url = vdata.get('pic', '')
+            tags = []
+            raw_tag = vdata.get('tag', '') or ''
+            if isinstance(raw_tag, str) and raw_tag:
+                tags = [t.strip() for t in raw_tag.split(',') if t.strip()]
+            category = vdata.get('tname', '')
+            duration_raw = vdata.get('duration', 0)
+            if isinstance(duration_raw, str) and ':' in duration_raw:
+                parts = duration_raw.split(':')
+                duration = int(parts[0]) * 60 + int(parts[1])
+            else:
+                try:
+                    duration = int(duration_raw)
+                except (ValueError, TypeError):
+                    duration = 0
+            video_desc = vdata.get('desc', '')
+            print(f"{Fore.GREEN}[OK] 视频信息获取成功: {title} | @{up_name}{Style.RESET_ALL}")
+        else:
+            print(f"{Fore.RED}[ERROR] 获取视频信息失败: code={vinfo.get('code')}{Style.RESET_ALL}")
+            return
+    except Exception as e:
+        print(f"{Fore.RED}[ERROR] 获取视频信息失败: {e}{Style.RESET_ALL}")
+        return
+
+    # 缓存视频元数据
+    brain._current_video_tags = tags
+    brain._current_video_category = category
+    brain._current_video_duration = duration
+
+    # ── [1/6] 封面分析 ──
+    print(f"\n{Fore.CYAN}[1/6] 封面视觉分析...{Style.RESET_ALL}")
+    cover_desc, vis_score = "", 0
+    if pic_url:
+        try:
+            cover_desc, vis_score = await brain.analyze_vision(pic_url)
+            print(f"{Fore.GREEN}[OK] 封面: {cover_desc} [印象分:{vis_score}]{Style.RESET_ALL}")
+            brain._current_video_cover_desc = cover_desc
+        except Exception as e:
+            print(f"{Fore.YELLOW}[WARN] 封面分析失败: {e}{Style.RESET_ALL}")
+
+    if video_desc:
+        print(f"{Fore.GREEN}[OK] 简介预览: {video_desc[:100]}...{Style.RESET_ALL}")
+
+    # ── [2/6] 视频内容理解 ──
+    print(f"\n{Fore.CYAN}[2/6] 视频内容理解 (字幕/ASR/视觉帧)...{Style.RESET_ALL}")
+    if mode == "full":
+        # 完整管道：重新下载视频 → ASR+视觉帧
+        success, subtitle_text = await brain._understand_super_smart(bvid, title=title)
+    else:
+        # 仅优化模式：读取现有 md 文件中的内容
+        subtitle_text = ""
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                existing = f.read()
+            # 提取 AI 总结部分
+            summary_match = re.search(r'##\s*\[BRAIN\]\s*AI内容总结\s*\n(.*)', existing, re.DOTALL)
+            if summary_match:
+                subtitle_text = f"【已有AI总结】\n{summary_match.group(1).strip()[:3000]}"
+            else:
+                # 回退：取文件后半部分
+                subtitle_text = existing[-3000:] if len(existing) > 3000 else existing
+            print(f"{Fore.GREEN}[OK] 使用现有知识库内容 ({len(subtitle_text)}字){Style.RESET_ALL}")
+        except Exception as e:
+            print(f"{Fore.YELLOW}[WARN] 读取现有知识失败: {e}，降级为完整模式{Style.RESET_ALL}")
+            success, subtitle_text = await brain._understand_super_smart(bvid, title=title)
+
+    if subtitle_text:
+        preview = subtitle_text[:200].replace('\n', ' ')
+        print(f"{Fore.GREEN}[OK] 视频内容: {preview}...{Style.RESET_ALL}")
+    else:
+        subtitle_text = f"【视频标题】{title}\n【简介】{video_desc}"
+        print(f"{Fore.YELLOW}[WARN] 无可用内容，使用标题+简介兜底{Style.RESET_ALL}")
+
+    # ── [3/6] 评论+弹幕 ──
+    print(f"\n{Fore.CYAN}[3/6] 评论区讨论+弹幕...{Style.RESET_ALL}")
+    comment_text = "[未读取评论]"
+    c_list = []
+    danmaku_text = ""
+    if aid:
+        try:
+            comment_text, c_list = await brain._get_comments_context(aid)
+            if c_list:
+                print(f"{Fore.GREEN}[OK] 获取到 {len(c_list)} 条评论{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.YELLOW}[WARN] 评论区无内容{Style.RESET_ALL}")
+        except Exception as e:
+            print(f"{Fore.YELLOW}[WARN] 评论获取失败: {e}{Style.RESET_ALL}")
+
+        try:
+            danmaku_list = await brain.maybe_read_danmaku(bvid)
+            if danmaku_list:
+                danmaku_text = f"【弹幕（共{len(danmaku_list)}条）】:\n" + "\n".join(
+                    f"  {dm.get('text','')}" for dm in danmaku_list[:15]
+                )
+                print(f"{Fore.GREEN}[OK] 获取到 {len(danmaku_list)} 条弹幕{Style.RESET_ALL}")
+        except Exception as e:
+            log(f'非预期异常: {e}', 'WARN')
+
+    # ── [4/6] AI决策 ──
+    print(f"\n{Fore.CYAN}[4/6] AI综合分析决策...{Style.RESET_ALL}")
+    objective_prompt = SYSTEM_PROMPT_BRAIN.replace("{bot_name}", get_bot_name()).replace("{memory_ups}", str(brain.get_known_up_names()))
+    # 重温模式特有提示
+    objective_prompt += (
+        "\n\n【重温优化模式】这是一个已经归档到知识库的视频。"
+        "请重新审视内容，看看有没有遗漏的要点、新的理解角度、或可以补充的知识点。"
+        "如果原归档质量已很高，可以给出更高的分数。"
+    )
+
+    context = (f"视频标题: {title}\nUP主: {up_name}\n"
+               f"视频简介: {video_desc}\n"
+               f"封面描述: {cover_desc}\n"
+               f"原分类: {category_path}\n"
+               f"【视频内容】: {subtitle_text}\n"
+               f"{comment_text}"
+               f"{danmaku_text}")
+
+    score = 0
+    thought = ""
+    learning_topic = ""
+    try:
+        resp = await brain._call_ai_with_retry(
+            model=MODEL_BRAIN,
+            messages=[
+                {"role": "system", "content": objective_prompt},
+                {"role": "user", "content": context}
+            ],
+            request_timeout=120
+        )
+        raw = resp.choices[0].message.content
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start >= 0 and end >= start:
+            json_str = raw[start:end + 1]
+        else:
+            raise ValueError(f"AI返回未找到JSON: {raw[:200]}")
+
+        try:
+            decision = json.loads(json_str)
+        except json.JSONDecodeError:
+            fixed = json_str.replace("'", '"')
+            fixed = re.sub(r'\bTrue\b', 'true', fixed)
+            fixed = re.sub(r'\bFalse\b', 'false', fixed)
+            fixed = re.sub(r'\bNone\b', 'null', fixed)
+            decision = json.loads(fixed)
+
+        score = decision.get('score', 0)
+        thought = decision.get('thought', '')
+        mode_decision = decision.get('mode', '')
+        learning_topic = decision.get('learning_topic', '')
+
+        print(f"\n{Fore.CYAN}+------------------------------------------------------------+{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}|  [重温分析结果]                                             |{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}+------------------------------------------------------------+{Style.RESET_ALL}")
+        print(f"  AI评分: {Fore.YELLOW}{score}/10{Style.RESET_ALL}")
+        print(f"  AI想法: {thought}")
+        if learning_topic:
+            print(f"  主题: {learning_topic}")
+        print(f"{Fore.CYAN}+------------------------------------------------------------+{Style.RESET_ALL}")
+
+    except Exception as e:
+        print(f"{Fore.RED}[ERROR] AI决策失败: {_mask_urls(str(e)[:200])}{Style.RESET_ALL}")
+
+    # ── [5/6] 评论区知识收集 ──
+    print(f"\n{Fore.CYAN}[5/6] 评论区知识收集...{Style.RESET_ALL}")
+    if c_list and len(c_list) >= 3:
+        try:
+            await brain.learn_from_comments(bvid, title, up_name, video_url, comment_text, c_list, learning_topic or title[:15])
+        except Exception as e:
+            print(f"{Fore.YELLOW}[WARN] 评论知识收集失败: {e}{Style.RESET_ALL}")
+    else:
+        print(f"{Fore.YELLOW}[INFO] 评论不足，跳过评论知识收集{Style.RESET_ALL}")
+
+    # ── [6/6] 学习归档（覆盖更新） ──
+    print(f"\n{Fore.CYAN}[6/6] 更新知识归档...{Style.RESET_ALL}")
+    learn_text = subtitle_text
+    if not learn_text or len(learn_text) < 30:
+        learn_text = f"【视频标题】{title}\n【简介】{video_desc}\n【AI判断】{thought}\n"
+        if danmaku_text:
+            learn_text += f"{danmaku_text}\n"
+        if comment_text and comment_text != "[未读取评论]":
+            learn_text += f"{comment_text}\n"
+        learn_text = learn_text.strip()
+
+    if not learning_topic:
+        learning_topic = title[:15] if title else category_path
+
+    if learn_text and len(learn_text) > 20:
+        try:
+            _desc = getattr(brain, "_last_video_desc", "") or video_desc
+            # 删除旧文件，让 learn_from_video 重新创建
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                print(f"{Fore.YELLOW}[INFO] 已删除旧归档文件，准备重新创建...{Style.RESET_ALL}")
+            learn_success = await brain.learn_from_video(bvid, title, up_name, video_url, learn_text, learning_topic, video_desc=_desc, score=score)
+            if learn_success:
+                print(f"{Fore.GREEN}[OK] 知识已更新归档！{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.YELLOW}[INFO] 归档未更新（可能已存在或分类未变）{Style.RESET_ALL}")
+        except Exception as e:
+            print(f"{Fore.RED}[ERROR] 学习归档失败: {e}{Style.RESET_ALL}")
+    else:
+        print(f"{Fore.YELLOW}[INFO] 可学习内容不足，跳过归档{Style.RESET_ALL}")
+
+    print(f"\n{Fore.GREEN}+============================================================+{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}|  🔄 重温完成: {title[:40]}                                  {Style.RESET_ALL}")
+    print(f"{Fore.GREEN}+============================================================+{Style.RESET_ALL}")
+
+
+async def revisit_knowledge_base_menu():
+    """知识库重温菜单：扫描所有 .md 文件，选择后重看视频优化或仅优化。"""
+    print(f"\n{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}|        🔄 知识库重温优化 - 已学习视频回顾                      |{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
+
+    # 扫描知识库
+    md_files = _scan_knowledge_base_md_files()
+    if not md_files:
+        print(f"{Fore.YELLOW}[WARN] 知识库中没有找到学习归档文件！{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}[INFO] 请先让机器人学习一些视频，或手动分析视频并归档{Style.RESET_ALL}")
+        input(f"\n{Fore.CYAN}按回车返回...{Style.RESET_ALL}")
+        return
+
+    # 按分类分组展示
+    from collections import defaultdict
+    by_category = defaultdict(list)
+    for item in md_files:
+        by_category[item[4]].append(item)
+
+    print(f"\n{Fore.GREEN}共找到 {len(md_files)} 个已学习视频，分布在 {len(by_category)} 个分类:{Style.RESET_ALL}\n")
+
+    # 展开所有文件，统一编号
+    all_items = []
+    idx = 1
+    for cat in sorted(by_category.keys()):
+        items = by_category[cat]
+        print(f"{Fore.CYAN}[{cat}] ({len(items)}个){Style.RESET_ALL}")
+        for bvid, title, fpath, up, cat_path in items:
+            up_str = f" @{up}" if up else ""
+            print(f"  {Fore.YELLOW}{idx:3d}.{Style.RESET_ALL} {title[:50]}{up_str}")
+            all_items.append((idx, bvid, title, fpath, up, cat_path))
+            idx += 1
+        print()
+
+    print(f"  {Fore.YELLOW}  0.{Style.RESET_ALL} 返回主菜单")
+
+    try:
+        choice = input(f"\n{Fore.CYAN}请选择要重温的视频 (1-{len(all_items)}): {Style.RESET_ALL}").strip()
+        if not choice or choice == "0":
+            print(f"{Fore.YELLOW}[INFO] 已取消{Style.RESET_ALL}")
+            return
+
+        sel_idx = int(choice)
+        if sel_idx < 1 or sel_idx > len(all_items):
+            print(f"{Fore.RED}[ERROR] 无效选项{Style.RESET_ALL}")
+            return
+
+        _, bvid, title, fpath, up, cat_path = all_items[sel_idx - 1]
+
+        # 选择模式
+        print(f"\n{Fore.CYAN}已选择: {title[:50]}{Style.RESET_ALL}")
+        print(f"\n{Fore.CYAN}请选择重温模式:{Style.RESET_ALL}")
+        print(f"  {Fore.GREEN}1.{Style.RESET_ALL} 🔄 完整重温 (重新看视频: 封面→简介→字幕/下载/ASR→评论→弹幕→AI决策→归档)")
+        print(f"  {Fore.BLUE}2.{Style.RESET_ALL} 📝 仅优化 (用现有知识库内容 + 最新评论/弹幕 → AI重新分析 → 归档)")
+        print(f"  {Fore.YELLOW}0.{Style.RESET_ALL} 取消")
+
+        mode_choice = input(f"\n{Fore.CYAN}请选择 (1/2/0): {Style.RESET_ALL}").strip()
+        if mode_choice == "0" or not mode_choice:
+            print(f"{Fore.YELLOW}[INFO] 已取消{Style.RESET_ALL}")
+            return
+        elif mode_choice == "1":
+            mode = "full"
+        elif mode_choice == "2":
+            mode = "optimize"
+        else:
+            print(f"{Fore.RED}[ERROR] 无效选项{Style.RESET_ALL}")
+            return
+
+        await revisit_knowledge_video(bvid, title, up, cat_path, fpath, mode)
+
+    except ValueError:
+        print(f"{Fore.RED}[ERROR] 请输入数字{Style.RESET_ALL}")
+    except KeyboardInterrupt:
+        print(f"\n{Fore.YELLOW}[WARN] 用户中断{Style.RESET_ALL}")
+    except Exception as e:
+        print(f"{Fore.RED}[ERROR] 重温异常: {e}{Style.RESET_ALL}")
+        import traceback
+        traceback.print_exc()
+
+
+# ==============================================================================
+# 📂 一键整理知识库：非3层文件 → AI自动归类到3层
+# ==============================================================================
+async def organize_knowledge_base():
+    """扫描并整理知识库：将非3层目录结构的文件AI自动归位。
+    
+    逻辑：
+    1. 扫描所有 .md 文件，找出非3层的（如 科技/xxx.md 或 科技/AI工具/xxx.md）
+    2. 检测同一BVID的重复文件（不同深度目录），保留最深的
+    3. 对每个非3层文件，读取内容 → AI分类 → 移动到3层目录
+    4. 支持4选1确认：本次允许/一直允许/不允许/AI审查
+    """
+    print(f"\n{Fore.LIGHTYELLOW_EX}╔══════════════════════════════════════════════════════════╗{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}║  📂 一键整理知识库 - AI智能归类到3层                      ║{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}╚══════════════════════════════════════════════════════════╝{Style.RESET_ALL}")
+
+    if not os.path.exists(KNOWLEDGE_BASE_DIR):
+        print(f"{Fore.YELLOW}[INFO] 知识库目录不存在，无需整理{Style.RESET_ALL}")
+        return
+
+    # ── 第1步：扫描 ──
+    print(f"\n{Fore.CYAN}[1/4] 扫描知识库文件...{Style.RESET_ALL}")
+    all_files = _scan_knowledge_base_md_files()
+    if not all_files:
+        print(f"{Fore.YELLOW}[INFO] 知识库为空{Style.RESET_ALL}")
+        return
+
+    # 分类：3层 ok / 非3层 / 重复BVID
+    ok_files = []       # 3层，已到位
+    shallow_files = []  # 非3层，需要整理
+    bvid_map = {}       # bvid -> [(depth, bvid, title, path, up, cat), ...]
+
+    for bvid, title, fpath, up, cat in all_files:
+        depth = cat.count('/') + 1 if cat and cat != '未分类' else 1
+        if bvid not in bvid_map:
+            bvid_map[bvid] = []
+        bvid_map[bvid].append((depth, bvid, title, fpath, up, cat))
+
+    for bvid, entries in bvid_map.items():
+        entries.sort(key=lambda x: x[0], reverse=True)  # depth降序
+        for depth, bv, t, fp, u, c in entries:
+            if depth >= 3:
+                ok_files.append((bv, t, fp, u, c, depth))
+            else:
+                shallow_files.append((bv, t, fp, u, c, depth))
+
+    # ── 检测重复BVID ──
+    duplicates = []
+    unique_shallow = []
+    for entry in shallow_files:
+        bv = entry[0]
+        all_entries = bvid_map[bv]
+        has_deep = any(e[0] >= 3 for e in all_entries)
+        if has_deep:
+            duplicates.append(entry)
+        else:
+            unique_shallow.append(entry)
+
+    print(f"\n{Fore.CYAN}扫描结果:{Style.RESET_ALL}")
+    print(f"  {Fore.GREEN}✓ 3层已到位: {len(ok_files)} 个{Style.RESET_ALL}")
+    print(f"  {Fore.YELLOW}⚠ 非3层需整理: {len(unique_shallow)} 个{Style.RESET_ALL}")
+    print(f"  {Fore.RED}🗑 重复文件(可清理): {len(duplicates)} 个{Style.RESET_ALL}")
+
+    if not unique_shallow and not duplicates:
+        print(f"{Fore.GREEN}[OK] 知识库已全部整理完毕！{Style.RESET_ALL}")
+        return
+
+    # ── 显示详情 ──
+    if duplicates:
+        print(f"\n{Fore.RED}【重复文件】(同BVID有更深层版本，建议删除):{Style.RESET_ALL}")
+        for bv, t, fp, u, c, d in duplicates[:20]:
+            rel = os.path.relpath(fp, KNOWLEDGE_BASE_DIR)
+            print(f"  [{bv}] {t[:40]} | {c}")
+
+    if unique_shallow:
+        print(f"\n{Fore.YELLOW}【需要整理】(非3层，将AI归类):{Style.RESET_ALL}")
+        for bv, t, fp, u, c, d in unique_shallow[:20]:
+            rel = os.path.relpath(fp, KNOWLEDGE_BASE_DIR)
+            print(f"  [{bv}] {t[:40]} | 当前: {c} ({d}层)")
+
+    # ── 第2步：确认 ──
+    print(f"\n{Fore.LIGHTYELLOW_EX}╔══════════════════════════════════════════════════════════╗{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}║  [整理确认]                                                ║{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}╠══════════════════════════════════════════════════════════╣{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}║{Style.RESET_ALL}  将整理 {len(unique_shallow)} 个文件 + 清理 {len(duplicates)} 个重复文件")
+    print(f"{Fore.LIGHTYELLOW_EX}╠══════════════════════════════════════════════════════════╣{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}║{Style.RESET_ALL}  {Fore.GREEN}1.{Style.RESET_ALL} 一键整理全部    {Fore.LIGHTGREEN_EX}2.{Style.RESET_ALL} 逐个确认(每文件4选1)")
+    print(f"{Fore.LIGHTYELLOW_EX}║{Style.RESET_ALL}  {Fore.RED}3.{Style.RESET_ALL} 取消")
+    print(f"{Fore.LIGHTYELLOW_EX}╚══════════════════════════════════════════════════════════╝{Style.RESET_ALL}")
+
+    mode_choice = input(f"{Fore.CYAN}[整理] 选择 (1-3, 回车=1): {Style.RESET_ALL}").strip()
+    if mode_choice == "3":
+        print(f"{Fore.YELLOW}已取消{Style.RESET_ALL}")
+        return
+
+    per_file_confirm = (mode_choice == "2")
+
+    # ── 第3步：初始化分类器 ──
+    classifier = KnowledgeBaseClassifier()
+    all_cats = classifier._get_all_categories()
+
+    # ── 第4步：执行整理 ──
+    print(f"\n{Fore.CYAN}[3/4] 开始整理...{Style.RESET_ALL}")
+
+    moved_count = 0
+    deleted_count = 0
+    skipped_count = 0
+    auto_allow_all = False  # 一键模式
+
+    async def confirm_action(action_desc, detail=""):
+        """简化版4选1确认"""
+        nonlocal auto_allow_all
+        if auto_allow_all or not per_file_confirm:
+            return "allow"
+
+        print(f"\n{Fore.YELLOW}  ╔ 操作确认 ╗{Style.RESET_ALL}")
+        print(f"  {Fore.YELLOW}║{Style.RESET_ALL} {action_desc[:60]}")
+        if detail:
+            print(f"  {Fore.YELLOW}║{Style.RESET_ALL} {detail[:100]}")
+        print(f"  {Fore.YELLOW}║{Style.RESET_ALL} {Fore.GREEN}1.{Style.RESET_ALL}本次允许 {Fore.LIGHTGREEN_EX}2.{Style.RESET_ALL}全部允许 {Fore.RED}3.{Style.RESET_ALL}跳过 {Fore.CYAN}4.{Style.RESET_ALL}AI审查")
+        print(f"  {Fore.CYAN}[整理] 选择 (1-4, 回车=1): {Style.RESET_ALL}", end="")
+
+        import sys
+        sys.stdout.flush()
+        ch = input().strip()
+
+        if ch == "2":
+            auto_allow_all = True
+            print(f"  {Fore.GREEN}已设置: 全部自动允许{Style.RESET_ALL}")
+            return "always"
+        elif ch == "3":
+            return "deny"
+        elif ch == "4":
+            return "ai_review"
+        return "allow"
+
+    async def ai_review(action_desc, detail=""):
+        """AI审查"""
+        try:
+            resp = await _call_ai_with_retry_static(
+                model=MODEL_BRAIN,
+                messages=[{"role": "user", "content": f"你是安全审查助手。评估此操作是否合理:{action_desc}。详情:{detail[:300]}。只返回JSON: {{\"safe\":true/false,\"reason\":\"理由\"}}"}],
+                request_timeout=20
+            )
+            raw = resp.choices[0].message.content
+            s = raw.find("{")
+            e = raw.rfind("}")
+            if s >= 0 and e >= s:
+                d = json.loads(raw[s:e+1])
+                if d.get("safe", True):
+                    print(f"  {Fore.GREEN}AI审查通过: {d.get('reason','')}{Style.RESET_ALL}")
+                    return True
+                else:
+                    print(f"  {Fore.RED}AI审查不通过: {d.get('reason','')}{Style.RESET_ALL}")
+                    return False
+            return True
+        except Exception as ex:
+            print(f"  {Fore.YELLOW}AI审查异常，默认通过{Style.RESET_ALL}")
+            return True
+
+    # ── 处理重复文件：直接删除浅层版本 ──
+    if duplicates:
+        print(f"\n{Fore.CYAN}[清理重复] 删除 {len(duplicates)} 个重复文件...{Style.RESET_ALL}")
+        for bv, t, fp, u, c, d in duplicates:
+            rel = os.path.relpath(fp, KNOWLEDGE_BASE_DIR)
+            if per_file_confirm:
+                result = await confirm_action(f"删除重复文件: [{bv}] {t[:30]}", f"已有3层版本，此文件位于 {c}")
+                if result == "deny":
+                    skipped_count += 1
+                    continue
+                if result == "ai_review":
+                    if not await ai_review("删除重复知识库文件", f"[{bv}] {t[:50]}"):
+                        skipped_count += 1
+                        continue
+            try:
+                os.remove(fp)
+                print(f"  {Fore.GREEN}已删除: {rel}{Style.RESET_ALL}")
+                deleted_count += 1
+                # 清理空目录
+                dir_path = os.path.dirname(fp)
+                if not os.listdir(dir_path):
+                    os.rmdir(dir_path)
+            except Exception as e:
+                print(f"  {Fore.RED}删除失败: {e}{Style.RESET_ALL}")
+
+    # ── 处理非3层文件：AI分类 → 移动 ──
+    if unique_shallow:
+        print(f"\n{Fore.CYAN}[归类整理] AI分类 {len(unique_shallow)} 个文件...{Style.RESET_ALL}")
+
+        for idx, (bv, t, fp, u, c, d) in enumerate(unique_shallow, 1):
+            rel = os.path.relpath(fp, KNOWLEDGE_BASE_DIR)
+            print(f"\n  {Fore.CYAN}[{idx}/{len(unique_shallow)}] [{bv}] {t[:40]}{Style.RESET_ALL}")
+            print(f"  当前: {c} ({d}层)")
+
+            if per_file_confirm:
+                result = await confirm_action(f"AI归类: [{bv}] {t[:30]}", f"从 {c} → AI自动分类到3层")
+                if result == "deny":
+                    skipped_count += 1
+                    continue
+                if result == "ai_review":
+                    if not await ai_review("AI归类知识库文件", f"[{bv}] {t[:50]}"):
+                        skipped_count += 1
+                        continue
+
+            # 读取文件内容用于AI分类
+            file_content = ""
+            try:
+                with open(fp, 'r', encoding='utf-8') as fh:
+                    file_content = fh.read(3000)
+            except Exception as e:
+                log(f'非预期异常: {e}', 'WARN')
+
+            # AI分类
+            try:
+                ai_result = classifier._find_best_category(t, file_content, all_cats)
+                new_cat = ai_result.get("selected_category", "未分类")
+                conf = ai_result.get("confidence", 0)
+                is_new = ai_result.get("is_new", False)
+
+                if is_new:
+                    new_cat = classifier._create_category_structure(new_cat)
+
+                # 确保恰好3层
+                parts = [p.strip() for p in new_cat.split('/') if p.strip()]
+                while len(parts) < 3:
+                    parts.append(f"子类{len(parts)+1}")
+                parts = parts[:3]
+                final_cat = '/'.join(parts)
+
+                print(f"  AI分类: {Fore.GREEN}{final_cat}{Style.RESET_ALL} (置信度: {conf:.0%})")
+
+                if conf < 0.3:
+                    print(f"  {Fore.YELLOW}置信度过低，跳过{Style.RESET_ALL}")
+                    skipped_count += 1
+                    continue
+
+                # 移动文件
+                new_folder = classifier.get_or_create_folder(final_cat)
+                fname = os.path.basename(fp)
+                dst = os.path.join(new_folder, fname)
+
+                if os.path.exists(dst):
+                    print(f"  {Fore.YELLOW}目标位置已有同名文件，删除源文件{Style.RESET_ALL}")
+                    os.remove(fp)
+                    deleted_count += 1
+                else:
+                    shutil.move(fp, dst)
+                    print(f"  {Fore.GREEN}已移动: {rel} → {final_cat}/{Style.RESET_ALL}")
+                    moved_count += 1
+
+                # 更新分类器元数据
+                if final_cat not in classifier.metadata.get("file_index", {}):
+                    classifier.metadata.setdefault("file_index", {})[final_cat] = []
+                classifier.metadata["file_index"][final_cat].append({
+                    "bvid": bv,
+                    "title": t,
+                    "added": datetime.now().isoformat()
+                })
+                # 从旧分类移除
+                old_cat = c if c != '未分类' else '未分类'
+                if old_cat in classifier.metadata.get("file_index", {}):
+                    classifier.metadata["file_index"][old_cat] = [
+                        e for e in classifier.metadata["file_index"][old_cat]
+                        if e.get("bvid") != bv
+                    ]
+
+                # 清理旧空目录
+                old_dir = os.path.dirname(fp)
+                if os.path.exists(old_dir) and not os.listdir(old_dir):
+                    try:
+                        os.rmdir(old_dir)
+                    except Exception as e:
+                        log(f'非预期异常: {e}', 'WARN')
+
+                # 添加新分类路径到已知列表供后续分类使用
+                if final_cat not in all_cats:
+                    all_cats.append(final_cat)
+
+            except Exception as e:
+                print(f"  {Fore.RED}AI分类异常: {e}{Style.RESET_ALL}")
+                skipped_count += 1
+
+    # ── 保存分类器元数据 ──
+    try:
+        classifier._sync_categories_from_file_index()
+        classifier._save_metadata()
+        classifier.cleanup_empty_folders()
+    except Exception as e:
+        log(f'非预期异常: {e}', 'WARN')
+
+    # ── 汇总 ──
+    print(f"\n{Fore.LIGHTYELLOW_EX}╔══════════════════════════════════════════════════════════╗{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}║  📂 整理完成！                                            ║{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}╠══════════════════════════════════════════════════════════╣{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}║{Style.RESET_ALL}  {Fore.GREEN}✓ AI归类移动: {moved_count} 个{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}║{Style.RESET_ALL}  {Fore.RED}🗑 重复清理: {deleted_count} 个{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}║{Style.RESET_ALL}  {Fore.YELLOW}⊘ 跳过: {skipped_count} 个{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}║{Style.RESET_ALL}  {Fore.GREEN}✓ 3层文件: {len(ok_files)} 个 (未动){Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}╚══════════════════════════════════════════════════════════╝{Style.RESET_ALL}")
+
+    # 显示新的分类结构
+    try:
+        classifier.show_category_structure()
+    except Exception as e:
+        log(f'非预期异常: {e}', 'WARN')
+
+
+async def _call_ai_with_retry_static(model, messages, request_timeout=30, max_retries=2):
+    """静态AI调用辅助函数（不依赖brain实例），带重试"""
+    for attempt in range(max_retries + 1):
+        try:
+            resp = openai.ChatCompletion.create(
+                model=model,
+                messages=messages,
+                timeout=request_timeout
+            )
+            return resp
+        except Exception as e:
+            if attempt < max_retries:
+                wait = min(3 * (2 ** attempt), 10)
+                print(f"  {Fore.YELLOW}AI重试 ({attempt+1}/{max_retries})，等待{wait}s...{Style.RESET_ALL}")
+                await asyncio.sleep(wait)
+            else:
+                raise
+
+
+# ==============================================================================
+# [START] 主程序入口
+# ==============================================================================
+if False:  # [DISABLED] 重复主入口，已禁用
+    if os.name == 'nt':
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+    # ── 免责声明确认（必须手动输入"我同意"）──
+    _disclaimer_confirm()
+
+    while True:
+        show_main_menu()
+        choice = input(f"{Fore.CYAN}请输入选项 (0-9/D/E/F/G/I/K/M/O/R/V): {Style.RESET_ALL}").strip()
+
+        if choice == "0":
+            print(f"{Fore.YELLOW}👋 再见！{Style.RESET_ALL}")
+            break
+        elif choice == "1":
+            print(f"{Fore.GREEN}[START] 启动机器人...{Style.RESET_ALL}")
+            try:
+                asyncio.run(AgentBrain().run())
+            except KeyboardInterrupt:
+                print(f"\n{Fore.YELLOW}[WARN]  机器人被用户中断{Style.RESET_ALL}")
+            except Exception as e:
+                print(f"{Fore.RED}[ERROR] 机器人运行异常: {e}{Style.RESET_ALL}")
+                import traceback
+                traceback.print_exc()
+            finally:
+                # 🔒 确保锁文件被释放（atexit 只在 Python 退出时触发，
+                # 但主菜单循环会继续运行，所以需要显式释放）
+                _release_bot_lock()
+        elif choice == "2":
+            show_config_menu()
+        elif choice == "3":
+            show_login_menu()
+        elif choice == "4":
+            show_knowledge_base_menu()
+        elif choice == "5":
+            show_interest_menu()
+        elif choice == "6":
+            show_comment_menu()
+        elif choice == "7":
+            show_private_message_menu()
+        elif choice == "8":
+            show_diary_evolution_menu()
+        elif choice == "9":
+            show_agent_skill_menu()
+        elif choice.lower() == "f":
+            show_up_danmaku_menu()
+        elif choice.lower() == "g":
+            _configure_asr_settings()
+            if save_config(config):
+                print(f"{Fore.GREEN}[OK] ASR设置已保存{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.RED}[ERROR] ASR设置保存失败{Style.RESET_ALL}")
+        elif choice.lower() == "d":
+            _configure_dry_goods_settings()
+        elif choice.lower() == "m":
+            show_mood_menu()
+        elif choice.lower() == "v":
+            try:
+                asyncio.run(manual_video_analysis())
+            except KeyboardInterrupt:
+                print(f"\n{Fore.YELLOW}[WARN] 用户中断{Style.RESET_ALL}")
+            except Exception as e:
+                print(f"{Fore.RED}[ERROR] 手动视频分析异常: {e}{Style.RESET_ALL}")
+                import traceback
+                traceback.print_exc()
+        elif choice.lower() == "k":
+            try:
+                asyncio.run(revisit_knowledge_base_menu())
+            except KeyboardInterrupt:
+                print(f"\n{Fore.YELLOW}[WARN] 用户中断{Style.RESET_ALL}")
+            except Exception as e:
+                print(f"{Fore.RED}[ERROR] 知识库重温异常: {e}{Style.RESET_ALL}")
+                import traceback
+                traceback.print_exc()
+        elif choice.lower() == "r":
+            factory_reset_all()
+        elif choice.lower() == "e":
+            export_config()
+        elif choice.lower() == "i":
+            import_config()
+        elif choice.lower() == "o":
+            try:
+                asyncio.run(organize_knowledge_base())
+            except KeyboardInterrupt:
+                print(f"\n{Fore.YELLOW}[WARN] 用户中断{Style.RESET_ALL}")
+            except Exception as e:
+                print(f"{Fore.RED}[ERROR] 知识库整理异常: {e}{Style.RESET_ALL}")
+                import traceback
+                traceback.print_exc()
+        else:
+            print(f"{Fore.RED}[ERROR] 无效选项，请重新选择！{Style.RESET_ALL}")
+    async def _download_video_for_asr(self, bvid):
+        """为ASR下载视频（完全对齐video_modes.py的下载逻辑：http2/Origin/Referer/长超时）"""
+        try:
+            import tempfile, hashlib as _h, time as _t
+            referer = f'https://www.bilibili.com/video/{bvid}'
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Referer': referer,
+                'Origin': 'https://www.bilibili.com',
+            }
+            async with httpx.AsyncClient(
+                http2=True,
+                headers=headers, cookies=self.cookies,
+                timeout=90.0, follow_redirects=True
+            ) as client:
+                # [FIX] WBI签名：独立获取，不依赖 self.bili._wbi_keys 避免 AttributeError
+                wkeys = None
+                try:
+                    nav = await client.get('https://api.bilibili.com/x/web-interface/nav')
+                    nd = nav.json()
+                    if nd.get('code') == 0:
+                        wi = nd['data'].get('wbi_img', {})
+                        im = re.search(r'/([^/]+)\.(?:png|svg)$', wi.get('img_url', ''))
+                        sm = re.search(r'/([^/]+)\.(?:png|svg)$', wi.get('sub_url', ''))
+                        if im and sm:
+                            wkeys = (im.group(1), sm.group(1))
+                            # 顺便缓存到 bili 实例（如果可用）
+                            bili = getattr(self, 'bili', None)
+                            if bili and hasattr(bili, '_wbi_keys'):
+                                try:
+                                    bili._wbi_keys = wkeys
+                                    bili._wbi_keys_ts = time.time()
+                                except Exception as e:
+                                    log(f'非预期异常: {e}', 'WARN')
+                except Exception as e:
+                    log(f"[WARN] ASR下载WBI密钥获取失败: {e}", "WARN")
+
+                params = {'bvid': bvid}
+                if wkeys:
+                    wts = int(_t.time())
+                    sp = dict(params)
+                    sp['wts'] = wts
+                    si = sorted(sp.items(), key=lambda x: x[0])
+                    qs = '&'.join(f'{k}={v}' for k, v in si)
+                    sp['w_rid'] = _h.md5((qs + wkeys[0] + wkeys[1]).encode()).hexdigest()
+                    params = sp
+
+                v_res = await client.get('https://api.bilibili.com/x/web-interface/view', params=params)
+                v_data = v_res.json()
+                if v_data.get('code') != 0:
+                    return None
+                info = v_data['data']
+                cid = info.get('cid', 0)
+
+                # 获取视频流
+                play_params = {'bvid': bvid, 'cid': cid, 'qn': 32, 'fnval': 0, 'fourk': 0}
+                if wkeys:
+                    wts = int(_t.time())
+                    sp = dict(play_params)
+                    sp['wts'] = wts
+                    si = sorted(sp.items(), key=lambda x: x[0])
+                    qs = '&'.join(f'{k}={v}' for k, v in si)
+                    sp['w_rid'] = _h.md5((qs + wkeys[0] + wkeys[1]).encode()).hexdigest()
+                    play_params = sp
+                play = await client.get(
+                    'https://api.bilibili.com/x/player/playurl',
+                    params=play_params
+                )
+                play_data = play.json()
+                durls = play_data.get('data', {}).get('durl', [])
+                if not durls:
+                    return None
+                video_url = durls[0]['url']
+
+                # 下载
+                out_dir = os.path.join(tempfile.gettempdir(), "bilibili_asr", bvid)
+                os.makedirs(out_dir, exist_ok=True)
+                out_path = os.path.join(out_dir, f"{bvid}.mp4")
+
+                async with client.stream("GET", video_url, headers=headers) as resp:
+                    resp.raise_for_status()
+                    with open(out_path, "wb") as f:
+                        async for chunk in resp.aiter_bytes(1024 * 256):
+                            f.write(chunk)
+
+                return out_path
+        except Exception as e:
+            log(f"ASR视频下载失败: {e}", "WARN")
+            return None
+
+    async def analyze_vision(self, pic_url):
+        if not pic_url: return "无封面", 0
+        if self._is_ai_degraded(): return "AI降级,跳过", 0
+        try:
+            resp = await self._call_ai_with_retry(
+                model=MODEL_VISION,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT_VISION},
+                    {"role": "user", "content": [
+                        {"type": "text", "text": "评价"},
+                        {"type": "image_url", "image_url": {"url": pic_url}}
+                    ]}
+                ],
+                request_timeout=90
+            )
+            content = resp.choices[0].message.content
+            score = 5.0
+            if "Score:" in content:
+                try:
+                    parts = content.split("Score:")
+                    desc = parts[0].strip()[:15]
+                    score = float(parts[1].strip())
+                except (ValueError, IndexError):
+                    desc = content[:15]
+            else:
+                desc = content[:15]
+            return desc, score
+        except Exception as e:
+            log(f"封面分析失败(已重试): {_mask_urls(str(e)[:80])}", "WARN")
+            return "分析失败", 0
+
+    async def judge_interest_with_ai(self, title, up, vis_desc, vis_score):
+        interests = self.interest_mgr.get_interests()
+        if not interests:
+            return True, [], "未设置兴趣，默认通过"
+
+        matched = self.interest_mgr.get_matching_interests(title, up)
+        if matched:
+            return True, matched, f"关键词匹配: {', '.join(matched)}"
+
+        prompt = f"""
+请判断这个B站视频是否符合用户兴趣。
+
+用户兴趣: {", ".join(interests)}
+视频标题: {title}
+UP主: {up}
+封面印象: {vis_desc}
+封面印象分: {vis_score}
+
+要求:
+1. 综合标题、UP主、封面印象判断，不要只做关键词匹配。
+2. 只输出JSON，格式为:
+{{"interested": true, "matched": ["兴趣1"], "reason": "一句话理由"}}
+3. 如果明显不相关，interested=false，matched=[]。
+"""
+        try:
+            resp = await self._call_ai_with_retry(
+                model=MODEL_BRAIN,
+                messages=[
+                    {"role": "system", "content": "你是B站视频兴趣筛选器，只输出合法JSON。"},
+                    {"role": "user", "content": prompt}
+                ],
+                request_timeout=90
+            )
+            raw = resp.choices[0].message.content.strip()
+            # [FIX] 多策略JSON提取：嵌套匹配 + rfind兜底
+            start = raw.find("{")
+            json_str = raw
+            if start >= 0:
+                # 嵌套匹配找闭合的 }
+                depth = 0
+                match_end = -1
+                for i in range(start, len(raw)):
+                    if raw[i] == '{':
+                        depth += 1
+                    elif raw[i] == '}':
+                        depth -= 1
+                        if depth == 0:
+                            match_end = i
+                            break
+                if match_end >= 0:
+                    json_str = raw[start:match_end + 1]
+                else:
+                    end = raw.rfind("}")
+                    if end >= start:
+                        json_str = raw[start:end + 1]
+            # ── 修复模型偶尔用单引号/不规范JSON的错误 ──
+            try:
+                data = json.loads(json_str)
+            except json.JSONDecodeError:
+                # 尝试修复常见问题：单引号→双引号
+                fixed = json_str.replace("'", '"')
+                # 修复 True/False/None 大小写（replace单引号后可能被误改）
+                fixed = re.sub(r'\bTrue\b', 'true', fixed)
+                fixed = re.sub(r'\bFalse\b', 'false', fixed)
+                fixed = re.sub(r'\bNone\b', 'null', fixed)
+                data = json.loads(fixed)
+            ai_matched = data.get("matched") or []
+            if isinstance(ai_matched, str):
+                ai_matched = [ai_matched]
+            reason = str(data.get("reason") or "AI综合判断")
+            return bool(data.get("interested")), ai_matched, reason
+        except Exception as e:
+            log(f"AI兴趣判断失败(已重试)，退回关键词判断: {str(e)[:80]}", "WARN")
+            return False, [], "关键词未匹配"
+
+    async def _get_comments_context(self, aid: int):
+        c_list_raw = await self.bili.get_hot_comments(aid, limit=8)
+        if not c_list_raw: return "暂无评论", []
+
+        # [SPEED] 两阶段并行：先收集所有评论基本信息，再并行分析图片
+        comment_entries = []
+        image_tasks = []
+        for i, c in enumerate(c_list_raw):
+            try:
+                cid, user, msg = c['rpid'], c['member']['uname'], c['content']['message']
+                entry = {"cid": cid, "user": user, "content": msg, "pic_info": ""}
+                if VISION_COMMENT_IMAGES_ENABLED:
+                    pictures = c.get('content', {}).get('pictures', [])
+                    if pictures:
+                        img_urls = [p.get('img_src', '') for p in pictures[:3] if p.get('img_src')]
+                        if img_urls:
+                            image_tasks.append(self._analyze_comment_images(cid, img_urls, user_msg=msg))
+                            entry["_img_idx"] = len(image_tasks) - 1
+                comment_entries.append(entry)
+            except (KeyError, TypeError):
+                continue
+
+        # 并行分析所有评论图片
+        pic_results = await asyncio.gather(*image_tasks, return_exceptions=True) if image_tasks else []
+
+        # 组装结果
+        context_str = "【热门评论】:\n"
+        c_list_clean = []
+        for entry in comment_entries:
+            cid, user, msg = entry["cid"], entry["user"], entry["content"]
+            pic_info = ""
+            if "_img_idx" in entry:
+                result = pic_results[entry["_img_idx"]]
+                if isinstance(result, str) and result:
+                    pic_info = f" [附图描述: {result}]"
+            context_str += f"ID:{cid} User:{user} Msg:{msg}{pic_info}\n"
+            c_list_clean.append({"id": cid, "user": user, "content": msg, "pic_info": pic_info.strip()})
+        return context_str, c_list_clean
+
+    async def _analyze_comment_images(self, cid, img_urls, user_msg=""):
+        """[VISION] 下载评论文图片并用视觉AI描述，同时展示评论文字+图片"""
+        if not img_urls or self._is_ai_degraded():
+            return ""
+        max_images = min(len(img_urls), VISION_MAX_COMMENT_IMAGES)
+        import httpx as _httpx, base64 as _b64
+
+        async def _dl_and_analyze(idx, url):
+            try:
+                async with _httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+                    r = await client.get(url, headers={
+                        'User-Agent': 'Mozilla/5.0',
+                        'Referer': 'https://www.bilibili.com'
+                    })
+                    if r.status_code != 200:
+                        return None
+                    data_url = "data:image/jpeg;base64," + _b64.b64encode(r.content).decode("ascii")
+                resp = await self._call_ai_with_retry(
+                    model=MODEL_VISION,
+                    messages=[{
+                        "role": "system",
+                        "content": "你是评论图片分析助手。用一句简短中文描述图片内容（是什么类型的图、主要内容、情绪倾向）。"
+                    }, {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "描述这张评论区的图片"},
+                            {"type": "image_url", "image_url": {"url": data_url}}
+                        ]
+                    }],
+                    request_timeout=20
+                )
+                desc = resp.choices[0].message.content.strip()[:80]
+                return f"[图{idx+1}]{desc}"
+            except Exception as e:
+                log(f"评论图片分析失败(cid={cid} img{idx}): {e}", "DEBUG")
+                return None
+
+        # [SPEED] 并行下载+分析所有图片
+        tasks = [_dl_and_analyze(i, url) for i, url in enumerate(img_urls[:max_images])]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        analyzed = [r for r in results if isinstance(r, str)]
+        if analyzed:
+            msg_preview = user_msg[:40] + "..." if len(user_msg) > 40 else user_msg
+            log(f"[EYE] 评论({msg_preview}) + 附图({len(analyzed)}张): {'; '.join(analyzed)}", "EYE")
+        return "; ".join(analyzed)
+
+    async def watch_and_sync_history(self, bvid):
+        sec = random.uniform(VIDEO_INTERVAL_MIN, VIDEO_INTERVAL_MAX)
+        log(f"短暂休息 {sec:.1f} 秒后继续...", "INFO")
+        try:
+            res = await self.bili.report_history(bvid, played_time=random.randint(60,120))
+            if res.get('code') == 0:
+                log("已同步观看历史 (手机可见)", "NOTE")
+            else:
+                log(f"历史记录同步失败: {res.get('message')}", "WARN")
+        except Exception as e:
+            log(f"上报历史时异常: {e}", "ERROR")
+
+        await asyncio.sleep(sec)
+
+    async def energy_recovery_session(self):
+        log(f"精力耗尽 ({self.energy}%)，进入恢复模式... [FAST]", "ENERGY")
+
+        recovery_rounds = random.randint(ROUNDS_MIN, ROUNDS_MAX)
+        log(f"预计恢复 {recovery_rounds} 轮，请耐心等待...", "ENERGY")
+
+        for round_num in range(1, recovery_rounds + 1):
+            energy_gain = random.randint(ENERGY_RECOVERY_MIN, ENERGY_RECOVERY_MAX)
+            self.energy = min(MAX_ENERGY, self.energy + energy_gain)
+
+            round_interval = random.randint(ROUND_INTERVAL_MIN, ROUND_INTERVAL_MAX)
+
+            log(f"第 {round_num}/{recovery_rounds} 轮恢复: +{energy_gain}% → {self.energy}% (等待{round_interval}秒)", "ENERGY")
+
+            if round_num < recovery_rounds:
+                # [SPEED] 一次性睡眠替代逐10秒循环
+                log(f"下次恢复倒计时: {round_interval}秒...", "ENERGY")
+                await asyncio.sleep(round_interval)
+
+            self.last_energy_recovery = datetime.now()
+
+        log(f"恢复完成！当前精力: {self.energy}%，准备继续工作！", "SUCCESS")
+
+    async def check_and_handle_comments(self):
+        """检查并处理新评论，返回处理数量"""
+        if not COMMENT_CHECK_ENABLED:
+            return 0
+        if not self.comment_mgr:
+            return 0
+        
+        now = datetime.now()
+        if self.last_comment_check and (now - self.last_comment_check).total_seconds() < COMMENT_CHECK_INTERVAL:
+            return 0
+        
+        try:
+            processed = await self.comment_mgr.process_new_comments(self.bili)
+            if processed > 0:
+                log(f"本次处理了 {processed} 条评论互动", "COMMENT")
+                # 消耗精力
+                self.energy -= processed
+                if self.energy < 0:
+                    self.energy = 0
+                log(f"评论互动消耗 {processed} 点精力，剩余: {self.energy}%", "ENERGY")
+            return processed
+        except Exception as e:
+            log(f"检查评论失败: {e}", "ERROR")
+            return 0
+        finally:
+            self.last_comment_check = now
+
+    async def check_and_handle_private_messages(self):
+        """检查并处理新私信"""
+        if not PRIVATE_MESSAGE_ENABLED:
+            return 0
+
+        now = datetime.now()
+        if self.last_private_message_check and (now - self.last_private_message_check).total_seconds() < PRIVATE_MESSAGE_CHECK_INTERVAL:
+            return 0
+
+        if not self.private_message_mgr:
+            return 0
+
+        try:
+            processed = await self.private_message_mgr.process_new_messages()
+            if processed > 0:
+                log(f"本次处理了 {processed} 条私信", "DM")
+            return processed
+        except Exception as e:
+            log(f"检查私信失败: {e}", "ERROR")
+            return 0
+        finally:
+            self.last_private_message_check = now
+
+    async def maybe_initiate_chat(self):
+        """[MSG] 偶尔主动找人聊天（学而时习之的社交版）。"""
+        if not ACTIVE_CHAT_ENABLED:
+            return
+        if not PRIVATE_MESSAGE_ENABLED or not PRIVATE_MESSAGE_AUTO_REPLY:
+            return
+        if not self.private_message_mgr:
+            return
+        if self._active_chat_count >= ACTIVE_CHAT_MAX_PER_SESSION:
+            return
+        cooldown_ok = (datetime.now() - self._last_active_chat_at).total_seconds() / 60 >= ACTIVE_CHAT_COOLDOWN_MINUTES
+        if not cooldown_ok:
+            return
+        # [FIX] 时间段守卫：深夜/凌晨不主动打扰别人（23:00-07:00）
+        hour = datetime.now().hour
+        if hour >= 23 or hour < 7:
+            return
+        if random.random() >= PROB_INITIATE_CHAT:
+            return
+
+        try:
+            # 随机从关注/粉丝列表里挑一个人
+            target_uid = None
+            target_name = ""
+            try:
+                # 优先从粉丝里找
+                followers = await self.private_message_mgr.toolbox.followers_search("", limit=20)
+                if followers and isinstance(followers, list) and len(followers) > 0:
+                    pick = random.choice(followers)
+                    target_uid = int(pick.get("mid") or 0)
+                    target_name = str(pick.get("name", ""))
+            except Exception as e:
+                log(f"[WARN] 获取粉丝列表失败: {e}", "WARN")
+            if not target_uid:
+                try:
+                    followings = await self.private_message_mgr.toolbox.followings_search("", limit=20)
+                    if followings and isinstance(followings, list) and len(followings) > 0:
+                        pick = random.choice(followings)
+                        target_uid = int(pick.get("mid") or 0)
+                        target_name = str(pick.get("name", ""))
+                except Exception as e:
+                    log(f"[WARN] 获取关注列表失败: {e}", "WARN")
+            if not target_uid or target_uid == self.bili.uid:
+                return
+
+            self._active_chat_count += 1
+            self._last_active_chat_at = datetime.now()
+            log(f"[MSG] 主动找 @{target_name}(uid:{target_uid}) 聊聊天... (第{self._active_chat_count}次)", "CHAT")
+
+            # ── 🔍 先看对方主页：拉取个人信息 + 最近投稿 ──
+            target_profile = {}
+            target_videos = []
+            try:
+                target_profile = await self.bili.get_up_info(target_uid) or {}
+                if not target_profile.get("error"):
+                    log(f"   📋 {target_name} 主页: Lv.{target_profile.get('level',0)} "
+                        f"签名={str(target_profile.get('sign',''))[:40]}", "DEBUG")
+            except Exception as e:
+                log(f"   [WARN] 无法获取 {target_name} 主页: {e}", "DEBUG")
+
+            try:
+                target_videos = await self.bili.get_up_videos(target_uid, limit=5) or []
+                if target_videos:
+                    titles = [v.get("title","")[:40] for v in target_videos[:3]]
+                    log(f"   [VIDEO] {target_name} 最近投稿: {'; '.join(titles)}", "DEBUG")
+            except Exception as e:
+                log(f"   [WARN] 无法获取 {target_name} 视频: {e}", "DEBUG")
+
+            # 构建目标用户画像
+            target_sign = str(target_profile.get("sign", "")).strip()
+            target_level = target_profile.get("level", 0)
+            target_follower = target_profile.get("follower", 0)
+            target_video_count = target_profile.get("video_count", 0)
+
+            video_summary = ""
+            if target_videos:
+                video_summary = "对方最近投稿: " + "；".join(
+                    [v.get("title","")[:50] for v in target_videos[:5]]
+                )
+
+            target_profile_block = f"""【目标用户主页信息】
+用户名: {target_name}
+个性签名: {target_sign if target_sign else "（无）"}
+B站等级: Lv.{target_level}
+粉丝数: {target_follower}
+投稿数: {target_video_count}
+{video_summary if video_summary else "（未拉取到投稿信息）"}
+"""
+
+            # 生成开场白
+            interests = self.interest_mgr.get_interests()
+            interest_str = "、".join(interests[:5]) if interests else "随便聊聊"
+            persona_block = self.persona_mgr.build_prompt_block()
+            mood_block = self.mood_mgr.build_prompt_block()
+
+            prompt = f"""
+你要给B站上的一个用户「{target_name}」发一条初次私信打招呼。
+这是主动发起聊天，不是回复别人的消息。
+
+{persona_block}
+{mood_block}
+你的兴趣: {interest_str}
+{target_profile_block}
+当前时间: {datetime.now().isoformat(timespec='seconds')}
+
+要求：
+1. 自然、轻松、不油腻，像普通B站用户之间的寒暄
+2. 🚫 不要聊你自己的兴趣爱好！先看看目标用户的签名和投稿内容——
+   - 如果对方投稿了具体领域的视频（游戏/动画/科技/音乐等），围绕对方的创作内容展开话题
+   - 如果对方签名里有信息，可以顺着签名聊
+   - 只有当对方主页完全空白时，才简单聊聊日常
+3. 不要太长，50字以内
+4. 不要用客服腔、不要自来熟、不要"大佬""up主"之类刻意恭维
+5. 禁止承诺做违法、刷量、侵权的事
+6. 结尾带上"{config.get('behavior', {}).get('ai_marker', '（内容由AI生成并由AI回复）')}"
+7. 如果看了对方主页实在不知道聊什么，返回空字符串
+
+只返回要发送的内容，不要解释。
+"""
+            # [FIX] 用线程池异步执行，防止同步AI调用阻塞事件循环导致崩溃
+            resp = await asyncio.to_thread(
+                openai.ChatCompletion.create,
+                model=MODEL_BRAIN,
+                messages=[
+                    {"role": "system", "content": "你是B站上的一个普通用户。看了对方主页后再开口——围绕对方的投稿内容或签名展开话题。友好、有边界感、不油腻。"},
+                    {"role": "user", "content": prompt}
+                ],
+                timeout=60
+            )
+            chat_text = resp.choices[0].message.content.strip()
+            if not chat_text or chat_text.upper() == "END":
+                log(f"AI判断不适合主动聊天 @{target_name}，跳过", "CHAT")
+                return
+
+            chat_text = ensure_ai_marker(chat_text)
+            ok, reason, hits = ReplySafetyGuard().review("(主动发起聊天)", chat_text)
+            if not ok:
+                log(f"主动聊天内容被拦截: {reason} | 命中: {', '.join(hits)}", "WARN")
+                return
+
+            await asyncio.sleep(human_reply_delay())
+            result = await self.private_message_mgr.send_reply(target_uid, chat_text)
+            log(f"[MSG] 已主动发消息给 @{target_name}: {chat_text[:60]}", "CHAT")
+
+            # 记录到日记
+            self.record_session_event(
+                "active_chat",
+                target_uid=target_uid,
+                target_name=target_name,
+                content=chat_text[:120]
+            )
+        except Exception as e:
+            log(f"主动聊天失败: {e}", "WARN")
+
+    # ── [*] UP主关注（AI自动关注喜欢的UP主）───────────────────────────────
+    def _reset_daily_follows(self):
+        today = datetime.now().strftime("%Y-%m-%d")
+        if self.daily_follows_date != today:
+            self.daily_follows = 0
+            self.daily_follows_date = today
+
+    def _reset_daily_danmaku_likes(self):
+        today = datetime.now().strftime("%Y-%m-%d")
+        if self.daily_danmaku_likes_date != today:
+            self.daily_danmaku_likes = 0
+            self.daily_danmaku_likes_date = today
+
+    def _reset_daily_danmaku_sent(self):
+        today = datetime.now().strftime("%Y-%m-%d")
+        if self.daily_danmaku_sent_date != today:
+            self.daily_danmaku_sent = 0
+            self.daily_danmaku_sent_date = today
+
+    async def maybe_follow_up(self, up_uid: int, up_name: str, score: float):
+        """根据AI评分和印象积累决定是否关注UP主。
+        
+        关注即认可，不是抽奖——设计理念：
+        1. 评分 ≥ UP_FOLLOW_MIN_SCORE（默认7分）才进入候选池
+        2. 需积累 ≥ UP_FOLLOW_MIN_IMPRESSIONS 次正面印象（首次观看不计）
+        3. 特别优秀（≥ UP_FOLLOW_EXCEPTIONAL_SCORE）可首看即关注
+        4. 已关注的不重复关注（followed 标志）
+        """
+        if not UP_FOLLOW_ENABLED or not up_uid or not up_name:
+            return False
+        
+        self._reset_daily_follows()
+        if self.daily_follows >= UP_FOLLOW_MAX_DAILY:
+            return False
+        
+        # 冷却检查
+        cooldown_ok = (datetime.now() - self.last_follow_at).total_seconds() / 60 >= UP_FOLLOW_COOLDOWN_MINUTES
+        if not cooldown_ok:
+            return False
+        
+        # ── [*] 核心强化：评分门槛 ──
+        # 不得因概率到了就关注评分平庸的 UP
+        exceptional = score >= UP_FOLLOW_EXCEPTIONAL_SCORE
+        if not exceptional and score < UP_FOLLOW_MIN_SCORE:
+            return False  # 评分不达标，直接拒绝
+        
+        # ── [*] 核心强化：已关注不重复 ──
+        up_entry = self.memory.setdefault("known_ups", {}).get(up_name, {})
+        if up_entry.get("followed"):
+            return False  # 已关注过
+        
+        # ── [*] 核心强化：印象积累 ──
+        views = up_entry.get("views", 0)
+        avg_score = up_entry.get("avg_score", score)
+        if not exceptional and views < UP_FOLLOW_MIN_IMPRESSIONS:
+            # 看的次数不够，不关注（但记录印象）
+            return False
+        
+        # ── 概率计算 ──
+        # 基础概率 × 评分因子 × 印象奖励（看得越多越可能关注，但有上限）
+        score_factor = min(score / 5.0, 2.0) if score > 0 else 1.0
+        impression_bonus = min(views / max(UP_FOLLOW_MIN_IMPRESSIONS, 1), 2.0)
+        adjusted_prob = UP_FOLLOW_AUTO_PROB * score_factor * impression_bonus
+        if not exceptional and random.random() >= adjusted_prob:
+            return False
+        
+        try:
+            avg_str = f", 均分:{avg_score:.1f}" if views else ""
+            log(f"[*] 正在关注 UP主 @{up_name} (UID:{up_uid})... (评分:{score}, 观看{views}次{avg_str}, 概率:{adjusted_prob:.3f})", "FOLLOW")
+            result = await self.bili.follow_up(up_uid)
+            if result.get("code") == 0:
+                self.daily_follows += 1
+                self.last_follow_at = datetime.now()
+                # 设置 followed 标志
+                up_entry["followed"] = True
+                up_entry["followed_at"] = datetime.now().isoformat()
+                if not up_entry.get("uid"):
+                    up_entry["uid"] = up_uid
+                self._save_memory()
+                log(f"[OK] 已关注 UP主 @{up_name}！今日已关注 {self.daily_follows}/{UP_FOLLOW_MAX_DAILY}", "SUCCESS")
+                self.record_session_event("follow_up", up_uid=up_uid, up_name=up_name, score=score, views=views, avg_score=round(avg_score, 1) if views else score)
+                return True
+            elif result.get("code") == 22014:
+                # 已经关注过（比如之前网页/App上关注的），同步本地内存即可
+                up_entry["followed"] = True
+                if not up_entry.get("uid"):
+                    up_entry["uid"] = up_uid
+                self._save_memory()
+                log(f"已关注过 UP主 @{up_name} (之前已关注，已同步记录)", "INFO")
+                return True
+            else:
+                log(f"关注失败: {result.get('msg')}", "WARN")
+        except Exception as e:
+            log(f"关注 UP主异常: {e}", "WARN")
+        return False
+
+    async def maybe_browse_up_videos(self, force_up_uid=None, up_name_hint=None):
+        """浏览UP主的主页视频，优先浏览喜欢的UP主，可作为推荐流替代目标。
+        
+        Returns: 单个视频dict（格式兼容主循环target）或 None
+        """
+        if not UP_FOLLOW_ENABLED:
+            return None
+        
+        # 冷却检查（force_up_uid 可跳过冷却）
+        elapsed = (datetime.now() - self.last_up_browse_at).total_seconds() / 60
+        if elapsed < UP_FOLLOW_COOLDOWN_MINUTES and not force_up_uid:
+            return None
+        
+        target_uid = force_up_uid
+        chosen_up_name = up_name_hint
+        is_favorite = False
+        
+        if not target_uid:
+            # ── [*] 优先浏览喜欢的UP主（更高概率）──
+            favorite_ups = self.get_favorite_ups()
+            if favorite_ups and random.random() < UP_FOLLOW_FAVORITE_PROB:
+                fav = random.choice(favorite_ups)
+                fav_uid = fav.get("uid")
+                if fav_uid:
+                    target_uid = int(fav_uid)
+                    chosen_up_name = fav.get("name")
+                    is_favorite = True
+                # 也检查全局配置中的喜爱UID列表
+                elif UP_FOLLOW_FAVORITE_UID_LIST and len(UP_FOLLOW_FAVORITE_UID_LIST) > 0:
+                    target_uid = random.choice(UP_FOLLOW_FAVORITE_UID_LIST)
+                    is_favorite = True
+            
+            # 回退：随机浏览已知UP主
+            if not target_uid:
+                if random.random() >= UP_FOLLOW_BROWSE_PROB:
+                    return None
+                known_ups = self.memory.get("known_ups", {})
+                if not known_ups:
+                    return None
+                # 随机选择一个已关注的UP主
+                chosen_up_name = random.choice(list(known_ups.keys()))
+                uid_from_mem = known_ups.get(chosen_up_name, {}).get("uid")
+                if uid_from_mem:
+                    target_uid = int(uid_from_mem)
+                else:
+                    # 尝试从user_profile获取UID
+                    profile = self.user_profile_mgr.get_profile(f"up::{chosen_up_name}")
+                    if profile and profile.get("uid"):
+                        target_uid = int(profile["uid"])
+                    else:
+                        return None
+            
+            if not target_uid:
+                return None
+        
+        self.last_up_browse_at = datetime.now()
+        tag = "[STAR]喜爱" if is_favorite else "📺"
+        log(f"{tag} 浏览 UP主 {'@'+chosen_up_name if chosen_up_name else ''} (UID:{target_uid}) 的主页视频...", "BROWSE")
+        
+        try:
+            videos = await self.bili.get_up_videos(target_uid, limit=UP_FOLLOW_MAX_BROWSE)
+            if videos:
+                log(f"获取到 {len(videos)} 个视频:", "BROWSE")
+                for v in videos:
+                    log(f"  • {v.get('title','')[:40]} | 播放:{v.get('play',0)}", "BROWSE")
+                # 返回一个随机视频作为可用的目标
+                chosen = random.choice(videos)
+                return {
+                    "bvid": chosen.get("bvid", ""),
+                    "title": chosen.get("title", ""),
+                    "owner": {"name": chosen_up_name or "", "mid": target_uid},
+                    "id": chosen.get("aid", 0),
+                    "aid": chosen.get("aid", 0),
+                    "pic": chosen.get("pic", ""),
+                    "_source": "up_browse",
+                    "_is_favorite_up": is_favorite
+                }
+            else:
+                log("该UP主暂无视频或获取失败", "INFO")
+        except Exception as e:
+            log(f"浏览UP主视频异常: {e}", "WARN")
+        return None
+
+    # ── [MSG] 弹幕互动 ──────────────────────────────────────────────────
+    async def maybe_read_danmaku(self, bvid: str):
+        """读取视频弹幕，融入AI决策上下文。"""
+        if not DANMAKU_ENABLED or not bvid:
+            return []
+        
+        if random.random() >= DANMAKU_READ_PROB:
+            return []
+        
+        try:
+            log("[MSG] 正在读取弹幕...", "DANMAKU")
+            cid, danmaku_list = await self.bili.get_danmakus(bvid, limit=30)
+            if danmaku_list:
+                self._last_danmaku_videos[bvid] = danmaku_list
+                self._last_danmaku_cids[bvid] = cid
+                # 清理旧缓存（保留最近10个视频的弹幕）
+                if len(self._last_danmaku_videos) > 10:
+                    oldest = list(self._last_danmaku_videos.keys())[0]
+                    del self._last_danmaku_videos[oldest]
+                
+                log(f"读取到 {len(danmaku_list)} 条弹幕 (cid={cid})", "DANMAKU")
+                # 显示几条代表性弹幕
+                for dm in danmaku_list[:5]:
+                    log(f"  弹幕: {dm.get('text','')[:40]}", "DANMAKU")
+                
+                # 同时触发点赞和发送
+                await self.maybe_like_danmaku(bvid, danmaku_list, cid)
+                await self.maybe_send_danmaku(bvid)
+                return danmaku_list
+        except Exception as e:
+            log(f"读取弹幕异常: {e}", "WARN")
+        return []
+
+    async def maybe_like_danmaku(self, bvid: str, danmaku_list: list, cid: int = 0):
+        """对有趣的弹幕进行点赞。cid 由 get_danmakus 返回。"""
+        if not DANMAKU_ENABLED or not danmaku_list:
+            return False
+        
+        if random.random() >= DANMAKU_LIKE_PROB:
+            return False
+        
+        self._reset_daily_danmaku_likes()
+        if self.daily_danmaku_likes >= DANMAKU_MAX_DAILY_LIKES:
+            return False
+        
+        if not cid:
+            # 降级尝试从缓存获取 cid
+            cid = self._last_danmaku_cids.get(bvid, 0)
+        if not cid:
+            return False
+        
+        try:
+            # 随机选一条弹幕点赞（必须用 id_str 字符串ID）
+            target_dm = random.choice(danmaku_list)
+            dm_id_str = target_dm.get("id_str", "")
+            dm_text = target_dm.get("text", "")
+            if not dm_id_str:
+                return False
+            
+            log(f"👍 点赞弹幕: {dm_text[:30]}... (id_str={dm_id_str[:16]}...)", "DANMAKU")
+            result = await self.bili.like_danmaku(dmid=dm_id_str, cid=cid, bvid=bvid)
+            if result.get("code") == 0:
+                self.daily_danmaku_likes += 1
+                log(f"弹幕点赞成功！今日已赞 {self.daily_danmaku_likes}/{DANMAKU_MAX_DAILY_LIKES}", "SUCCESS")
+                return True
+            else:
+                log(f"弹幕点赞未成功: {result.get('msg')}", "INFO")
+        except Exception as e:
+            log(f"弹幕点赞异常: {e}", "WARN")
+        return False
+
+    async def maybe_send_danmaku(self, bvid: str, title: str = "", subtitle_text: str = ""):
+        """生成并发送一条B站风格弹幕。"""
+        if not DANMAKU_ENABLED or not bvid:
+            return False
+        
+        if random.random() >= DANMAKU_SEND_PROB:
+            return False
+        
+        self._reset_daily_danmaku_sent()
+        if self.daily_danmaku_sent >= DANMAKU_MAX_DAILY_SEND:
+            return False
+        
+        try:
+            # 用AI生成一条弹幕
+            context = f"视频标题: {title}\n视频内容摘要: {subtitle_text[:200] if subtitle_text and '[未读取' not in subtitle_text else '未知'}"
+            persona_block = self.persona_mgr.build_prompt_block()
+            
+            resp = await self._call_ai_with_retry(
+                model=MODEL_BRAIN,
+                messages=[
+                    {"role": "system", "content": f"你是B站上的一个普通观众。{persona_block}请根据视频内容发送一条弹幕。要求：1. 简短（20字以内）2. 符合B站弹幕风格 3. 有趣或表达到位 4. 不要发送引战、敏感内容。只返回弹幕文字，不要解释。"},
+                    {"role": "user", "content": f"为这个视频发一条弹幕: {context}"}
+                ],
+                max_tokens=50,
+                request_timeout=60
+            )
+            dm_text = resp.choices[0].message.content.strip()
+            if not dm_text or len(dm_text) > 50:
+                return False
+            
+            log(f"📤 发送弹幕: {dm_text}", "DANMAKU")
+            result = await self.bili.send_danmaku(bvid, dm_text)
+            if result.get("code") == 0:
+                self.daily_danmaku_sent += 1
+                log(f"弹幕发送成功！今日已发 {self.daily_danmaku_sent}/{DANMAKU_MAX_DAILY_SEND}", "SUCCESS")
+                self.record_session_event("send_danmaku", bvid=bvid, text=dm_text)
+                return True
+            else:
+                log(f"弹幕发送失败: {result.get('msg')}", "WARN")
+        except Exception as e:
+            log(f"弹幕发送异常: {e}", "WARN")
+        return False
+
+    async def initialize_login(self):
+        self.bili.credential = self.bili._load_credential()
+
+        # 有 cookie 文件直接加载，跳过网络验证，秒进
+        if self.bili.credential and os.path.exists(COOKIE_FILE):
+            with open(COOKIE_FILE, 'r', encoding='utf-8') as f:
+                self.cookies = json.load(f)
+            self.credential = self.bili.credential
+            try:
+                self.bili.uid = int(self.cookies.get("DedeUserID", 0))
+            except Exception:
+                self.bili.uid = 0
+            log(f"登录已就绪 (UID: {self.bili.uid})", "SUCCESS")
+            self._init_psycho_engine()
+            self.comment_mgr = CommentInteractionManager(self.credential, self.bili.uid, since_ts=self.previous_seen_ts)
+            self.private_message_mgr = PrivateMessageManager(
+                self.credential,
+                self.bili.uid,
+                since_ts=self.previous_seen_ts,
+                previous_seen_at=self.previous_seen_at
+            )
+            return True
+
+        # 没有 cookie → 走完整登录流程
+        log("需要登录B站账号", "LOGIN")
+        print("\n" + "="*50)
+        print("           B站登录向导")
+        print("="*50)
+
+        login_success = await login_bilibili()
+        if not login_success:
+            log("登录失败，程序退出", "ERROR")
+            return False
+
+        self.bili.credential = self.bili._load_credential()
+        if not self.bili.credential:
+            log("登录后加载凭据失败", "ERROR")
+            return False
+
+        login_success = await self.bili.init_user_info()
+        if not login_success:
+            log("登录验证失败", "ERROR")
+            return False
+
+        with open(COOKIE_FILE, 'r', encoding='utf-8') as f:
+            self.cookies = json.load(f)
+
+        self.credential = Credential(
+            sessdata=self.cookies.get("SESSDATA"),
+            bili_jct=self.cookies.get("bili_jct"),
+            buvid3=self.cookies.get("buvid3"),
+            dedeuserid=self.cookies.get("DedeUserID"),
+        )
+        
+        # 初始化评论管理器
+        self._init_psycho_engine()
+        self.comment_mgr = CommentInteractionManager(self.credential, self.bili.uid, since_ts=self.previous_seen_ts)
+        self.private_message_mgr = PrivateMessageManager(
+            self.credential,
+            self.bili.uid,
+            since_ts=self.previous_seen_ts,
+            previous_seen_at=self.previous_seen_at
+        )
+
+        log("登录完成，准备开始工作！", "SUCCESS")
+        return True
+
+    def _init_psycho_engine(self):
+        """初始化心理画像引擎（登录后调用）
+        
+        即使 PSYCHO_ENGINE_ENABLED=False，也会初始化基础追踪和避雷系统，
+        只是跳过 AI 深度分析和智能推荐。
+        """
+        try:
+            self.psycho_profile = PsychoProfile(ai_caller=self._psycho_ai_caller if PSYCHO_ENGINE_ENABLED else None)
+            self.recommend_engine = RecommendationEngine(
+                psycho_profile=self.psycho_profile,
+                ai_caller=self._psycho_ai_caller if PSYCHO_ENGINE_ENABLED else None,
+            )
+            status = "[PSYCHO]已激活" if PSYCHO_ENGINE_ENABLED else "[NOTE]仅追踪(无AI分析)"
+            log(f"智能分析系统 {status} | 多维度追踪已激活", "SUCCESS")
+        except Exception as e:
+            log(f"智能分析系统初始化失败: {e}", "ERROR")
+            self.psycho_profile = None
+            self.recommend_engine = None
+
+    async def run(self):
+        # 🔒 单实例锁：防止多个 bot 进程同时运行
+        if not _acquire_bot_lock():
+            log("[LOCK] ❌ 已有 bot 实例正在运行，退出", "ERROR")
+            return
+        log("[LOCK] ✅ 单实例锁已获取", "INFO")
+        
+        log("bilibili_learning_bot - 启动...", "SUCCESS")
+        self.update_runtime_clock(starting=True)
+        if self.previous_seen_at:
+            log(f"上次运行最后记录时间: {self.previous_seen_at}，本次只处理之后的新评论/私信", "INFO")
+
+        os.makedirs(KNOWLEDGE_BASE_DIR, exist_ok=True)
+        log(f"知识库模块已加载，路径: {KNOWLEDGE_BASE_DIR}", "INFO")
+        
+        # 显示兴趣状态
+        interests = self.interest_mgr.get_interests()
+        if interests:
+            log(f"兴趣列表: {', '.join(interests)}", "INTEREST")
+        else:
+            log("兴趣列表为空，将对所有视频感兴趣", "INTEREST")
+        log(f"当前人格: {self.persona_mgr.get_active_persona_name()} | 当前心情: {self.mood_mgr.get_mood()}", "INFO")
+        
+        print(f"\n{Fore.CYAN}知识库分类系统已初始化:{Style.RESET_ALL}")
+        self.classifier.show_category_structure()
+        # 启动时清理空文件夹
+        cleaned = self.classifier.cleanup_empty_folders()
+        if cleaned > 0:
+            log(f"已清理 {cleaned} 个空文件夹", "KB")
+
+        login_success = await self.initialize_login()
+        if not login_success:
+            log("登录失败，程序退出", "ERROR")
+            return
+
+        log(f"初始化完成 | 最大精力: {MAX_ENERGY}% | 视频间隔: {VIDEO_INTERVAL_MIN}-{VIDEO_INTERVAL_MAX}秒", "INFO")
+        if SESSION_MAX_VIDEOS > 0:
+            log(f"会话限制: 最多处理 {SESSION_MAX_VIDEOS} 个视频后自动停止", "SESSION")
+        if SESSION_MAX_DURATION_MINUTES > 0:
+            log(f"会话限制: 最长运行 {SESSION_MAX_DURATION_MINUTES} 分钟后自动停止", "SESSION")
+        log(f"评论互动: {'已启用' if COMMENT_CHECK_ENABLED else '⏸️ 已关闭'} | 检查间隔: {COMMENT_CHECK_INTERVAL}秒", "COMMENT")
+        log(f"私信互动: {'已启用' if PRIVATE_MESSAGE_ENABLED else '⏸️ 已关闭'} | {'自动发送' if PRIVATE_MESSAGE_AUTO_REPLY else '仅拟不发送'} | 检查间隔: {PRIVATE_MESSAGE_CHECK_INTERVAL}秒", "DM")
+        log(f"日记: {'自动' if DIARY_ENABLED and DIARY_AUTO_ENABLED else '手动/关闭'} | 自我进化: {'自动应用' if EVOLUTION_ENABLED and EVOLUTION_AUTO_ENABLED and EVOLUTION_AUTO_APPLY else '手动/仅记录'}", "EVOLVE")
+        print("="*80)
+
+        # 🔵 Cookie 预热：模拟人类打开App行为，先访问一次首页暖机
+        log("🍪 Cookie预热：模拟打开B站首页...", "INFO")
+        try:
+            warmup_client = await self.bili._get_http_client()
+            await warmup_client.get(
+                'https://www.bilibili.com',
+                cookies=self.bili.raw_cookies,
+                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'},
+                timeout=15.0
+            )
+            log("🍪 Cookie预热完成", "SUCCESS")
+        except Exception as e:
+            log(f"Cookie预热跳过: {e}", "INFO")
+
+        # [WARN] 启动冷却：等待几秒再进入扫描循环，模拟真人打开App后的浏览节奏
+        try:
+            startup_cool = max(0.1, random.uniform(float(COOLDOWN_STARTUP_MIN or 1), float(COOLDOWN_STARTUP_MAX or 3)))
+        except (ValueError, TypeError):
+            startup_cool = 1.5
+        log(f"启动冷却 {startup_cool:.1f} 秒，模拟真人打开App后的浏览节奏...", "INFO")
+        await asyncio.sleep(startup_cool)
+
+        # [FIX] 启动守卫：前几轮主循环强制跳过Agent深度搜索（防止旧pyc缓存或冷却bug导致启动即触发）
+        _loop_count = 0
+
+        while True:
+            try:
+                _loop_count += 1
+                self.update_runtime_clock()
+
+                # ── 会话限制检查 ──
+                session_elapsed = (datetime.now() - self.session_start_time).total_seconds() / 60.0
+                limit_reached = False
+                limit_reason = ""
+
+                if SESSION_MAX_DURATION_MINUTES > 0 and session_elapsed >= SESSION_MAX_DURATION_MINUTES:
+                    limit_reached = True
+                    limit_reason = f"已达到最长运行时间 {SESSION_MAX_DURATION_MINUTES} 分钟（实际 {session_elapsed:.1f} 分钟）"
+                elif SESSION_MAX_VIDEOS > 0 and self.videos_processed >= SESSION_MAX_VIDEOS:
+                    limit_reached = True
+                    limit_reason = f"已处理 {self.videos_processed} 个视频（上限 {SESSION_MAX_VIDEOS}）"
+
+                if limit_reached:
+                    log(f"⏰ 会话限制触发: {limit_reason}", "SESSION")
+                    log(f"[STATS] 本次会话统计: 处理 {self.videos_processed} 个视频, 运行 {session_elapsed:.1f} 分钟", "SESSION")
+                    break
+
+                # [SPEED] 并行检查评论和私信（独立API，可并发提速）
+                comments_task = asyncio.create_task(self.check_and_handle_comments())
+                msgs_task = asyncio.create_task(self.check_and_handle_private_messages())
+                comments_processed, msgs_processed = await asyncio.gather(comments_task, msgs_task)
+                # [FIX] 只有实际处理了评论才睡冷却，无操作则跳过
+                if comments_processed > 0:
+                    await asyncio.sleep(max(0.1, random.uniform(
+                        float(COOLDOWN_POST_COMMENT_MIN or 1), float(COOLDOWN_POST_COMMENT_MAX or 3))))
+                
+                if self.energy <= 0:
+                    await self.energy_recovery_session()
+                    continue
+
+                session_info = ""
+                if SESSION_MAX_VIDEOS > 0:
+                    session_info += f" | 已看: {self.videos_processed}/{SESSION_MAX_VIDEOS}"
+                elif SESSION_MAX_DURATION_MINUTES > 0:
+                    session_info += f" | 已看: {self.videos_processed}"
+                log(f"精力: {self.energy}% | 今日已投: {self.coins_spent}/{MAX_COINS_DAILY} | 记忆UP: {len(self.memory['known_ups'])}{session_info}", "INFO")
+
+                # [FIX] 只有实际处理了私信才睡冷却，无操作则跳过
+                if msgs_processed > 0:
+                    await asyncio.sleep(max(0.1, random.uniform(
+                        float(COOLDOWN_POST_DM_MIN or 1), float(COOLDOWN_POST_DM_MAX or 3))))
+
+                # ── 🤖 Agent深度搜索：定期触发，深入了解某个主题 ──
+                # [FIX] 启动守卫：前3轮主循环硬跳过（防止旧pyc缓存/冷却bug导致启动即触发）
+                if AGENT_ENABLED and AGENT_DIVE_ENABLED and _loop_count > 3:
+                    agent_dive_elapsed = (datetime.now() - self.last_agent_run_at).total_seconds() / 60
+                    # [FIX] 必须至少看过3个视频+冷却到期+精力够+25%随机
+                    if (self.videos_processed >= 3 and agent_dive_elapsed >= max(AGENT_COOLDOWN_MINUTES, 5)
+                            and self.energy >= 15 and random.random() < 0.25):
+                        # 优先用刚看过的感兴趣视频主题，没有则从兴趣/知识库选
+                        dive_topic = await self._pick_agent_dive_topic()
+                        if dive_topic:
+                            log(f"🤖 Agent深度搜索启动！主题: '{dive_topic[:50]}'", "CONFIG")
+                            self.last_agent_run_at = datetime.now()  # [FIX] 立即记录，防止重复触发
+                            self.energy -= 8  # [FIX] 先扣精力，防止异步并发超扣
+                            # [FIX] 异步非阻塞：不卡主循环，后台默默搜索看视频
+                            async def _dive_async(topic=dive_topic):
+                                try:
+                                    run = await self.agent_runner.run_goal(topic)
+                                    ok_steps = sum(1 for item in run.get("results", []) if item.get("result", {}).get("ok"))
+                                    watched_count = 0
+                                    for item in run.get("results", []):
+                                        if item.get("step", {}).get("skill") == "watch_bilibili_videos":
+                                            watched_count = item.get("result", {}).get("count", 0)
+                                    log(f"🤖 Agent深度搜索完成: {ok_steps}/{len(run.get('results', []))}步骤, 看了{watched_count}个视频", "SUCCESS")
+                                except Exception as e:
+                                    log(f"🤖 Agent深度搜索异常: {e}", "WARN")
+                            task = asyncio.create_task(_dive_async())
+                            task.add_done_callback(_safe_task_callback("agent_dive_async"))
+
+                # ── 📂 [KB] 自动重分类"未分类"文件夹 ──
+                if AUTO_RECLASSIFY_ENABLED and _loop_count > 5:
+                    reclass_elapsed = (datetime.now() - getattr(self, '_last_reclassify_at', datetime.min)).total_seconds() / 60
+                    if reclass_elapsed >= AUTO_RECLASSIFY_INTERVAL_MINUTES and random.random() < 0.5:
+                        try:
+                            ok, fail = self.classifier.reclassify_uncategorized(max_per_run=3)
+                            if ok > 0 or fail > 0:
+                                self._last_reclassify_at = datetime.now()
+                                # 清理空文件夹
+                                cleaned = self.classifier.cleanup_empty_folders()
+                                if cleaned > 0:
+                                    log(f"[KB] 已清理 {cleaned} 个空文件夹", "KB")
+                        except Exception as e:
+                            log(f"[KB] 自动重分类异常: {e}", "ERROR")
+
+                # ── [SPEED] 并行：回顾复习 + 主动聊天，互不依赖 ──
+                revisit_target = None
+
+                async def _do_revisit():
+                    if not REVISIT_ENABLED or not self.history_videos.get("videos"):
+                        return None
+                    revisit_cooldown_ok = (datetime.now() - self.last_revisit_at).total_seconds() / 60 >= REVISIT_COOLDOWN_MINUTES
+                    if not revisit_cooldown_ok or random.random() >= PROB_REVISIT:
+                        return None
+                    candidate = self.get_revisit_candidate()
+                    if not candidate:
+                        return None
+                    try:
+                        log(f"📖 学而时习之：回顾复习《{candidate.get('title','')[:30]}》({candidate.get('action')}) ...", "REVISIT")
+                        await _bili_throttle("回顾复习-get_info")
+                        v = Video(bvid=candidate.get("bvid"), credential=self.credential)
+                        vid_info = await v.get_info()
+                        if vid_info:
+                            target = {
+                                "bvid": candidate["bvid"],
+                                "title": vid_info.get("title", candidate.get("title", "")),
+                                "owner": vid_info.get("owner", {}),
+                                "id": vid_info.get("aid") or candidate.get("aid"),
+                                "pic": vid_info.get("pic", ""),
+                                "aid": vid_info.get("aid") or candidate.get("aid"),
+                                "_is_revisit": True,
+                                "_original_action": candidate.get("action", "")
+                            }
+                            self.last_revisit_at = datetime.now()
+                            self.mark_revisited(candidate["bvid"])
+                            log(f"回顾复习锁定: 《{target['title']}》", "REVISIT")
+                            return target
+                        else:
+                            log(f"获取复习视频信息失败，跳过", "WARN")
+                    except Exception as e:
+                        log(f"回顾复习异常: {e}", "WARN")
+                    return None
+
+                async def _do_chat():
+                    try:
+                        await self.maybe_initiate_chat()
+                    except Exception as e:
+                        log(f"主动聊天模块异常(主循环): {e}", "ERROR")
+
+                revisit_target, _ = await asyncio.gather(_do_revisit(), _do_chat(), return_exceptions=True)
+                if isinstance(revisit_target, Exception):
+                    revisit_target = None
+
+                if revisit_target:
+                    # 使用复习视频代替推荐流
+                    target = revisit_target
+                    self.videos_processed += 1
+                    bvid = target['bvid']
+                    title = target.get('title', '无标题')
+                    up = target.get('owner', {}).get('name', '未知')
+                    up_uid = target.get('owner', {}).get('mid', 0)
+                    aid = target.get('id') or target.get('aid')
+                    pic_url = target.get('pic', '')
+                    video_url = f"https://www.bilibili.com/video/{bvid}"
+                    log(f"📖 复习目标:《{title}》- @{up}", "REVISIT")
+                    # 🔍 知识验证：回顾时联网核实知识的真实性和时效性（带异常回调）
+                    task = asyncio.create_task(self.verify_knowledge_file(bvid, title))
+                    task.add_done_callback(_safe_task_callback("verify_knowledge_file"))
+                    # 顺便浏览该UP的视频（副作用：记录到浏览历史）
+                    await self.maybe_browse_up_videos(force_up_uid=up_uid if up_uid else None, up_name_hint=up)
+                else:
+                    # ── [*] 优先浏览喜欢/已知UP主的新视频 ──
+                    up_browse_target = await self.maybe_browse_up_videos()
+                    if up_browse_target and up_browse_target.get("bvid"):
+                        target = up_browse_target
+                        self.videos_processed += 1
+                        bvid = target['bvid']
+                        title = target.get('title', '无标题')
+                        up = target.get('owner', {}).get('name', '未知')
+                        up_uid = target.get('owner', {}).get('mid', 0)
+                        aid = target.get('id') or target.get('aid')
+                        pic_url = target.get('pic', '')
+                        video_url = f"https://www.bilibili.com/video/{bvid}"
+                        source_tag = "[STAR]喜爱UP" if target.get("_is_favorite_up") else "📺已关注UP"
+                        log(f"{source_tag} 新视频:《{title}》- @{up}", "BROWSE")
+                    else:
+                        # [PSYCHO] 主动推荐：每N轮触发一次AI驱动的惊喜/探索/反茧房推荐
+                        rec_target = None
+                        if (self.recommend_engine 
+                            and self._psycho_profile_analysis_count > PSYCHO_MIN_VIEWS_BEFORE_RECOMMEND 
+                            and random.random() < PSYCHO_RECOMMEND_PROB):
+                            rec_modes = ["surprise", "explore", "anticocoon", "trend"]
+                            # 轮换模式，避免重复
+                            if self._last_recommend_mode:
+                                try:
+                                    idx = rec_modes.index(self._last_recommend_mode)
+                                    rec_modes = rec_modes[idx+1:] + rec_modes[:idx+1]
+                                except ValueError as e:
+                                    log(f'值错误: {e}', 'DEBUG')
+                            for mode in rec_modes[:2]:  # 尝试2种模式
+                                try:
+                                    queries = await self.recommend_engine.generate_search_queries(mode=mode, count=2)
+                                    if queries:
+                                        log(f"{get_mode_emoji(mode)} {get_mode_label(mode)}: 搜索「{queries[0]}」...", "RECOMMEND")
+                                        results = await self.bili.search_bilibili(queries[0])
+                                        if results:
+                                            # 过滤已看过的
+                                            fresh = [r for r in results if r.get("bvid") not in self.recommend_engine._seen_bvids]
+                                            if fresh:
+                                                chosen = random.choice(fresh[:5])
+                                                chosen["_rec_mode"] = mode
+                                                chosen["_rec_query"] = queries[0]
+                                                rec_target = chosen
+                                                self._last_recommend_mode = mode
+                                                self.recommend_engine._seen_bvids.add(chosen.get("bvid"))
+                                                # 生成推荐理由
+                                                chosen["_rec_reason"] = self.recommend_engine.explain_recommendation(
+                                                    {"title": chosen.get("title",""), "tags": chosen.get("tag","").split(",") if chosen.get("tag") else [],
+                                                     "up_name": chosen.get("author",""), "up_uid": chosen.get("mid",""),
+                                                     "category": chosen.get("typename",""), "bvid": chosen.get("bvid","")},
+                                                    mode
+                                                )
+                                                log(f"  → 推荐理由: {chosen['_rec_reason'][:80]}...", "RECOMMEND")
+                                                break
+                                except Exception as e:
+                                    log(f"推荐生成失败({mode}): {e}", "WARN")
+                        
+                        if rec_target and rec_target.get("bvid"):
+                            target = rec_target
+                            if not isinstance(target, dict):
+                                continue
+                            self.videos_processed += 1
+                            bvid = target.get('bvid', '')
+                            if not bvid:
+                                continue
+                            title = target.get('title', '无标题')
+                            owner = target.get('owner')
+                            if isinstance(owner, dict):
+                                up = target.get('author') or owner.get('name', '未知')
+                                up_uid = target.get('mid') or owner.get('mid', 0)
+                            else:
+                                up = target.get('author', '未知')
+                                up_uid = target.get('mid', 0)
+                            aid = target.get('aid') or target.get('id', 0)
+                            pic_url = target.get('pic', '')
+                            video_url = f"https://www.bilibili.com/video/{bvid}"
+                            log(f"{get_mode_emoji(target.get('_rec_mode','surprise'))} 主动推荐:《{title}》- @{up}", "RECOMMEND")
+                            if target.get("_rec_reason"):
+                                log(f"  [IDEA] 为什么推荐: {target['_rec_reason'][:120]}", "RECOMMEND")
+                            # 追踪推荐点击
+                            self.psycho_profile.tracker.record("recommend_click", 
+                                bvid=bvid, title=title, mode=target.get("_rec_mode",""))
+                        else:
+                            log("正在刷新推荐流...", "SCAN")
+                            items = await self._get_cached_recommendations()
+                            if not items or not isinstance(items, list):
+                                await asyncio.sleep(3)
+                                continue
+
+                            target = random.choice(items)
+                            if not isinstance(target, dict):
+                                log(f"推荐流返回异常元素类型: {type(target).__name__}", "WARN")
+                                continue
+                            self.videos_processed += 1
+                            bvid = target.get('bvid', '')
+                            if not bvid:
+                                log("推荐流元素缺少bvid，跳过", "WARN")
+                                continue
+                            title = target.get('title', '无标题')
+                            owner = target.get('owner')
+                            if isinstance(owner, dict):
+                                up = owner.get('name', '未知')
+                                up_uid = owner.get('mid', 0)
+                            else:
+                                up = '未知'
+                                up_uid = 0
+                            aid = target.get('id') or target.get('aid')
+                            pic_url = target.get('pic', '')
+                            video_url = f"https://www.bilibili.com/video/{bvid}"
+
+                            log(f"锁定目标:《{title}》- @{up}", "SCAN")
+
+                # [SPEED] 锁定后立即后台预取推荐流 + 短暂休息并行
+                prefetch_task = asyncio.create_task(self._prefetch_recommendations())
+                prefetch_task.add_done_callback(_safe_task_callback("prefetch_recs"))
+                await asyncio.sleep(random.uniform(0.3, 0.8))
+
+                # 提取标签、时长、分类（供心理画像引擎/避雷系统使用）
+                tags = []
+                raw_tag = target.get('tag', '')
+                if isinstance(raw_tag, str) and raw_tag:
+                    tags = [t.strip() for t in raw_tag.split(',') if t.strip()]
+                elif isinstance(raw_tag, list):
+                    tags = raw_tag
+                duration = target.get('duration', 0)
+                if isinstance(duration, str) and ':' in duration:
+                    try:
+                        parts = duration.split(':')
+                        duration = int(parts[0]) * 60 + int(parts[1])
+                    except Exception:
+                        duration = 0
+                elif isinstance(duration, str):
+                    try:
+                        duration = int(duration)
+                    except Exception:
+                        duration = 0
+                category = target.get('typename') or target.get('tname') or ''
+
+                # [ASR] 缓存视频元数据供 ASR AI预判使用
+                self._current_video_tags = tags
+                self._current_video_category = category
+                self._current_video_duration = duration
+
+                # ── 视频过滤模式 ──
+                if VIDEO_FILTER_MODE == "watch_all":
+                    vis_desc, vis_score = "全量模式，跳过封面分析", 0
+                    log(f"[FAST] 全量模式：不看封面标题，直接看视频", "MODE")
+                    interested = True
+                    matched_interests = []
+                    interest_reason = "全量模式(所有视频都看)"
+                else:
+                    # cover_and_title 模式：封面分析 + AI兴趣判断
+                    vis_desc, vis_score = await self.analyze_vision(pic_url)
+                    log(f"封面速览: {vis_desc} [印象分:{vis_score}]", "EYE")
+                    # [ASR] 缓存封面描述供 ASR AI预判
+                    self._current_video_cover_desc = vis_desc
+                    # [DEF] 避雷系统检查
+                    if self.psycho_profile:
+                        aversion_score, aversion_reasons = self.psycho_profile.aversion.get_aversion_score(
+                            title=title, tags=tags, up_uid=up_uid
+                        )
+                        if aversion_score >= PSYCHO_AVERSION_BLOCK_SCORE:
+                            log(f"[DEF] 避雷拦截: {title[:30]}... | 反感度{aversion_score:.1%} | {'; '.join(aversion_reasons)}", "AVERSION")
+                            self.psycho_profile.tracker.record_skip(bvid, title, reason=f"避雷: {'; '.join(aversion_reasons)}")
+                            continue
+                        elif aversion_score >= PSYCHO_AVERSION_WARN_SCORE:
+                            log(f"[DEF] 避雷提示: {title[:30]}... | 反感度{aversion_score:.1%} | {'; '.join(aversion_reasons)} (仍继续判断)", "AVERSION")
+                    
+                    interested, matched_interests, interest_reason = await self.judge_interest_with_ai(title, up, vis_desc, vis_score)
+                    if not interested:
+                        log(f"视频《{title}》与兴趣不匹配，跳过 | {interest_reason}", "INTEREST")
+                        await self.watch_and_sync_history(bvid)
+                        continue
+                    # 补充关键词匹配结果到展示列表中（确保所有命中兴趣都显示）
+                    kw_matched = self.interest_mgr.get_matching_interests(title, up)
+                    all_matched = list(dict.fromkeys((matched_interests or []) + kw_matched))  # 去重合并
+                    if all_matched:
+                        log(f"视频《{title}》匹配兴趣: {', '.join(all_matched)} | {interest_reason}", "INTEREST")
+                        # [FIX] 记住这个感兴趣的视频上下文，供Agent深度搜索使用
+                        self._last_interesting_topic = f"深入了解「{title[:40]}」（匹配: {', '.join(all_matched[:3])}）"
+                    else:
+                        log(f"视频《{title}》通过兴趣判断 | {interest_reason}", "INTEREST")
+
+                subtitle_text = "[未读取字幕]"
+                comment_text = "[未读取评论]"
+                danmaku_text = ""
+                c_list = []
+
+                # [SPEED] 并行读取字幕+评论+弹幕，减少串行等待
+                async def _read_subtitles_task():
+                    nonlocal subtitle_text
+                    mode_label = normalize_mode(VIDEO_UNDERSTANDING_MODE) if normalize_mode else VIDEO_UNDERSTANDING_MODE
+                    log(f"开始研究视频内容... 当前视频理解模式: {mode_label}", "BRAIN")
+                    success, result = await self.understand_video_for_decision(bvid, title=title)
+                    if success:
+                        subtitle_text = result
+                        log(f"视频理解GET: {subtitle_text[:80].strip()}...", "SUCCESS")
+                    else:
+                        subtitle_text = "[无可用字幕/语音内容]"
+                        log(f"视频理解遇到问题: {result}", "WARN")
+
+                async def _read_comments_task():
+                    nonlocal comment_text, c_list, danmaku_text
+                    log("看看大家都在说啥...", "BRAIN")
+                    comment_text, c_list = await self._get_comments_context(aid)
+                    # [MSG] 同时读取弹幕
+                    danmaku_list = await self.maybe_read_danmaku(bvid)
+                    danmaku_text = ""
+                    if danmaku_list:
+                        danmaku_text = f"【视频弹幕（共{len(danmaku_list)}条，随机采样）】:\n" + "\n".join(
+                            f"  {dm.get('text','')}" for dm in danmaku_list[:15]
+                        )
+                    if not c_list:
+                        log("评论区空空如也...", "COMMENT")
+                    else:
+                        preview_parts = []
+                        for i, c in enumerate(c_list[:5]):
+                            part = f"#{i+1}[{c['user']}]: {c['content'][:30]}"
+                            if c.get('pic_info'):
+                                # 截取图片描述的前15字作为标签
+                                pic_tag = c['pic_info'][:15] + "..." if len(c['pic_info']) > 15 else c['pic_info']
+                                part += f" [图:{pic_tag}]"
+                            preview_parts.append(part)
+                        preview = ", ".join(preview_parts)
+                        log(f"评论区速览({len(c_list)}条): {preview}", "COMMENT")
+
+                await asyncio.sleep(random.uniform(0.2, 0.5))
+                await asyncio.gather(_read_subtitles_task(), _read_comments_task())
+
+                log("信息整合，AI决策中...", "BRAIN")
+                sys_prompt = self.build_dynamic_brain_prompt(up)
+                # [FIX] 当视频理解失败时，提醒AI更多依赖评论区/弹幕/标题做判断
+                video_fallback_hint = ""
+                _st = str(subtitle_text)
+                if any(kw in _st for kw in ["【无字幕无人声】", "无可用字幕", "无可用字幕/语音", "[未读取"]):
+                    video_fallback_hint = "\n[WARN] 视频字幕/语音内容不可用，请主要根据评论区讨论、弹幕反应和标题来推断视频质量与价值。\n"
+                context = (f"视频标题: {title}\nUP主: {up}\n封面描述: {vis_desc}\n封面印象分: {vis_score}\n"
+                           f"{video_fallback_hint}"
+                           f"【📺 视频内容字幕】: {subtitle_text}\n"
+                           f"{comment_text}"
+                           f"{danmaku_text}")
+
+                try:
+                    resp = await self._call_ai_with_retry(
+                        model=MODEL_BRAIN,
+                        messages=[
+                            {"role": "system", "content": sys_prompt},
+                            {"role": "user", "content": context}
+                        ],
+                        request_timeout=60
+                    )
+                    raw = resp.choices[0].message.content
+                    # ── 提取JSON（模型可能返回前缀文本）──
+                    start = raw.find("{")
+                    end = raw.rfind("}")
+                    if start >= 0 and end >= start:
+                        json_str = raw[start:end + 1]
+                    else:
+                        raise ValueError(f"AI返回未找到JSON结构，原始内容: {raw[:200]}")
+                    # ── 修复模型偶尔用单引号/不规范JSON ──
+                    try:
+                        decision = json.loads(json_str)
+                    except json.JSONDecodeError:
+                        try:
+                            fixed = json_str.replace("'", '"')
+                            fixed = re.sub(r'\bTrue\b', 'true', fixed)
+                            fixed = re.sub(r'\bFalse\b', 'false', fixed)
+                            fixed = re.sub(r'\bNone\b', 'null', fixed)
+                            decision = json.loads(fixed)
+                        except (json.JSONDecodeError, Exception):
+                            # 二次修复仍失败，使用安全默认值
+                            decision = {"mode": "普通", "score": 5, "thought": "AI返回格式异常，使用默认决策", "comment_intent": False, "coin_intent": False, "like_intent": False, "collect_intent": False}
+                except Exception as e:
+                    log(f"AI决策模块异常(已重试): {_mask_urls(str(e)[:120])}", "ERROR")
+                    continue
+
+                mode = decision.get('mode', '普通')
+                thought = decision.get('thought', '...')
+                score = decision.get('score', 0)
+
+                log(f"[{mode}模式] AI想法: {thought}", "BRAIN")
+                log(f"AI最终评分: {score} / 10", "BRAIN")
+                self.user_profile_mgr.update_impression(f"up::{up}", up, thought)
+
+                # [*] 记录UP主印象 + 决定是否关注
+                if up_uid:
+                    self.record_up_impression(up, up_uid, score)
+                    await self.maybe_follow_up(up_uid, up, score)
+                
+                # [PSYCHO] 心理画像追踪：记录本次观看
+                if self.psycho_profile:
+                    self.psycho_profile.tracker.record_view(
+                        bvid=bvid, title=title, tags=tags or [],
+                        duration=duration, up_name=up, up_uid=up_uid,
+                        category=category or "", score=score,
+                        interested=(score >= INTEREST_THRESHOLD)
+                    )
+                    self.psycho_profile.update_surface_interest(
+                        title=title, tags=tags, category=category or "",
+                        duration=duration, up_uid=up_uid, up_name=up,
+                        score=score
+                    )
+                    # 触发茧房检测 + 启发式L2更新
+                    self._psycho_profile_analysis_count += 1
+                    if self._psycho_profile_analysis_count % PSYCHO_HEURISTIC_UPDATE_INTERVAL == 0:
+                        self.psycho_profile.heuristic_update_l2()
+                        metrics = self.psycho_profile.update_cocoon_metrics()
+                        if metrics.get("diversity_score", 1.0) < PSYCHO_COCOON_WARNING_THRESHOLD:
+                            log(f"[STATS] 内容多样性提醒: {metrics.get('cocoon_risk')} | 多样性={metrics.get('diversity_score')} | 稀少领域={metrics.get('underrepresented_areas', [])}", "WARN")
+                    # 触发深度AI分析
+                    if self._psycho_profile_analysis_count % PSYCHO_DEEP_ANALYZE_INTERVAL == 0:
+                        task = asyncio.create_task(self.psycho_profile.deep_analyze())
+                        task.add_done_callback(_safe_task_callback("deep_analyze"))
+                        self.psycho_profile.detect_interest_shifts()
+
+                self.energy -= 1
+
+                # 🎯 学习归档：只归档高质量内容，低分/短时长/浅内容一律跳过
+                learning_topic = decision.get("learning_topic")
+                learn_success = False
+                learn_text = subtitle_text
+                if not learn_text or "[未读取字幕]" in str(learn_text) or "[该视频无有效CC字幕]" in str(learn_text):
+                    learn_text = ""
+                    if title: learn_text += f"【视频标题】{title}\n"
+                    if up: learn_text += f"【UP主】{up}\n"
+                    if thought: learn_text += f"【AI判断】{thought}\n"
+                    if danmaku_text: learn_text += f"【弹幕】{danmaku_text}\n"
+                    if comment_text and comment_text != "[未读取评论]": learn_text += f"【评论】{comment_text}\n"
+                    learn_text = learn_text.strip()
+                
+                # 🔒 三层质量门槛：分数 + 时长 + 内容长度
+                skip_reason = None
+                if score < LEARN_MIN_SCORE:
+                    skip_reason = f"分数过低({score:.1f}<{LEARN_MIN_SCORE})"
+                elif duration > 0 and duration < LEARN_MIN_DURATION_SECONDS:
+                    skip_reason = f"视频太短({duration}s<{LEARN_MIN_DURATION_SECONDS}s)"
+                elif not learn_text or len(learn_text) < 150:
+                    skip_reason = f"可学内容不足({len(learn_text) if learn_text else 0}字<150)"
+                
+                if skip_reason:
+                    log(f"📭 跳过学习归档: {skip_reason} | 《{title}》", "LEARN")
+                elif learning_topic and learn_text and len(learn_text) > 20:
+                    try:
+                        _desc = getattr(self, "_last_video_desc", "")
+                        learn_success = await self.learn_from_video(bvid, title, up, video_url, learn_text, learning_topic, video_desc=_desc, score=score)
+                        if learn_success:
+                            self.mood_mgr.shift("学到有价值内容", 2)
+                            if score >= INTEREST_THRESHOLD:
+                                self.energy -= 2
+                                log(f"学习归档消耗2点精力，当前剩余精力: {self.energy}%", "INFO")
+                    except Exception as learn_e:
+                        log(f"学习归档异常: {learn_e}", "WARN")
+
+                # ★ 评论区知识收集：从讨论中提取有价值的信息
+                if c_list and len(c_list) >= 3 and (comment_text and comment_text != "[未读取评论]"):
+                    try:
+                        comment_learn_success = await self.learn_from_comments(
+                            bvid, title, up, video_url, comment_text, c_list,
+                            topic_suggestion=learning_topic or (decision.get("learning_topic") or "评论知识")
+                        )
+                        if comment_learn_success:
+                            log("评论区知识收集消耗1点精力", "INFO")
+                            self.energy -= 1
+                    except Exception as clearn_e:
+                        log(f"评论区知识收集异常: {clearn_e}", "WARN")
+
+                if score < INTEREST_THRESHOLD:
+                    self.mood_mgr.shift("刷到低分视频", -1)
+                    log(f"分数({score})过低，不感兴趣，划走~ (消耗1点精力, 剩余: {self.energy}%)", "INFO")
+                    # [PSYCHO] 心理画像：记录跳过 + 避雷学习
+                    if self.psycho_profile:
+                        self.psycho_profile.tracker.record_skip(bvid, title, reason=f"低于兴趣阈值(score={score})")
+                        self.psycho_profile.aversion.report_aversion(
+                            bvid=bvid, title=title, reason=f"低分({score})",
+                            tags=tags, up_uid=up_uid, up_name=up
+                        )
+                    self.record_session_event(
+                        "video_skipped",
+                        title=title,
+                        up=up,
+                        score=score,
+                        thought=thought,
+                        reason="低于兴趣阈值",
+                        url=video_url
+                    )
+                    await self.maybe_auto_diary()
+                    await self.maybe_self_evolve()
+                    await self.watch_and_sync_history(bvid)
+                    continue
+
+                action_log = []
+                v = Video(bvid=bvid, credential=self.credential)
+
+                # 随机检定：RANDOM_ENABLED=False 时全部通过（只看分数阈值），True 时进行概率检定
+                coin_check = random.random() < PROB_COIN if RANDOM_ENABLED else True
+                fav_check = random.random() < PROB_FAV if RANDOM_ENABLED else True
+                reply_check = random.random() < PROB_REPLY_TRIGGER if RANDOM_ENABLED else True
+                like_solo_check = random.random() < PROB_LIKE_SOLO if RANDOM_ENABLED else True
+
+                ai_wants_coin = decision.get('coin_intention', False)
+                ai_wants_fav = decision.get('fav_intention', False)
+                ai_wants_reply = bool(decision.get('replies', []))
+                video_comment_allowed, video_comment_reason, video_comment_hits = ReplySafetyGuard().review_video_for_comment(
+                    title=title,
+                    up=up,
+                    subtitle=subtitle_text,
+                    comments=json.dumps(c_list[:5], ensure_ascii=False)
+                )
+                if not video_comment_allowed:
+                    if ai_wants_reply:
+                        log(f"视频命中涉政/敏感内容，强制清空评论意图: {video_comment_reason} | 命中: {', '.join(video_comment_hits)}", "WARN")
+                    decision["replies"] = []
+                    ai_wants_reply = False
+
+                do_coin = ai_wants_coin and score >= COIN_THRESHOLD and self.coins_spent < MAX_COINS_DAILY and coin_check
+                do_fav = ai_wants_fav and score >= FAV_THRESHOLD and fav_check
+                do_replies = decision.get('replies', []) if (ai_wants_reply and reply_check) else []
+                do_like_trigger = do_fav or do_coin or bool(do_replies) or (score >= 6.5 and like_solo_check)
+
+                if RANDOM_ENABLED:
+                    log(f"🎲 投币 | 意图:{'✓' if ai_wants_coin else '✗'} 分数:{'✓' if score >= COIN_THRESHOLD else '✗'} 限额:{'✓' if self.coins_spent < MAX_COINS_DAILY else '✗'} 检定({int(PROB_COIN*100)}%):{'✓' if coin_check else '✗'} => {'执行' if do_coin else '跳过'}", "DIAG")
+                    log(f"🎲 收藏 | 意图:{'✓' if ai_wants_fav else '✗'} 分数:{'✓' if score >= FAV_THRESHOLD else '✗'} 检定({int(PROB_FAV*100)}%):{'✓' if fav_check else '✗'} => {'执行' if do_fav else '跳过'}", "DIAG")
+                    log(f"🎲 评论 | 意图:{'✓' if ai_wants_reply else '✗'} 检定({int(PROB_REPLY_TRIGGER*100)}%):{'✓' if reply_check else '✗'} => {'执行' if bool(do_replies) else '跳过'}", "DIAG")
+                    log(f"🎲 点赞 | 收藏:{'✓' if do_fav else '✗'} 投币:{'✓' if do_coin else '✗'} 评论:{'✓' if bool(do_replies) else '✗'} 单独(分数/检定):{'✓' if score >= 6.5 else '✗'}/{'✓' if like_solo_check else '✗'} => {'执行' if do_like_trigger else '跳过'}", "DIAG")
+                else:
+                    log(f"🔒 投币 | 意图:{'✓' if ai_wants_coin else '✗'} 分数:{'✓' if score >= COIN_THRESHOLD else '✗'} 限额:{'✓' if self.coins_spent < MAX_COINS_DAILY else '✗'} => {'执行' if do_coin else '跳过'}", "DIAG")
+                    log(f"🔒 收藏 | 意图:{'✓' if ai_wants_fav else '✗'} 分数:{'✓' if score >= FAV_THRESHOLD else '✗'} => {'执行' if do_fav else '跳过'}", "DIAG")
+                    log(f"🔒 评论 | 意图:{'✓' if ai_wants_reply else '✗'} => {'执行' if bool(do_replies) else '跳过'}", "DIAG")
+                    log(f"🔒 点赞 | 收藏:{'✓' if do_fav else '✗'} 投币:{'✓' if do_coin else '✗'} 评论:{'✓' if bool(do_replies) else '✗'} 单独(分数):{'✓' if score >= 6.5 else '✗'} => {'执行' if do_like_trigger else '跳过'}", "DIAG")
+
+                # [FIX] 学习归档已提前执行（在分数门槛之前，所有视频都学）
+                if learn_success:
+                    action_log.append("学习归档")
+                    # 异步非阻塞：后台Agent继续探索
+                    self.last_agent_run_at = datetime.now()
+                    goal1 = f"继续了解这个主题：{learning_topic}。搜索相关视频，先看1-3个，如果内容有价值再继续多看。"
+                    task = asyncio.create_task(self._agent_goal_async(goal1, score=score))
+                    task.add_done_callback(_safe_task_callback("agent_goal1"))
+
+                # 🧭 好奇心驱动深度搜索：遇到感兴趣/不了解的内容，B站搜索深入学（动态2-10个视频）
+                if CURIOSITY_DEEP_DIVE_ENABLED and score >= CURIOSITY_DEEP_DIVE_MIN_SCORE:
+                    dive_cooldown_ok = (datetime.now() - self._last_curiosity_dive_at).total_seconds() / 60 >= CURIOSITY_DEEP_DIVE_COOLDOWN_MINUTES
+                    today_str = datetime.now().strftime("%Y%m%d")
+                    if self._curiosity_dive_date != today_str:
+                        self._curiosity_dive_count_today = 0
+                        self._curiosity_dive_date = today_str
+                    
+                    # 触发条件：高分视频AND(有学习主题OR AI表示想深入了解OR随机触发)
+                    dive_trigger = (learning_topic or
+                                   any(w in (thought + title).lower() for w in ["想了解", "深入", "探索", "好奇", "不懂", "学习", "研究"]) or
+                                   random.random() < CURIOSITY_DEEP_DIVE_PROB)
+                    
+                    if dive_trigger and dive_cooldown_ok and self._curiosity_dive_count_today < 3 and self.energy >= 10:
+                        dive_topic = learning_topic or title[:20]
+                        log(f"🧭 触发好奇心深度搜索！主题: '{dive_topic}' (评分:{score})", "LEARN")
+                        self._last_curiosity_dive_at = datetime.now()
+                        self._curiosity_dive_count_today += 1
+                        self.energy -= 3
+                        await self.curiosity_deep_dive(dive_topic, trigger_title=title, trigger_bvid=bvid)
+
+                if score >= AGENT_AUTO_MIN_SCORE and any(word in title.lower() + " " + thought.lower() for word in ["模型", "ai", "gpt", "agent", "机器人", "开源", "教程", "工具", "开发"]):
+                    # [FIX] 异步非阻塞：后台探索，不卡主循环
+                    self.last_agent_run_at = datetime.now()
+                    goal2 = f"深入了解这个主题：{title}。搜索相关视频，先看1-3个，有价值再继续。"
+                    task = asyncio.create_task(self._agent_goal_async(goal2, score=score))
+                    task.add_done_callback(_safe_task_callback("agent_goal2"))
+
+                if decision.get('remember_up') and up not in self.memory['known_ups']:
+                    self.remember_up(up, uid=up_uid)
+
+                # [*] 自动喜欢UP主：高分视频且UP主有趣 → 标记为喜欢
+                if score >= 8.0 and up_uid and up and not self.is_favorite_up(up):
+                    fav_prob = 0.12 + (score - 8.0) * 0.08  # score=8→12%, score=10→28%
+                    if random.random() < fav_prob:
+                        self.favorite_up(up, uid=up_uid)
+                        action_log.append("[STAR]喜欢UP主")
+                        log(f"[STAR] 自动标记喜欢的UP主: @{up} (UID:{up_uid}) [评分:{score}, 概率:{fav_prob:.0%}]", "FAVORITE")
+
+                if do_like_trigger:
+                    try:
+                        await asyncio.sleep(random.uniform(2, 4))
+                        has_liked = await v.has_liked()
+                        if not has_liked:
+                            log("正在尝试点赞...", "ACT")
+                            aid = v.get_aid()
+                            await _bili_throttle()  # 🔒 全局节流
+                            await request("POST", "https://api.bilibili.com/x/web-interface/archive/like",
+                                data={"aid": aid, "bvid": bvid, "like": 1},
+                                credential=self.credential)
+                            log("点赞成功！", "SUCCESS")
+                            action_log.append("点赞")
+                            if self.psycho_profile:
+                                self.psycho_profile.tracker.record_interaction("like", bvid, title, up)
+                                self.psycho_profile.update_surface_interest(
+                                    title=title, tags=tags, up_uid=up_uid, up_name=up,
+                                    liked=True, score=score
+                                )
+                            self.user_profile_mgr.adjust_affinity(f"up::{up}", up, 1, "点赞视频")
+                            # 存入互动历史，供回顾复习（带评分）
+                            self.add_history_video(str(bvid), title, up, aid, "like", score)
+                        else:
+                            log("视频已经点过赞了。", "INFO")
+                    except Exception as e:
+                        log(f"点赞失败 (可能受限): {e}", "ERROR")
+
+                if do_fav:
+                    try:
+                        await asyncio.sleep(random.uniform(0.5, 1.5))
+                        has_favorited = await v.has_favoured()
+
+                        if not has_favorited:
+                            await _bili_throttle("收藏夹列表")  # 🔒 全局节流
+                            fav_list_data = await favorite_list.get_video_favorite_list(uid=self.credential.dedeuserid, credential=self.credential)
+                            if fav_list_data and fav_list_data.get('list'):
+                                default_folder_id = fav_list_data['list'][0]['id']
+                                log(f"正在尝试收藏到默认收藏夹...", "ACT")
+                                aid = v.get_aid()
+                                await _bili_throttle()  # 🔒 全局节流
+                                await request("POST", "https://api.bilibili.com/x/v3/fav/resource/deal",
+                                    data={"aid": aid, "bvid": bvid, "rid": aid, "type": 2,
+                                          "add_media_ids": str(default_folder_id)},
+                                    credential=self.credential)
+                                log("收藏成功！", "SUCCESS")
+                                action_log.append("收藏")
+                                if self.psycho_profile:
+                                    self.psycho_profile.tracker.record_interaction("favorite", bvid, title, up)
+                                    self.psycho_profile.update_surface_interest(
+                                        title=title, tags=tags, up_uid=up_uid, up_name=up,
+                                        favorited=True, score=score
+                                )
+                                self.user_profile_mgr.adjust_affinity(f"up::{up}", up, 2, "收藏视频")
+                                # 存入互动历史，供回顾复习（带评分）
+                                self.add_history_video(str(bvid), title, up, aid, "fav", score)
+                            else:
+                                log("未能获取到收藏夹列表，无法收藏。", "WARN")
+                        else:
+                            log("视频已在收藏夹中。", "INFO")
+                    except Exception as e:
+                        log(f"收藏失败: {e}", "ERROR")
+
+                if do_coin:
+                    try:
+                        await asyncio.sleep(random.uniform(2, 4))
+                        aid = v.get_aid()
+                        await _bili_throttle()  # 🔒 全局节流
+                        await request("POST", "https://api.bilibili.com/x/web-interface/coin/add",
+                            data={"aid": aid, "bvid": bvid, "multiply": 1, "select_like": 1},
+                            credential=self.credential)
+                        self.coins_spent += 1
+                        log(f"投币成功！今日已投 {self.coins_spent} 枚。", "COIN")
+                        action_log.append("投币")
+                        if self.psycho_profile:
+                            self.psycho_profile.tracker.record_interaction("coin", bvid, title, up)
+                            self.psycho_profile.update_surface_interest(
+                                title=title, tags=tags, up_uid=up_uid, up_name=up,
+                                coined=True, score=score
+                            )
+                        self.user_profile_mgr.adjust_affinity(f"up::{up}", up, 3, "投币支持")
+                    except Exception as e:
+                        log(f"投币失败: {e}", "ERROR")
+
+                # 回复他人评论的功能
+                if do_replies and PROB_COMMENT_OTHERS > 0:
+                    for reply in do_replies:
+                        try:
+                            target_id = reply.get('target_id', 0)
+                            reply_content = reply.get('content', '')
+                            
+                            if target_id and reply_content:
+                                target_comment = next((item for item in c_list if str(item.get("id")) == str(target_id)), {})
+                                incoming_text = target_comment.get("content", "")
+                                pacing_ok, pacing_reason = self.comment_mgr._should_reply_user(target_comment.get("user_id"), incoming_text) if self.comment_mgr else (True, "通过")
+                                if not pacing_ok:
+                                    log(f"视频评论节奏控制跳过 ID:{target_id}: {pacing_reason}", "COMMENT")
+                                    continue
+                                reply_content = ensure_ai_marker(reply_content)
+                                ok, reason, hits = ReplySafetyGuard().review(incoming_text, reply_content)
+                                if not ok:
+                                    log(f"已拦截视频评论回复 ID:{target_id}: {reason} | 命中: {', '.join(hits)}", "WARN")
+                                    if self.comment_mgr:
+                                        self.comment_mgr.log_blocked_reply(target_id, incoming_text, reply_content, reason, hits, target_comment.get("user", "视频评论"))
+                                    continue
+
+                                log(f"正在回复评论 ID:{target_id}: {reply_content[:50]}...", "COMMENT")
+                                await asyncio.sleep(human_reply_delay())
+                                if COMMENT_MODE == "simulate":
+                                    log(f"[模拟] 拟回复视频评论 ID:{target_id}: {reply_content[:50]}...", "SIMULATE")
+                                else:
+                                    await _bili_throttle()  # 🔒 全局节流
+                                    await comment.send_comment(
+                                        text=reply_content,
+                                        oid=aid,
+                                        type_=CommentResourceType.VIDEO,
+                                        root=target_id,
+                                        parent=target_id,
+                                        credential=self.credential
+                                    )
+                                    log("回复评论成功！", "SUCCESS")
+                                action_log.append(f"回复评论({target_id})")
+                                self.mood_mgr.shift("成功参与评论区互动", 1)
+                                
+                                # 记录评论日志
+                                if self.comment_mgr:
+                                    self.comment_mgr.log_interaction(target_id, "reply", reply_content, "视频评论")
+                                    self.comment_mgr._mark_user_replied(target_comment.get("user_id"))
+                                
+                                await asyncio.sleep(random.uniform(1, 3))
+                        except Exception as e:
+                            log(f"回复评论失败: {e}", "ERROR")
+
+                if action_log:
+                    self.energy -= 3
+                    self.mood_mgr.shift("主动互动完成", 1)
+                    log(f"深度交互额外消耗3点精力，当前剩余精力: {self.energy}%", "INFO")
+                    self.write_journal(title, up, score, f"[{mode}] {thought}", " + ".join(action_log), video_url)
+                else:
+                    self.mood_mgr.shift("观望未互动", -1)
+                    log("所有互动检定均未通过或无需操作，本次不进行额外操作。", "INFO")
+
+                self.record_session_event(
+                    "video_processed",
+                    title=title,
+                    up=up,
+                    score=score,
+                    mode=mode,
+                    thought=thought,
+                    actions=action_log,
+                    mood=self.mood_mgr.get_mood(),
+                    url=video_url
+                )
+                await self.maybe_auto_diary()
+                await self.maybe_self_evolve()
+
+                await self.watch_and_sync_history(bvid)
+
+                # 📚 知识库定期审查：每N个视频后随机抽查归档质量
+                if KNOWLEDGE_REVIEW_INTERVAL > 0:
+                    self._knowledge_review_countdown -= 1
+                    if self._knowledge_review_countdown <= 0:
+                        self._knowledge_review_countdown = KNOWLEDGE_REVIEW_INTERVAL
+                        try:
+                            await self._review_knowledge_periodically()
+                        except Exception as review_e:
+                            log(f"知识库定期审查异常: {review_e}", "WARN")
+
+            except asyncio.CancelledError:
+                log("主循环被取消 (CancelledError)，正常退出", "WARN")
+                raise  # 重新抛出，让 asyncio.run() 正确处理
+            except KeyboardInterrupt:
+                log("主循环收到中断信号，正常退出", "WARN")
+                raise
+            except Exception as e:
+                log(f"主循环发生严重错误: {e}", "ERROR")
+                import traceback
+                traceback.print_exc()
+                await asyncio.sleep(3)
+
+
+# ==============================================================================
+# [V] 手动视频分析 — 用户输入链接/标题/UP主名，AI客观解析
+# ==============================================================================
+def _extract_bvid(text: str):
+    """从文本中提取 BV 号。
+    支持: 完整URL、短链接、纯BV号
+    """
+    # 纯 BV 号
+    m = re.search(r'\b(BV[0-9A-Za-z]{10})\b', text)
+    if m:
+        return m.group(1)
+    # b23.tv 短链接
+    m = re.search(r'b23\.tv/([0-9A-Za-z]+)', text)
+    if m:
+        return m.group(1)
+    return None
+
+async def _resolve_b23_short(short_code: str) -> str:
+    """解析 b23.tv 短链接为完整 BV 号"""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            resp = await client.get(f"https://b23.tv/{short_code}",
+                                    headers={"User-Agent": "Mozilla/5.0"})
+            url = str(resp.url)
+            m = re.search(r'BV[0-9A-Za-z]{10}', url)
+            if m:
+                return m.group(0)
+    except Exception as e:
+        log(f'非预期异常: {e}', 'WARN')
+    return ""
+
+async def manual_video_analysis():
+    """手动视频分析：用户输入链接/标题/UP主名，AI客观解析视频内容。"""
+    print(f"\n{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}|               📹 手动视频分析 - 客观AI解析                    |{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
+    print(f"{Fore.YELLOW}[INFO] 支持: B站视频链接 | BV号 | 视频标题 | UP主名字{Style.RESET_ALL}")
+    print(f"{Fore.YELLOW}[INFO] 此模式下AI不带心情/人格滤镜，纯客观分析{Style.RESET_ALL}")
+
+    user_input = input(f"\n{Fore.CYAN}请输入视频链接/标题/UP主名字: {Style.RESET_ALL}").strip()
+    if not user_input:
+        print(f"{Fore.YELLOW}[WARN] 输入为空，已取消{Style.RESET_ALL}")
+        return
+
+    # ── 第一步：判断输入类型 ──
+    bvid = None
+    title = None
+    up_name = None
+    up_uid = None
+    from_search = False
+
+    raw_bvid = _extract_bvid(user_input)
+    if raw_bvid:
+        # 可能是 b23.tv 短链接
+        if 'b23.tv' in user_input.lower():
+            resolved = await _resolve_b23_short(raw_bvid)
+            if resolved:
+                bvid = resolved
+                log(f"短链接解析: b23.tv/{raw_bvid} -> {bvid}", "RESOLVE")
+            else:
+                print(f"{Fore.RED}[ERROR] 短链接解析失败，尝试直接搜索...{Style.RESET_ALL}")
+                from_search = True
+        else:
+            bvid = raw_bvid
+
+    if not bvid and not from_search:
+        from_search = True
+
+    # ── 提前创建 AgentBrain，加载凭证用于搜索 ──
+    brain = AgentBrain()
+    brain.bili._load_credential()
+    # [FIX] 同时加载 cookies，否则 fetch_bilibili_subtitles 无 cookie 无法获取AI字幕
+    cookie_loaded = False
+    if os.path.exists(COOKIE_FILE):
+        with open(COOKIE_FILE, 'r', encoding='utf-8') as f:
+            brain.cookies = json.load(f)
+        cookie_loaded = True
+    else:
+        # [AUTO] 尝试从 bilibili_claw 兄弟目录加载 cookie（用户可能只在一个项目登录过）
+        sibling_cookie = os.path.join(os.path.dirname(BASE_DIR), "bilibili_claw", "Data", "bilibili_cookies.json")
+        if os.path.exists(sibling_cookie):
+            try:
+                with open(sibling_cookie, 'r', encoding='utf-8') as f:
+                    brain.cookies = json.load(f)
+                log(f"[AUTO] 从 bilibili_claw 项目加载到登录Cookie (UID: {brain.cookies.get('DedeUserID','?')})", "LOGIN")
+                cookie_loaded = True
+            except Exception as e:
+                log(f'非预期异常: {e}', 'WARN')
+    if not cookie_loaded:
+        print(f"{Fore.YELLOW}[HINT] 未登录(Cookie文件不存在)，部分视频的AI字幕可能需要登录才能获取{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}       建议先运行菜单 3 录入登录Cookie，以获取完整AI字幕功能{Style.RESET_ALL}")
+
+    # ── 从搜索中选择视频 ──
+    if from_search:
+        print(f"\n{Fore.CYAN}正在B站搜索: {user_input}...{Style.RESET_ALL}")
+        results = await brain.bili.search_bilibili(user_input, limit=12)
+        if not results:
+            print(f"{Fore.RED}[ERROR] 未找到相关视频或UP主{Style.RESET_ALL}")
+            return
+
+        print(f"\n{Fore.GREEN}找到 {len(results)} 个相关结果，请选择:{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}{'─' * 80}{Style.RESET_ALL}")
+        for i, r in enumerate(results):
+            dur = r.get("duration", "??")
+            play = r.get("play", 0)
+            play_str = f"{play/10000:.1f}w" if play >= 10000 else str(play)
+            title_display = r['title'][:50]
+            author = r.get('author', '?')
+            print(f"  {Fore.YELLOW}{i+1:>2}.{Style.RESET_ALL} {title_display}")
+            print(f"      {Fore.LIGHTBLACK_EX}@{author}  |  ▶ {play_str}  |  ⏱ {dur}{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}{'─' * 80}{Style.RESET_ALL}")
+        print(f"  {Fore.YELLOW} 0.{Style.RESET_ALL} 取消")
+        print(f"  {Fore.CYAN}输入UP主名字可搜索TA的最新视频{Style.RESET_ALL}")
+
+        choice = input(f"\n{Fore.CYAN}请选择视频编号 (1-{len(results)}): {Style.RESET_ALL}").strip()
+
+        if choice == "0" or choice == "":
+            print(f"{Fore.YELLOW}[WARN] 已取消{Style.RESET_ALL}")
+            return
+
+        # 判断是数字选择还是UP主名
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < len(results):
+                chosen = results[idx]
+                bvid = chosen.get("bvid")
+                title = chosen.get("title", "")
+                up_name = chosen.get("author", "")
+                up_uid = chosen.get("mid")
+                print(f"{Fore.GREEN}[OK] 已选择: {title} - @{up_name}{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.RED}[ERROR] 无效选项{Style.RESET_ALL}")
+                return
+        except ValueError:
+            # 非数字 -> 搜索UP主，取TA最新视频
+            print(f"{Fore.CYAN}搜索UP主: {choice}...{Style.RESET_ALL}")
+            try:
+                data = await bili_search.search_by_type(
+                    choice,
+                    search_type=bili_search.SearchObjectType.USER,
+                    page=1
+                )
+                user_items = data.get("result") or []
+                if not user_items:
+                    print(f"{Fore.RED}[ERROR] 未找到UP主: {choice}{Style.RESET_ALL}")
+                    return
+                best = user_items[0]
+                up_uid = best.get("mid") or best.get("uid")
+                up_name = best.get("uname") or best.get("name") or choice
+                if up_uid:
+                    up_uid = int(up_uid)
+                    print(f"{Fore.GREEN}[OK] 找到UP主: {up_name} (UID: {up_uid}){Style.RESET_ALL}")
+                    print(f"{Fore.CYAN}获取 @{up_name} 的最新视频...{Style.RESET_ALL}")
+                    latest = await brain.bili.get_up_videos(up_uid, limit=1)
+                    if latest:
+                        bvid = latest[0].get("bvid")
+                        title = latest[0].get("title", "")
+                        if not up_name:
+                            up_name = choice
+                        print(f"{Fore.GREEN}[OK] 最新视频: {title}{Style.RESET_ALL}")
+                    else:
+                        print(f"{Fore.RED}[ERROR] 该UP主没有投稿视频{Style.RESET_ALL}")
+                        return
+                else:
+                    print(f"{Fore.RED}[ERROR] 无法获取UP主UID{Style.RESET_ALL}")
+                    return
+            except Exception as e:
+                print(f"{Fore.RED}[ERROR] 搜索UP主失败: {e}{Style.RESET_ALL}")
+                return
+
+    # ── 获取视频信息 ──
+    if not title or not up_name:
+        print(f"{Fore.CYAN}获取视频信息...{Style.RESET_ALL}")
+        try:
+            meta = await brain.bili._wbi_get(
+                'https://api.bilibili.com/x/web-interface/view',
+                params={'bvid': bvid}
+            )
+            vinfo = meta.json()
+            if vinfo.get('code') == 0:
+                vdata = vinfo['data']
+                title = title or vdata.get('title', '')
+                up_name = up_name or vdata.get('owner', {}).get('name', '未知')
+                up_uid = up_uid or vdata.get('owner', {}).get('mid', 0)
+            else:
+                print(f"{Fore.RED}[ERROR] 获取视频信息失败: code={vinfo.get('code')}{Style.RESET_ALL}")
+                return
+        except Exception as e:
+            print(f"{Fore.RED}[ERROR] 获取视频信息失败: {e}{Style.RESET_ALL}")
+            return
+
+    video_url = f"https://www.bilibili.com/video/{bvid}"
+    print(f"\n{Fore.GREEN}+------------------------------------------------------------+{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}|  视频: {title[:45]}{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}|  UP主: @{up_name}{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}|  链接: {video_url}{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}+------------------------------------------------------------+{Style.RESET_ALL}")
+
+    # ── 第二步：选择分析模式 ──
+    print(f"\n{Fore.CYAN}选择分析模式:{Style.RESET_ALL}")
+    print(f"  {Fore.GREEN}Enter (回车){Style.RESET_ALL} = 直接分析：输入一句话意图，自动看视频归档")
+    print(f"  {Fore.LIGHTMAGENTA_EX}A (Agent){Style.RESET_ALL}  = Agent对话：多轮对话确定目标、搜索知识库、增删改查文件")
+    mode_choice = input(f"\n{Fore.CYAN}模式 (回车=A-直接分析 / Agent对话): {Style.RESET_ALL}").strip().lower()
+
+    if mode_choice == "a":
+        # 提前获取 aid 供 Agent 使用
+        _aid = 0
+        try:
+            meta = await brain.bili._wbi_get(
+                'https://api.bilibili.com/x/web-interface/view',
+                params={'bvid': bvid}
+            )
+            vinfo = meta.json()
+            if vinfo.get('code') == 0:
+                _aid = vinfo.get('data', {}).get('aid', 0)
+        except Exception as e:
+            log(f'非预期异常: {e}', 'WARN')
+        await _agent_video_analysis(brain, bvid, title, up_name, video_url, _aid)
+        return
+
+    # ── 直接分析模式：用户意图输入 ──
+    intent = input(f"\n{Fore.CYAN}你的意图/要求 (如:帮我总结知识点/分析UP主风格/回车跳过): {Style.RESET_ALL}").strip()
+    if intent:
+        print(f"{Fore.GREEN}[OK] 意图: {intent}{Style.RESET_ALL}")
+    else:
+        print(f"{Fore.YELLOW}[INFO] 无额外意图，默认分析模式{Style.RESET_ALL}")
+
+    # ── 第三步：客观分析视频（覆盖心情为客观模式）──
+    original_custom = MOOD_CUSTOM_ENABLED
+    original_custom_value = MOOD_CUSTOM_VALUE
+    try:
+        globals()['MOOD_CUSTOM_ENABLED'] = True
+        globals()['MOOD_CUSTOM_VALUE'] = "客观冷静分析，专注内容质量，不带个人情绪"
+    except Exception as e:
+        log(f'非预期异常: {e}', 'WARN')
+
+    print(f"\n{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}|  [模式] 客观分析 - 开始解析视频内容                           |{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
+
+    # 1. 视频理解
+    print(f"\n{Fore.CYAN}[1/4] 理解视频内容 (字幕/ASR)...{Style.RESET_ALL}")
+    success, subtitle_text = await brain.understand_video_for_decision(bvid, title=title)
+    if success:
+        preview = subtitle_text[:200].replace('\n', ' ')
+        print(f"{Fore.GREEN}[OK] 视频内容获取成功: {preview}...{Style.RESET_ALL}")
+    else:
+        subtitle_text = f"[理解受限] {subtitle_text}"
+        print(f"{Fore.YELLOW}[WARN] 视频理解受限: {subtitle_text[:120]}{Style.RESET_ALL}")
+
+    # 2. 评论+弹幕
+    print(f"\n{Fore.CYAN}[2/4] 获取评论区讨论...{Style.RESET_ALL}")
+    try:
+        meta = await brain.bili._wbi_get(
+            'https://api.bilibili.com/x/web-interface/view',
+            params={'bvid': bvid}
+        )
+        vinfo = meta.json()
+        aid = vinfo.get('data', {}).get('aid', 0) if vinfo.get('code') == 0 else 0
+    except Exception:
+        aid = 0
+
+    comment_text = "[未读取评论]"
+    c_list = []
+    danmaku_text = ""
+    if aid:
+        try:
+            comment_text, c_list = await brain._get_comments_context(aid)
+            if c_list:
+                print(f"{Fore.GREEN}[OK] 获取到 {len(c_list)} 条评论{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.YELLOW}[WARN] 评论区无内容{Style.RESET_ALL}")
+        except Exception as e:
+            print(f"{Fore.YELLOW}[WARN] 评论获取失败: {e}{Style.RESET_ALL}")
+
+        try:
+            danmaku_list = await brain.maybe_read_danmaku(bvid)
+            if danmaku_list:
+                danmaku_text = f"【弹幕（共{len(danmaku_list)}条）】:\n" + "\n".join(
+                    f"  {dm.get('text','')}" for dm in danmaku_list[:15]
+                )
+                print(f"{Fore.GREEN}[OK] 获取到 {len(danmaku_list)} 条弹幕{Style.RESET_ALL}")
+        except Exception as e:
+            log(f'非预期异常: {e}', 'WARN')
+
+    # 3. AI决策分析（客观模式）
+    print(f"\n{Fore.CYAN}[3/4] AI客观决策分析中...{Style.RESET_ALL}")
+
+    # 构建不含心情/人格的客观prompt（手动分析模式：客观评价，不掷硬币）
+    objective_prompt = SYSTEM_PROMPT_BRAIN.replace("{bot_name}", get_bot_name()).replace("{memory_ups}", str(brain.get_known_up_names()))
+    # 覆盖随机性格：手动分析模式强制客观分析，不掷硬币
+    objective_prompt = objective_prompt.replace(
+        "【性格模式】掷硬币决定：- **夸夸模式**：真诚赞美。 - **吐槽模式**：犀利毒舌。",
+        "【性格模式】客观分析模式：基于内容质量公正评分，不随机切换夸夸/吐槽。评分标准：标题与内容匹配度、信息密度、观点深度、制作质量。"
+    )
+    if intent:
+        objective_prompt += f"\n\n【用户额外要求】{intent}"
+
+    context = (f"视频标题: {title}\nUP主: {up_name}\n"
+               f"【📺 视频内容字幕】: {subtitle_text}\n"
+               f"{comment_text}"
+               f"{danmaku_text}")
+
+    try:
+        resp = await brain._call_ai_with_retry(
+            model=MODEL_BRAIN,
+            messages=[
+                {"role": "system", "content": objective_prompt},
+                {"role": "user", "content": context}
+            ],
+            request_timeout=120
+        )
+        raw = resp.choices[0].message.content
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start >= 0 and end >= start:
+            json_str = raw[start:end + 1]
+        else:
+            raise ValueError(f"AI返回未找到JSON: {raw[:200]}")
+
+        try:
+            decision = json.loads(json_str)
+        except json.JSONDecodeError:
+            fixed = json_str.replace("'", '"')
+            fixed = re.sub(r'\bTrue\b', 'true', fixed)
+            fixed = re.sub(r'\bFalse\b', 'false', fixed)
+            fixed = re.sub(r'\bNone\b', 'null', fixed)
+            decision = json.loads(fixed)
+
+        score = decision.get('score', 0)
+        thought = decision.get('thought', '')
+        mode = decision.get('mode', '')
+        learning_topic = decision.get('learning_topic', '')
+
+        print(f"\n{Fore.CYAN}+------------------------------------------------------------+{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}|  [分析结果]                                                  |{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}+------------------------------------------------------------+{Style.RESET_ALL}")
+        print(f"  AI评分: {Fore.YELLOW}{score}/10{Style.RESET_ALL}")
+        print(f"  AI想法: {thought}")
+        if mode:
+            print(f"  模式: {mode}")
+        if learning_topic:
+            print(f"  主题: {learning_topic}")
+        print(f"{Fore.CYAN}+------------------------------------------------------------+{Style.RESET_ALL}")
+
+    except Exception as e:
+        print(f"{Fore.RED}[ERROR] AI决策失败: {_mask_urls(str(e)[:200])}{Style.RESET_ALL}")
+        score = 0
+        thought = ""
+        learning_topic = ""
+
+    # ── 恢复心情设置 ──
+    try:
+        globals()['MOOD_CUSTOM_ENABLED'] = original_custom
+        globals()['MOOD_CUSTOM_VALUE'] = original_custom_value
+    except Exception as e:
+        log(f'非预期异常: {e}', 'WARN')
+
+    # 4. 如果干货 → 学习归档
+    if score >= 6.0 or learning_topic:
+        print(f"\n{Fore.CYAN}[4/4] 检测到有价值内容，触发学习归档...{Style.RESET_ALL}")
+        learn_text = subtitle_text
+        if not learn_text or "[无可用字幕" in str(learn_text) or "[未读取" in str(learn_text):
+            learn_text = f"【视频标题】{title}\n【AI判断】{thought}\n"
+            if danmaku_text:
+                learn_text += f"{danmaku_text}\n"
+            if comment_text and comment_text != "[未读取评论]":
+                learn_text += f"{comment_text}\n"
+            learn_text = learn_text.strip()
+
+        if not learning_topic:
+            learning_topic = title[:15] if title else "手动分析"
+
+        if learn_text and len(learn_text) > 20:
+            try:
+                _desc = getattr(brain, "_last_video_desc", "")
+                learn_success = await brain.learn_from_video(bvid, title, up_name, video_url, learn_text, learning_topic, video_desc=_desc, score=score)
+                if learn_success:
+                    print(f"{Fore.GREEN}[OK] 知识已归档到知识库！{Style.RESET_ALL}")
+                else:
+                    print(f"{Fore.YELLOW}[INFO] 该知识可能已存在，跳过归档{Style.RESET_ALL}")
+            except Exception as e:
+                print(f"{Fore.RED}[ERROR] 学习归档失败: {e}{Style.RESET_ALL}")
+        else:
+            print(f"{Fore.YELLOW}[INFO] 可学习内容不足，跳过归档{Style.RESET_ALL}")
+    else:
+        print(f"\n{Fore.CYAN}[4/4] 评分 {score}/10 < 6.0，内容质量一般，跳过学习归档{Style.RESET_ALL}")
+
+    print(f"\n{Fore.GREEN}+============================================================+{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}|  手动视频分析完成！                                         |{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}+============================================================+{Style.RESET_ALL}")
+
+
+# ==============================================================================
+# [REVISIT] 知识库视频重温优化
+# ==============================================================================
+
+def _scan_knowledge_base_md_files():
+    """扫描 KnowledgeBase/ 下所有 .md 文件，提取 [BVxxx] 视频信息。
+    返回: [(bvid, title, file_path, up, category_path), ...]"""
+    results = []
+    if not os.path.exists(KNOWLEDGE_BASE_DIR):
+        return results
+
+    for root, dirs, files in os.walk(KNOWLEDGE_BASE_DIR):
+        dirs[:] = [d for d in dirs if not d.startswith('.')]
+        for fname in files:
+            if not fname.endswith('.md'):
+                continue
+            fpath = os.path.join(root, fname)
+            # 提取 BV 号: [BVxxx] - 标题.md
+            bv_match = re.match(r'^\[(BV[0-9A-Za-z]{10})\]\s*-\s*(.+)\.md$', fname)
+            if not bv_match:
+                continue
+            bvid = bv_match.group(1)
+            title = bv_match.group(2).strip()
+            rel_path = os.path.relpath(fpath, KNOWLEDGE_BASE_DIR)
+            # 尝试从文件头部读取 UP主 信息
+            up_name = ""
+            try:
+                with open(fpath, 'r', encoding='utf-8') as f:
+                    head = f.read(800)
+                    up_m = re.search(r'\*\*UP主\*\*:\s*(.+)', head)
+                    if up_m:
+                        up_name = up_m.group(1).strip()
+            except Exception as e:
+                log(f'非预期异常: {e}', 'WARN')
+            # 分类路径: 去掉文件名后的目录部分
+            category_path = os.path.dirname(rel_path).replace(os.sep, '/')
+            if not category_path or category_path == '.':
+                category_path = '未分类'
+            results.append((bvid, title, fpath, up_name, category_path))
+    # 按分类路径排序
+    results.sort(key=lambda x: (x[4], x[1]))
+    return results
+
+
+# Agent模式可用工具的常量定义
+AGENT_TOOLS_HELP = """你拥有以下工具能力，在回复中使用 [TOOL:工具名] 参数 的格式来调用。可以同时调用多个工具：
+
+1. [TOOL:fetch_subtitles]
+   获取视频的AI字幕/CC字幕文本（仅获取字幕，不做AI分析）。
+   **是视频内容分析的第一步，拿到字幕后才能判断后续操作。**
+
+2. [TOOL:search_knowledge] 搜索词
+   在知识库中搜索相关内容，返回匹配的文件路径和摘要
+   
+3. [TOOL:read_file] 相对路径
+   读取知识库中的指定文件内容，路径相对于 KnowledgeBase/ 目录
+   例: [TOOL:read_file] 科技/AI工具/video_creation/[BVxxx] - 标题.md
+
+4. [TOOL:list_files] 可选分类路径
+   列出知识库文件，不传参数=列出全部，传路径=列出子目录
+   例: [TOOL:list_files] 科技
+
+5. [TOOL:delete_file] 相对路径
+   删除知识库中的指定文件（需确认，会提示用户）
+
+6. [TOOL:update_file] 相对路径
+   ---新内容---
+   替换/更新知识库文件的全部内容（需确认）
+   例: [TOOL:update_file] 科技/AI工具/[BVxxx] - 标题.md
+   ---
+   新的完整Markdown内容...
+
+7. [TOOL:analyze_video]
+   触发完整的视频分析：封面+字幕/ASR/视觉帧+评论+弹幕 → AI决策 → 学习归档
+   **仅在已拿到字幕且确实需要深度分析时使用。**
+
+8. [TOOL:quick_preview]
+   只看标题/简介/评论/弹幕，不做完整视频分析，快速了解视频热度/反馈
+   **不获取视频字幕/内容！想分析内容先调用 fetch_subtitles。**
+
+9. [TOOL:open_file] 文件绝对路径
+   用系统默认程序打开任意文件（md→记事本/Typora, html→浏览器 等）
+   例: [TOOL:open_file] C:\\Users\\用户名\\Desktop\\视频总结.md
+   **仅在update_file写文件成功后使用。路径必须用双反斜杠 \\\\ 分隔。**
+
+[DONE] 完成任务后输出此标记结束对话
+
+工作流程：
+- 用户提到"字幕"/"内容"/"分析视频/总结"等 → 第一步必须先 [TOOL:fetch_subtitles]
+- 用户只要热度/评论反馈 → 可以用 [TOOL:quick_preview]
+- 拿到字幕后，按用户要求分析/总结/归档
+- 可一次调用多个工具以提高效率"""
+
+
+async def _agent_video_analysis(brain, bvid, title, up_name, video_url, aid=0):
+    """Agent对话模式：多轮对话确定目标、搜索知识库、增删改查文件、智能分析视频。
+    
+    工具:
+    - search_knowledge: 搜索知识库文件
+    - read_file: 读取指定 .md 文件
+    - list_files: 列出知识库文件
+    - update_file: 更新/替换知识库文件
+    - delete_file: 删除知识库文件
+    - analyze_video: 触发完整视频分析管道
+    - quick_preview: 只看标题/简介/评论/弹幕
+    """
+    print(f"\n{Fore.LIGHTMAGENTA_EX}+============================================================+{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTMAGENTA_EX}|  🤖 Agent对话模式 - 多轮对话 + 文件CRUD + 智能分析          |{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTMAGENTA_EX}+============================================================+{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}[Agent] 视频: {title[:50]}{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}[Agent] 输入你的要求，AI会提问/搜索知识库/增删改查文件/决定如何分析{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}[Agent] 命令: /help 帮助 | /exit 退出 | /files 列文件 | /done 直接分析{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTMAGENTA_EX}+------------------------------------------------------------+{Style.RESET_ALL}")
+
+    # 缓存已分析结果
+    analysis_cache = {
+        "analyzed": False,
+        "subtitle_text": "",
+        "comment_text": "",
+        "c_list": [],
+        "danmaku_text": "",
+        "score": 0,
+        "thought": "",
+        "learning_topic": "",
+    }
+
+    # 本次会话自动允许的工具集合（用户选了"一直允许"后加入）
+    auto_allow_tools = set()
+
+    # 对话历史
+    messages = [
+        {"role": "system", "content": f"""你是bilibili_learning_bot的Agent助手，负责帮用户分析B站视频并管理知识库。
+
+当前视频信息:
+- 标题: {title}
+- UP主: {up_name}
+- BV号: {bvid}
+- 链接: {video_url}
+
+{AGENT_TOOLS_HELP}
+
+重要规则:
+1. 用中文回复，简洁专业
+2. 先理解用户意图，可以反问缩小目标
+3. 善用搜索/读取知识库，对比已有知识
+4. 文件操作(update/delete)前要说明理由并等待用户确认
+5. 可以同时调用多个工具，尤其 fetch_subtitles+search_knowledge 可并行
+6. 任务完成或用户满意时输出 [DONE]
+
+工作流程（与"直接分析模式"一致）：
+- 用户要求分析视频/总结内容 → 第一步 [TOOL:fetch_subtitles] 获取字幕
+- 拿到字幕后 → 调用 [TOOL:analyze_video] 做完整评分分析（含评论弹幕+AI决策+归档）
+- 分析完成后 → 根据用户要求输出总结/写文件/打开文件
+- 用户如中途要调整方向（如只总结某部分/改输出格式），在上一步完成后提出来即可
+- 不要用 quick_preview 替代 fetch_subtitles（quick_preview 不看视频内容！）
+- 写文件后如果用户要求打开，用 [TOOL:open_file] 绝对路径 打开它
+
+自动连续模式（重要！）：
+- 用户一句话包含了"分析+总结+写桌面+打开"这种多步需求时，你在同一轮回复中依次列出所有 [TOOL:] 步骤
+- 例如用户说"帮我分析视频总结到桌面并打开" → 你回复:
+  好的，我来一步到位：
+  [TOOL:fetch_subtitles]
+  （系统会自动继续执行后续工具，你只需列出第一步）
+- 如果工具执行结果返回后任务未完成，系统会自动再次调用你继续，无需等待用户输入
+- 所有步骤完成后输出 [DONE] 结束"""},
+    ]
+
+    # ── Agent 确认函数：4选1（本次允许 / 一直允许 / 不允许 / AI审查） ──
+    async def _agent_confirm(tool_name: str, action_desc: str, detail: str = "") -> str:
+        """通用确认对话框，返回: 'allow' | 'always' | 'deny' | 'ai_review'
+        
+        - allow: 仅本次允许
+        - always: 一直允许（当前视频会话内该工具自动放行）
+        - deny: 拒绝本次操作
+        - ai_review: 让AI自动审查安全性后决定
+        """
+        # 如果该工具已被加入"一直允许"，直接放行
+        if tool_name in auto_allow_tools:
+            return "always"
+
+        print(f"\n{Fore.YELLOW}╔══════════════════════════════════════════════════════════╗{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}║  [Agent权限确认] {tool_name}{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}╠══════════════════════════════════════════════════════════╣{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}║  {action_desc}{Style.RESET_ALL}")
+        if detail:
+            # 截断过长细节
+            detail_short = detail[:200] + ("..." if len(detail) > 200 else "")
+            print(f"{Fore.CYAN}║  详情: {detail_short}{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}╠══════════════════════════════════════════════════════════╣{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}║{Style.RESET_ALL}  {Fore.GREEN}1.{Style.RESET_ALL} 本次允许    {Fore.LIGHTGREEN_EX}2.{Style.RESET_ALL} 一直允许(本视频)    {Fore.RED}3.{Style.RESET_ALL} 不允许")
+        print(f"{Fore.YELLOW}║{Style.RESET_ALL}  {Fore.CYAN}4.{Style.RESET_ALL} AI自动审查")
+        print(f"{Fore.YELLOW}╚══════════════════════════════════════════════════════════╝{Style.RESET_ALL}")
+
+        choice = input(f"{Fore.CYAN}[Agent] 选择 (1-4, 回车=1): {Style.RESET_ALL}").strip()
+
+        if choice == "2":
+            auto_allow_tools.add(tool_name)
+            print(f"{Fore.GREEN}[Agent] 已设置: 本视频会话内 {tool_name} 自动放行{Style.RESET_ALL}")
+            return "always"
+        elif choice == "3":
+            print(f"{Fore.RED}[Agent] 已拒绝本次操作{Style.RESET_ALL}")
+            return "deny"
+        elif choice == "4":
+            print(f"{Fore.CYAN}[Agent] 启动AI安全审查...{Style.RESET_ALL}")
+            return "ai_review"
+        else:
+            # 默认=本次允许（包括回车和输入1）
+            return "allow"
+
+    async def _agent_ai_review(tool_name: str, action_desc: str, detail: str = "") -> bool:
+        """AI自动审查：调用AI判断该操作是否安全合理"""
+        review_prompt = f"""你是安全审查助手。Agent要执行以下操作，请判断是否安全合理：
+
+工具: {tool_name}
+操作: {action_desc}
+详情: {detail[:500]}
+
+判断标准：
+- 删除/修改知识库文件是否合理（不会误删重要数据）
+- 操作范围是否在知识库目录内
+- 是否可能造成数据丢失
+
+只返回JSON: {{"safe": true/false, "reason": "简短理由(20字内)"}}"""
+
+        try:
+            resp = await brain._call_ai_with_retry(
+                model=MODEL_BRAIN,
+                messages=[{"role": "user", "content": review_prompt}],
+                request_timeout=30
+            )
+            raw = resp.choices[0].message.content
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if start >= 0 and end >= start:
+                decision = json.loads(raw[start:end+1])
+                safe = decision.get("safe", True)
+                reason = decision.get("reason", "无")
+                if safe:
+                    print(f"{Fore.GREEN}[Agent] AI审查通过: {reason}{Style.RESET_ALL}")
+                    return True
+                else:
+                    print(f"{Fore.RED}[Agent] AI审查不通过: {reason}{Style.RESET_ALL}")
+                    return False
+            else:
+                print(f"{Fore.YELLOW}[Agent] AI审查无法解析，默认放行{Style.RESET_ALL}")
+                return True
+        except Exception as e:
+            print(f"{Fore.YELLOW}[Agent] AI审查异常({e})，默认放行{Style.RESET_ALL}")
+            return True
+
+    def _agent_list_files(cat_path=""):
+        """列出知识库文件"""
+        all_files = _scan_knowledge_base_md_files()
+        if not all_files:
+            return "知识库为空，没有已学习的视频"
+        if cat_path:
+            filtered = [(b,t,f,u,c) for b,t,f,u,c in all_files if c.startswith(cat_path)]
+            if not filtered:
+                return f"分类 '{cat_path}' 下没有文件"
+            result = f"分类 '{cat_path}' 下的文件 ({len(filtered)}个):\n"
+            for b, t, f, u, c in filtered:
+                result += f"  [{b}] {t[:50]} | {c}\n"
+            return result.strip()
+        # 按分类统计
+        from collections import Counter
+        cats = Counter(c for _,_,_,_,c in all_files)
+        result = f"知识库共 {len(all_files)} 个文件:\n"
+        for cat, cnt in sorted(cats.items()):
+            result += f"  {cat}/ ({cnt}个)\n"
+        return result.strip()
+
+    def _agent_search_knowledge(query):
+        """搜索知识库（向量语义搜索 + 关键词匹配）"""
+        all_files = _scan_knowledge_base_md_files()
+        if not all_files:
+            return "知识库为空"
+
+        # 尝试向量搜索
+        vector_hits = set()
+        try:
+            if KBSearchEngine:
+                from xingye_bot.settings import load_settings as _ls
+                from xingye_bot.state import BotState as _bs
+                _s = _ls()
+                _engine = KBSearchEngine(ModelClient(_s, _bs()))
+                _vec_results = _engine.search(query, top_k=10)
+                if _vec_results:
+                    for vr in _vec_results:
+                        if vr.get("bvid"):
+                            vector_hits.add(vr["bvid"])
+        except Exception:
+            pass
+
+        q_lower = query.lower()
+        matches = []
+        for b, t, f, u, c in all_files:
+            score = 0
+            if vector_hits and b in vector_hits:
+                score += 10  # 向量命中最高权重
+            if q_lower in t.lower():
+                score += 3
+            for kw in q_lower.split():
+                if kw in t.lower():
+                    score += 2
+            if u and q_lower in u.lower():
+                score += 1
+            if score > 0:
+                preview = ""
+                try:
+                    with open(f, 'r', encoding='utf-8') as fh:
+                        preview = fh.read(200).replace('\n', ' ')
+                except Exception as e:
+                    log(f'非预期异常: {e}', 'WARN')
+                matches.append((score, b, t, f, u, c, preview))
+        matches.sort(key=lambda x: x[0], reverse=True)
+        if not matches:
+            return f"未找到与 '{query}' 相关的知识文件"
+        result = f"搜索 '{query}' 找到 {len(matches)} 个相关文件:\n"
+        for i, (s, b, t, f, u, c, p) in enumerate(matches[:10]):
+            result += f"  {i+1}. [{b}] {t[:45]} | {c} | 摘要: {p[:60]}...\n"
+        return result.strip()
+
+    def _agent_read_file(rel_path):
+        """读取知识库文件"""
+        full_path = os.path.join(KNOWLEDGE_BASE_DIR, rel_path)
+        if not os.path.exists(full_path):
+            # 尝试模糊匹配
+            all_files = _scan_knowledge_base_md_files()
+            best = None
+            for b, t, f, u, c in all_files:
+                if rel_path in f or rel_path in t:
+                    best = f
+                    break
+                if b in rel_path:
+                    best = f
+                    break
+            if best:
+                full_path = best
+                print(f"{Fore.CYAN}[Agent] 模糊匹配到: {os.path.relpath(full_path, KNOWLEDGE_BASE_DIR)}{Style.RESET_ALL}")
+            else:
+                return f"文件不存在: {rel_path}\n可用 /files 命令查看所有文件"
+        try:
+            with open(full_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            if len(content) > 5000:
+                content = content[:5000] + "\n\n... (文件过长，已截断至5000字)"
+            return f"文件内容 ({os.path.relpath(full_path, KNOWLEDGE_BASE_DIR)}):\n---\n{content}\n---"
+        except Exception as e:
+            return f"读取失败: {e}"
+
+    async def _agent_delete_file(rel_path):
+        """删除知识库文件（需4选1确认）"""
+        full_path = os.path.join(KNOWLEDGE_BASE_DIR, rel_path)
+        if not os.path.exists(full_path):
+            return f"文件不存在: {rel_path}"
+        # 先预览文件内容
+        preview = ""
+        try:
+            with open(full_path, 'r', encoding='utf-8') as fh:
+                preview = fh.read(300).replace('\n', ' ')
+        except Exception as e:
+            log(f'非预期异常: {e}', 'WARN')
+        action_desc = f"删除知识库文件: {rel_path}"
+        detail = f"文件预览: {preview}..."
+        result = await _agent_confirm("delete_file", action_desc, detail)
+        if result == "deny":
+            return "用户取消删除"
+        if result == "ai_review":
+            if not await _agent_ai_review("delete_file", action_desc, detail):
+                return "AI审查不通过，取消删除"
+        try:
+            os.remove(full_path)
+            return f"已删除: {rel_path}"
+        except Exception as e:
+            return f"删除失败: {e}"
+
+    async def _agent_update_file(rel_path, new_content):
+        """更新/新建知识库文件（需4选1确认）"""
+        full_path = os.path.join(KNOWLEDGE_BASE_DIR, rel_path)
+        exists = os.path.exists(full_path)
+        action = "替换" if exists else "新建"
+        action_desc = f"{action}知识库文件: {rel_path}"
+        detail = f"新内容({len(new_content)}字): {new_content[:150]}..."
+        result = await _agent_confirm("update_file", action_desc, detail)
+        if result == "deny":
+            return f"用户取消{action}"
+        if result == "ai_review":
+            if not await _agent_ai_review("update_file", action_desc, detail):
+                return f"AI审查不通过，取消{action}"
+        try:
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            with open(full_path, 'w', encoding='utf-8') as f:
+                f.write(new_content)
+            return f"已{action}: {rel_path} ({len(new_content)}字)"
+        except Exception as e:
+            return f"写入失败: {e}"
+
+    async def _agent_open_file(file_path: str):
+        """用系统默认程序打开文件"""
+        import subprocess, platform
+        fp = file_path.strip()
+        if not os.path.isabs(fp):
+            # 尝试在桌面找
+            desktop = os.path.join(os.path.expanduser("~"), "Desktop")
+            fp = os.path.join(desktop, fp)
+        if not os.path.exists(fp):
+            return f"文件不存在: {fp}"
+        try:
+            if platform.system() == "Windows":
+                os.startfile(fp)
+            elif platform.system() == "Darwin":
+                subprocess.run(["open", fp])
+            else:
+                subprocess.run(["xdg-open", fp])
+            return f"已用系统默认程序打开: {fp}"
+        except Exception as e:
+            return f"打开失败: {e}"
+
+    async def _agent_fetch_subtitles():
+        """获取视频字幕（AI字幕优先，CC字幕备选），缓存结果供后续分析复用"""
+        print(f"\n{Fore.CYAN}[Agent] 获取视频字幕...{Style.RESET_ALL}")
+        # 已缓存则直接返回
+        if analysis_cache.get("subtitle_text"):
+            cached_len = len(analysis_cache["subtitle_text"])
+            print(f"{Fore.GREEN}[Agent] 使用缓存字幕 ({cached_len}字){Style.RESET_ALL}")
+            return analysis_cache["subtitle_text"]
+
+        subtitle_text = ""
+        try:
+            # 优先直接获取B站AI/CC字幕（快，不走LLM）
+            # fetch_bilibili_subtitles 是模块级函数，返回 (success, content, desc)
+            cookies = getattr(brain, 'cookies', None)
+            ok, subs, _desc = await fetch_bilibili_subtitles(bvid, cookies)
+            if ok and subs and len(subs) > 100:
+                subtitle_text = subs
+                print(f"{Fore.GREEN}[Agent] 获取到B站字幕 ({len(subs)}字){Style.RESET_ALL}")
+            else:
+                # 字幕不足，走完整管道（可能触发ASR下载）
+                print(f"{Fore.YELLOW}[Agent] B站字幕不足({len(subs) if subs else 0}字)，尝试完整视频理解...{Style.RESET_ALL}")
+                success, st = await brain.understand_video_for_decision(bvid, title=title)
+                if success and st:
+                    subtitle_text = st
+        except Exception as e:
+            print(f"{Fore.RED}[Agent] 字幕获取异常: {e}{Style.RESET_ALL}")
+            subtitle_text = f"[字幕获取失败] {e}"
+
+        # 缓存
+        if subtitle_text:
+            analysis_cache["subtitle_text"] = subtitle_text
+        return subtitle_text or "[无字幕]"
+
+    async def _agent_quick_preview():
+        """快速预览：获取标题/简介/评论/弹幕"""
+        print(f"\n{Fore.CYAN}[Agent] 快速预览视频信息...{Style.RESET_ALL}")
+        # 获取简介
+        desc = ""
+        try:
+            meta = await brain.bili._wbi_get(
+                'https://api.bilibili.com/x/web-interface/view',
+                params={'bvid': bvid}
+            )
+            vinfo = meta.json()
+            if vinfo.get('code') == 0:
+                desc = vinfo['data'].get('desc', '')[:500]
+        except Exception as e:
+            log(f'非预期异常: {e}', 'WARN')
+
+        # 评论
+        comment_text = "[无评论]"
+        c_list = []
+        if aid:
+            try:
+                comment_text, c_list = await brain._get_comments_context(aid)
+            except Exception as e:
+                log(f'非预期异常: {e}', 'WARN')
+
+        # 弹幕
+        danmaku_text = ""
+        try:
+            danmaku_list = await brain.maybe_read_danmaku(bvid)
+            if danmaku_list:
+                danmaku_text = "\n".join(f"  {dm.get('text','')}" for dm in danmaku_list[:10])
+        except Exception as e:
+            log(f'非预期异常: {e}', 'WARN')
+
+        preview = f"""【视频信息】
+标题: {title}
+UP主: {up_name}
+简介: {desc[:300] if desc else '无'}
+
+【评论区摘要】
+{comment_text[:500]}
+
+【弹幕摘录】
+{danmaku_text[:300] if danmaku_text else '无弹幕数据'}"""
+        return preview
+
+    async def _agent_analyze_video():
+        """完整视频分析管道"""
+        print(f"\n{Fore.CYAN}[Agent] 触发完整视频分析管道...{Style.RESET_ALL}")
+
+        # 1. 视频理解（复用缓存字幕）
+        print(f"{Fore.CYAN}[Agent] [1/4] 视频内容理解 (字幕/ASR/视觉帧)...{Style.RESET_ALL}")
+        if analysis_cache.get("subtitle_text"):
+            print(f"{Fore.GREEN}[Agent] 复用已获取的字幕 ({len(analysis_cache['subtitle_text'])}字){Style.RESET_ALL}")
+            subtitle_text = analysis_cache["subtitle_text"]
+            success = True
+        else:
+            success, subtitle_text = await brain.understand_video_for_decision(bvid, title=title)
+            if success and subtitle_text:
+                analysis_cache["subtitle_text"] = subtitle_text
+        if not success:
+            subtitle_text = f"[理解受限] {subtitle_text}"
+
+        # 2. 评论+弹幕
+        comment_text = "[未读取评论]"
+        c_list = []
+        danmaku_text = ""
+        if aid:
+            try:
+                comment_text, c_list = await brain._get_comments_context(aid)
+            except Exception as e:
+                log(f'非预期异常: {e}', 'WARN')
+            try:
+                danmaku_list = await brain.maybe_read_danmaku(bvid)
+                if danmaku_list:
+                    danmaku_text = "\n".join(f"  {dm.get('text','')}" for dm in danmaku_list[:15])
+            except Exception as e:
+                log(f'非预期异常: {e}', 'WARN')
+
+        # 3. AI决策
+        print(f"{Fore.CYAN}[Agent] [2/4] AI决策分析...{Style.RESET_ALL}")
+        objective_prompt = SYSTEM_PROMPT_BRAIN.replace("{bot_name}", get_bot_name()).replace("{memory_ups}", str(brain.get_known_up_names()))
+        # Agent 模式特有提示：关注用户交互意图
+        objective_prompt += "\n\n【Agent模式】用户会通过对话指定分析目标，请结合对话上下文和用户意图做决策。"
+        # 覆盖随机性格：手动分析模式强制客观分析，不掷硬币
+        objective_prompt = objective_prompt.replace(
+            "【性格模式】掷硬币决定：- **夸夸模式**：真诚赞美。 - **吐槽模式**：犀利毒舌。",
+            "【性格模式】客观分析模式：基于内容质量公正评分，不随机切换夸夸/吐槽。评分标准：标题与内容匹配度、信息密度、观点深度、制作质量。"
+        )
+
+        context = (f"视频标题: {title}\nUP主: {up_name}\n"
+                   f"【视频内容】: {subtitle_text}\n"
+                   f"{comment_text}")
+
+        score, thought, learning_topic = 0, "", ""
+        try:
+            resp = await brain._call_ai_with_retry(
+                model=MODEL_BRAIN,
+                messages=[
+                    {"role": "system", "content": objective_prompt},
+                    {"role": "user", "content": context}
+                ],
+                request_timeout=120
+            )
+            raw = resp.choices[0].message.content
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if start >= 0 and end >= start:
+                json_str = raw[start:end + 1]
+            else:
+                json_str = "{}"
+            decision = json.loads(json_str)
+            score = decision.get('score', 0)
+            thought = decision.get('thought', '')
+            learning_topic = decision.get('learning_topic', '')
+        except Exception as e:
+            log(f'非预期异常: {e}', 'WARN')
+
+        # 4. 学习归档
+        print(f"{Fore.CYAN}[Agent] [3/4] 学习归档...{Style.RESET_ALL}")
+        archived_file = ""
+        if score >= 6.0 or learning_topic:
+            learn_text = subtitle_text
+            if not learn_text or len(learn_text) < 30:
+                learn_text = f"【视频标题】{title}\n【AI判断】{thought}"
+            if not learning_topic:
+                learning_topic = title[:15] if title else "手动分析"
+            try:
+                _desc = getattr(brain, "_last_video_desc", "")
+                learn_success = await brain.learn_from_video(
+                    bvid, title, up_name, video_url, learn_text, learning_topic, video_desc=_desc, score=score
+                )
+                if learn_success:
+                    print(f"{Fore.GREEN}[Agent] 已归档到知识库{Style.RESET_ALL}")
+                    archived_file = f"已归档: [{bvid}] - {title[:30]}.md"
+                else:
+                    print(f"{Fore.YELLOW}[Agent] 可能已存在，跳过归档{Style.RESET_ALL}")
+            except Exception as e:
+                print(f"{Fore.RED}[Agent] 归档失败: {e}{Style.RESET_ALL}")
+        else:
+            print(f"{Fore.YELLOW}[Agent] 评分 {score}/10 < 6.0，未触发归档{Style.RESET_ALL}")
+
+        # 缓存结果
+        analysis_cache["analyzed"] = True
+        analysis_cache["subtitle_text"] = subtitle_text
+        analysis_cache["comment_text"] = comment_text
+        analysis_cache["c_list"] = c_list
+        analysis_cache["danmaku_text"] = danmaku_text
+        analysis_cache["score"] = score
+        analysis_cache["thought"] = thought
+        analysis_cache["learning_topic"] = learning_topic
+
+        result = f"""【视频分析完成】
+AI评分: {score}/10
+AI判断: {thought}
+学习主题: {learning_topic if learning_topic else '无'}
+视频内容摘要: {subtitle_text[:300]}...
+评论数: {len(c_list)}条
+弹幕数: {len(danmaku_text.split(chr(10))) if danmaku_text else 0}条
+{archived_file}"""
+        return result
+
+    # =========================================================
+    # Agent对话主循环
+    # =========================================================
+    turn = 0
+    MAX_TURNS = 20
+
+    while turn < MAX_TURNS:
+        turn += 1
+        try:
+            user_msg = input(f"\n{Fore.LIGHTMAGENTA_EX}[Agent] 你 > {Style.RESET_ALL}").strip()
+        except (EOFError, KeyboardInterrupt):
+            print(f"\n{Fore.YELLOW}[Agent] 输入中断，退出Agent模式{Style.RESET_ALL}")
+            break
+
+        if not user_msg:
+            continue
+
+        # 快捷命令
+        if user_msg.lower() == "/exit":
+            print(f"{Fore.YELLOW}[Agent] 退出Agent模式{Style.RESET_ALL}")
+            break
+        if user_msg.lower() == "/help":
+            print(f"\n{Fore.CYAN}[Agent] 可用命令:{Style.RESET_ALL}")
+            print(f"  /exit  - 退出Agent模式")
+            print(f"  /files - 列出知识库所有文件")
+            print(f"  /search 关键词 - 搜索知识库")
+            print(f"  /done  - 直接触发完整视频分析")
+            print(f"  {Fore.YELLOW}直接输入你的要求，AI会智能响应{Style.RESET_ALL}")
+            continue
+        if user_msg.lower() == "/files":
+            result = _agent_list_files()
+            print(f"\n{Fore.GREEN}[Agent] {result}{Style.RESET_ALL}")
+            continue
+        if user_msg.lower().startswith("/search "):
+            query = user_msg[8:].strip()
+            result = _agent_search_knowledge(query)
+            print(f"\n{Fore.GREEN}[Agent] {result}{Style.RESET_ALL}")
+            continue
+        if user_msg.lower() == "/done":
+            # 直接运行完整分析管道（与Enter模式一致）
+            print(f"\n{Fore.CYAN}[Agent] /done: 自动运行完整分析管道...{Style.RESET_ALL}")
+            # Step 1: 获取字幕
+            if not analysis_cache.get("subtitle_text"):
+                sub_result = await _agent_fetch_subtitles()
+                if sub_result and not sub_result.startswith("[无字幕]") and not sub_result.startswith("[字幕获取失败]"):
+                    messages.append({"role": "system", "content": f"[已获取视频字幕 ({len(sub_result)}字)]"})
+            # Step 2: 完整分析
+            tool_result = await _agent_analyze_video()
+            print(f"\n{Fore.GREEN}[Agent] {tool_result}{Style.RESET_ALL}")
+            # 把分析结果加入对话，AI可以基于此回复
+            messages.append({"role": "system", "content": f"[自动分析完成]:\n{tool_result}\n\n请向用户汇报分析结果。如需输出文件请用update_file工具。"})
+            continue
+
+        # 添加用户消息
+        messages.append({"role": "user", "content": user_msg})
+
+        # 首轮意图检测：如果用户明确要求分析/总结/写桌面/打开，自动白名单相关工具
+        if turn == 1:
+            intent_keywords = {
+                "分析": ["fetch_subtitles", "analyze_video"],
+                "总结": ["fetch_subtitles", "analyze_video", "update_file"],
+                "桌面": ["update_file", "open_file"],
+                "打开": ["open_file"],
+                "md": ["update_file"],
+                "markdown": ["update_file"],
+                "写": ["update_file"],
+                "输出": ["update_file"],
+            }
+            for kw, tools in intent_keywords.items():
+                if kw in user_msg:
+                    for t in tools:
+                        auto_allow_tools.add(t)
+            if auto_allow_tools:
+                print(f"{Fore.CYAN}[Agent] 检测到意图关键词，自动放行工具: {', '.join(auto_allow_tools)}{Style.RESET_ALL}")
+
+        # 内层自动连续循环：AI调用 → 工具执行 → 自动继续（无需等用户输入）
+        sub_turn = 0
+        MAX_SUB_TURNS = 10  # 单次用户输入最多自动连续10轮
+        task_done = False
+
+        while sub_turn < MAX_SUB_TURNS:
+            sub_turn += 1
+
+            # 调用AI
+            print(f"{Fore.CYAN}[Agent] AI思考中...{Style.RESET_ALL}")
+            try:
+                resp = await brain._call_ai_with_retry(
+                    model=MODEL_BRAIN,
+                    messages=messages,
+                    request_timeout=90
+                )
+                ai_text = resp.choices[0].message.content
+            except Exception as e:
+                print(f"{Fore.RED}[Agent] AI调用失败: {e}{Style.RESET_ALL}")
+                break
+
+            messages.append({"role": "assistant", "content": ai_text})
+
+            # 解析AI回复中的工具调用
+            tool_pattern = re.compile(r'\[TOOL:(\w+)\]\s*(.*?)(?=\[TOOL:|\[DONE\]|$)', re.DOTALL)
+            stop_pattern = re.compile(r'\[DONE\]')
+
+            done_match = stop_pattern.search(ai_text)
+            tool_matches = tool_pattern.findall(ai_text)
+
+            # 先显示AI的文字回复（去掉工具调用和DONE标记）
+            display_text = ai_text
+            for tool_name, tool_body in tool_matches:
+                display_text = display_text.replace(f"[TOOL:{tool_name}] {tool_body}", "")
+            if done_match:
+                display_text = display_text.replace("[DONE]", "")
+            display_text = display_text.strip()
+            if display_text:
+                print(f"\n{Fore.LIGHTGREEN_EX}[Agent] AI > {Style.RESET_ALL}{display_text}")
+
+            if done_match and not tool_matches:
+                # 纯DONE，无工具，结束
+                print(f"\n{Fore.GREEN}[Agent] 对话结束{Style.RESET_ALL}")
+                task_done = True
+                break
+
+            # 执行工具调用（逐个执行，每次执行后把结果加入对话）
+            for tool_name, tool_body in tool_matches:
+                tool_body = tool_body.strip()
+                print(f"\n{Fore.YELLOW}[Agent] 执行工具: {tool_name}...{Style.RESET_ALL}")
+
+                tool_result = ""
+
+                if tool_name == "search_knowledge":
+                    tool_result = _agent_search_knowledge(tool_body)
+                elif tool_name == "read_file":
+                    tool_result = _agent_read_file(tool_body)
+                elif tool_name == "list_files":
+                    tool_result = _agent_list_files(tool_body)
+                elif tool_name == "delete_file":
+                    tool_result = await _agent_delete_file(tool_body)
+                elif tool_name == "update_file":
+                    # 格式: 相对路径\n---新内容---
+                    parts = tool_body.split('\n', 1)
+                    if len(parts) == 2:
+                        file_path = parts[0].strip()
+                        content = parts[1].strip()
+                        # 去掉可能的前导 --- 标记
+                        if content.startswith('---'):
+                            content = content[3:].strip()
+                        tool_result = await _agent_update_file(file_path, content)
+                    else:
+                        tool_result = "update_file格式错误: 需要 相对路径\\n新内容"
+                elif tool_name == "analyze_video":
+                    # 重量级操作，需要确认
+                    action_desc = f"完整分析视频《{title[:30]}》(ASR+视觉帧+评论+弹幕→归档)"
+                    result = await _agent_confirm("analyze_video", action_desc, "预计耗时30-90秒，消耗API配额")
+                    if result == "deny":
+                        tool_result = "用户取消完整分析"
+                    elif result == "ai_review":
+                        if await _agent_ai_review("analyze_video", action_desc, "完整视频分析管道"):
+                            print(f"{Fore.CYAN}[Agent] AI审查通过，开始完整视频分析...{Style.RESET_ALL}")
+                            tool_result = await _agent_analyze_video()
+                        else:
+                            tool_result = "AI审查不通过，取消完整分析"
+                    else:
+                        print(f"{Fore.CYAN}[Agent] 开始完整视频分析...{Style.RESET_ALL}")
+                        tool_result = await _agent_analyze_video()
+                elif tool_name == "fetch_subtitles":
+                    tool_result = await _agent_fetch_subtitles()
+                elif tool_name == "quick_preview":
+                    tool_result = await _agent_quick_preview()
+                elif tool_name == "open_file":
+                    tool_result = await _agent_open_file(tool_body)
+                else:
+                    tool_result = f"未知工具: {tool_name}"
+
+                # 显示工具结果
+                result_preview = tool_result[:500] + ("..." if len(tool_result) > 500 else "")
+                print(f"{Fore.GREEN}[Agent] 工具结果: {result_preview}{Style.RESET_ALL}")
+
+                # 把工具结果作为system消息加入对话
+                context_note = f"[工具 {tool_name} 执行结果]:\n{tool_result}"
+                # 根据已执行工具附加状态提示
+                if tool_name == "fetch_subtitles" and not tool_result.startswith("[无字幕]") and not tool_result.startswith("[字幕获取失败]"):
+                    context_note += f"\n\n[数据上下文] 已获取完整字幕({len(tool_result)}字)。下一步通常调用 analyze_video 做评分归档，或直接基于字幕回答用户问题。请勿再次调用 fetch_subtitles。"
+                elif tool_name == "analyze_video":
+                    context_note += "\n\n[数据上下文] 视频完整分析已完成（含字幕+评论+弹幕+AI评分+归档）。可以基于这些结果回复用户，或按用户要求生成总结/写文件。"
+                context_note += "\n\n请基于以上结果继续回复用户，如需更多工具可继续调用。"
+                messages.append({
+                    "role": "system",
+                    "content": context_note
+                })
+
+            # 工具执行完毕，决定下一步
+            if done_match:
+                # DONE + 工具已执行（如 open_file 后标 DONE）
+                print(f"\n{Fore.GREEN}[Agent] 任务完成{Style.RESET_ALL}")
+                task_done = True
+                break
+
+            if tool_matches:
+                # 还有工作没做完 → 自动继续
+                print(f"\n{Fore.CYAN}[Agent] 自动继续...{Style.RESET_ALL}")
+                messages.append({"role": "user", "content": "[系统自动继续] 请基于工具结果继续执行下一步，无需等待用户输入。如果所有步骤已完成，输出 [DONE]。"})
+                # 不 break，回到 inner while 顶部继续调 AI
+            else:
+                # 无工具调用，回到等待用户输入
+                break
+
+        # 内层循环结束
+        if task_done:
+            break
+
+    if not task_done and turn >= MAX_TURNS:
+        print(f"\n{Fore.YELLOW}[Agent] 达到最大对话轮次 ({MAX_TURNS})，自动退出{Style.RESET_ALL}")
+
+    print(f"\n{Fore.LIGHTMAGENTA_EX}+============================================================+{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTMAGENTA_EX}|  Agent对话结束                                               |{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTMAGENTA_EX}+============================================================+{Style.RESET_ALL}")
+
+
+async def revisit_knowledge_video(bvid, title, up_name, category_path, file_path, mode="full"):
+    """重温已学视频：完整管道(封面/标题/简介/评论/弹幕/视频内容/ASR/视觉帧) → AI决策 → 学习归档
+    Args:
+        mode: "full" = 重新看视频+优化, "optimize" = 只优化(用现有字幕/AI总结)
+    """
+    print(f"\n{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}|  🔄 知识库重温: {title[:40]}                          {Style.RESET_ALL}")
+    print(f"{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
+    print(f"  BV号: {bvid}")
+    print(f"  分类: {category_path}")
+    if up_name:
+        print(f"  UP主: {up_name}")
+    mode_label = "完整重温(重新看视频+优化)" if mode == "full" else "仅优化(用现有知识)"
+    print(f"  模式: {Fore.YELLOW}{mode_label}{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}+------------------------------------------------------------+{Style.RESET_ALL}")
+
+    video_url = f"https://www.bilibili.com/video/{bvid}"
+
+    # 创建 AgentBrain，加载凭证+ cookies
+    brain = AgentBrain()
+    brain.bili._load_credential()
+    # [FIX] 同时加载 cookies，否则 fetch_bilibili_subtitles 无 cookie 无法获取AI字幕
+    if os.path.exists(COOKIE_FILE):
+        with open(COOKIE_FILE, 'r', encoding='utf-8') as f:
+            brain.cookies = json.load(f)
+
+    # ── 获取视频元信息 ──
+    try:
+        meta = await brain.bili._wbi_get(
+            'https://api.bilibili.com/x/web-interface/view',
+            params={'bvid': bvid}
+        )
+        vinfo = meta.json()
+        if vinfo.get('code') == 0:
+            vdata = vinfo['data']
+            title = title or vdata.get('title', '')
+            up_name = up_name or vdata.get('owner', {}).get('name', '未知')
+            up_uid = vdata.get('owner', {}).get('mid', 0)
+            aid = vdata.get('aid', 0)
+            pic_url = vdata.get('pic', '')
+            tags = []
+            raw_tag = vdata.get('tag', '') or ''
+            if isinstance(raw_tag, str) and raw_tag:
+                tags = [t.strip() for t in raw_tag.split(',') if t.strip()]
+            category = vdata.get('tname', '')
+            duration_raw = vdata.get('duration', 0)
+            if isinstance(duration_raw, str) and ':' in duration_raw:
+                parts = duration_raw.split(':')
+                duration = int(parts[0]) * 60 + int(parts[1])
+            else:
+                try:
+                    duration = int(duration_raw)
+                except (ValueError, TypeError):
+                    duration = 0
+            video_desc = vdata.get('desc', '')
+            print(f"{Fore.GREEN}[OK] 视频信息获取成功: {title} | @{up_name}{Style.RESET_ALL}")
+        else:
+            print(f"{Fore.RED}[ERROR] 获取视频信息失败: code={vinfo.get('code')}{Style.RESET_ALL}")
+            return
+    except Exception as e:
+        print(f"{Fore.RED}[ERROR] 获取视频信息失败: {e}{Style.RESET_ALL}")
+        return
+
+    # 缓存视频元数据
+    brain._current_video_tags = tags
+    brain._current_video_category = category
+    brain._current_video_duration = duration
+
+    # ── [1/6] 封面分析 ──
+    print(f"\n{Fore.CYAN}[1/6] 封面视觉分析...{Style.RESET_ALL}")
+    cover_desc, vis_score = "", 0
+    if pic_url:
+        try:
+            cover_desc, vis_score = await brain.analyze_vision(pic_url)
+            print(f"{Fore.GREEN}[OK] 封面: {cover_desc} [印象分:{vis_score}]{Style.RESET_ALL}")
+            brain._current_video_cover_desc = cover_desc
+        except Exception as e:
+            print(f"{Fore.YELLOW}[WARN] 封面分析失败: {e}{Style.RESET_ALL}")
+
+    if video_desc:
+        print(f"{Fore.GREEN}[OK] 简介预览: {video_desc[:100]}...{Style.RESET_ALL}")
+
+    # ── [2/6] 视频内容理解 ──
+    print(f"\n{Fore.CYAN}[2/6] 视频内容理解 (字幕/ASR/视觉帧)...{Style.RESET_ALL}")
+    if mode == "full":
+        # 完整管道：重新下载视频 → ASR+视觉帧
+        success, subtitle_text = await brain._understand_super_smart(bvid, title=title)
+    else:
+        # 仅优化模式：读取现有 md 文件中的内容
+        subtitle_text = ""
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                existing = f.read()
+            # 提取 AI 总结部分
+            summary_match = re.search(r'##\s*\[BRAIN\]\s*AI内容总结\s*\n(.*)', existing, re.DOTALL)
+            if summary_match:
+                subtitle_text = f"【已有AI总结】\n{summary_match.group(1).strip()[:3000]}"
+            else:
+                # 回退：取文件后半部分
+                subtitle_text = existing[-3000:] if len(existing) > 3000 else existing
+            print(f"{Fore.GREEN}[OK] 使用现有知识库内容 ({len(subtitle_text)}字){Style.RESET_ALL}")
+        except Exception as e:
+            print(f"{Fore.YELLOW}[WARN] 读取现有知识失败: {e}，降级为完整模式{Style.RESET_ALL}")
+            success, subtitle_text = await brain._understand_super_smart(bvid, title=title)
+
+    if subtitle_text:
+        preview = subtitle_text[:200].replace('\n', ' ')
+        print(f"{Fore.GREEN}[OK] 视频内容: {preview}...{Style.RESET_ALL}")
+    else:
+        subtitle_text = f"【视频标题】{title}\n【简介】{video_desc}"
+        print(f"{Fore.YELLOW}[WARN] 无可用内容，使用标题+简介兜底{Style.RESET_ALL}")
+
+    # ── [3/6] 评论+弹幕 ──
+    print(f"\n{Fore.CYAN}[3/6] 评论区讨论+弹幕...{Style.RESET_ALL}")
+    comment_text = "[未读取评论]"
+    c_list = []
+    danmaku_text = ""
+    if aid:
+        try:
+            comment_text, c_list = await brain._get_comments_context(aid)
+            if c_list:
+                print(f"{Fore.GREEN}[OK] 获取到 {len(c_list)} 条评论{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.YELLOW}[WARN] 评论区无内容{Style.RESET_ALL}")
+        except Exception as e:
+            print(f"{Fore.YELLOW}[WARN] 评论获取失败: {e}{Style.RESET_ALL}")
+
+        try:
+            danmaku_list = await brain.maybe_read_danmaku(bvid)
+            if danmaku_list:
+                danmaku_text = f"【弹幕（共{len(danmaku_list)}条）】:\n" + "\n".join(
+                    f"  {dm.get('text','')}" for dm in danmaku_list[:15]
+                )
+                print(f"{Fore.GREEN}[OK] 获取到 {len(danmaku_list)} 条弹幕{Style.RESET_ALL}")
+        except Exception as e:
+            log(f'非预期异常: {e}', 'WARN')
+
+    # ── [4/6] AI决策 ──
+    print(f"\n{Fore.CYAN}[4/6] AI综合分析决策...{Style.RESET_ALL}")
+    objective_prompt = SYSTEM_PROMPT_BRAIN.replace("{bot_name}", get_bot_name()).replace("{memory_ups}", str(brain.get_known_up_names()))
+    # 重温模式特有提示
+    objective_prompt += (
+        "\n\n【重温优化模式】这是一个已经归档到知识库的视频。"
+        "请重新审视内容，看看有没有遗漏的要点、新的理解角度、或可以补充的知识点。"
+        "如果原归档质量已很高，可以给出更高的分数。"
+    )
+
+    context = (f"视频标题: {title}\nUP主: {up_name}\n"
+               f"视频简介: {video_desc}\n"
+               f"封面描述: {cover_desc}\n"
+               f"原分类: {category_path}\n"
+               f"【视频内容】: {subtitle_text}\n"
+               f"{comment_text}"
+               f"{danmaku_text}")
+
+    score = 0
+    thought = ""
+    learning_topic = ""
+    try:
+        resp = await brain._call_ai_with_retry(
+            model=MODEL_BRAIN,
+            messages=[
+                {"role": "system", "content": objective_prompt},
+                {"role": "user", "content": context}
+            ],
+            request_timeout=120
+        )
+        raw = resp.choices[0].message.content
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start >= 0 and end >= start:
+            json_str = raw[start:end + 1]
+        else:
+            raise ValueError(f"AI返回未找到JSON: {raw[:200]}")
+
+        try:
+            decision = json.loads(json_str)
+        except json.JSONDecodeError:
+            fixed = json_str.replace("'", '"')
+            fixed = re.sub(r'\bTrue\b', 'true', fixed)
+            fixed = re.sub(r'\bFalse\b', 'false', fixed)
+            fixed = re.sub(r'\bNone\b', 'null', fixed)
+            decision = json.loads(fixed)
+
+        score = decision.get('score', 0)
+        thought = decision.get('thought', '')
+        mode_decision = decision.get('mode', '')
+        learning_topic = decision.get('learning_topic', '')
+
+        print(f"\n{Fore.CYAN}+------------------------------------------------------------+{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}|  [重温分析结果]                                             |{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}+------------------------------------------------------------+{Style.RESET_ALL}")
+        print(f"  AI评分: {Fore.YELLOW}{score}/10{Style.RESET_ALL}")
+        print(f"  AI想法: {thought}")
+        if learning_topic:
+            print(f"  主题: {learning_topic}")
+        print(f"{Fore.CYAN}+------------------------------------------------------------+{Style.RESET_ALL}")
+
+    except Exception as e:
+        print(f"{Fore.RED}[ERROR] AI决策失败: {_mask_urls(str(e)[:200])}{Style.RESET_ALL}")
+
+    # ── [5/6] 评论区知识收集 ──
+    print(f"\n{Fore.CYAN}[5/6] 评论区知识收集...{Style.RESET_ALL}")
+    if c_list and len(c_list) >= 3:
+        try:
+            await brain.learn_from_comments(bvid, title, up_name, video_url, comment_text, c_list, learning_topic or title[:15])
+        except Exception as e:
+            print(f"{Fore.YELLOW}[WARN] 评论知识收集失败: {e}{Style.RESET_ALL}")
+    else:
+        print(f"{Fore.YELLOW}[INFO] 评论不足，跳过评论知识收集{Style.RESET_ALL}")
+
+    # ── [6/6] 学习归档（覆盖更新） ──
+    print(f"\n{Fore.CYAN}[6/6] 更新知识归档...{Style.RESET_ALL}")
+    learn_text = subtitle_text
+    if not learn_text or len(learn_text) < 30:
+        learn_text = f"【视频标题】{title}\n【简介】{video_desc}\n【AI判断】{thought}\n"
+        if danmaku_text:
+            learn_text += f"{danmaku_text}\n"
+        if comment_text and comment_text != "[未读取评论]":
+            learn_text += f"{comment_text}\n"
+        learn_text = learn_text.strip()
+
+    if not learning_topic:
+        learning_topic = title[:15] if title else category_path
+
+    if learn_text and len(learn_text) > 20:
+        try:
+            _desc = getattr(brain, "_last_video_desc", "") or video_desc
+            # 删除旧文件，让 learn_from_video 重新创建
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                print(f"{Fore.YELLOW}[INFO] 已删除旧归档文件，准备重新创建...{Style.RESET_ALL}")
+            learn_success = await brain.learn_from_video(bvid, title, up_name, video_url, learn_text, learning_topic, video_desc=_desc, score=score)
+            if learn_success:
+                print(f"{Fore.GREEN}[OK] 知识已更新归档！{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.YELLOW}[INFO] 归档未更新（可能已存在或分类未变）{Style.RESET_ALL}")
+        except Exception as e:
+            print(f"{Fore.RED}[ERROR] 学习归档失败: {e}{Style.RESET_ALL}")
+    else:
+        print(f"{Fore.YELLOW}[INFO] 可学习内容不足，跳过归档{Style.RESET_ALL}")
+
+    print(f"\n{Fore.GREEN}+============================================================+{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}|  🔄 重温完成: {title[:40]}                                  {Style.RESET_ALL}")
+    print(f"{Fore.GREEN}+============================================================+{Style.RESET_ALL}")
+
+
+async def revisit_knowledge_base_menu():
+    """知识库重温菜单：扫描所有 .md 文件，选择后重看视频优化或仅优化。"""
+    print(f"\n{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}|        🔄 知识库重温优化 - 已学习视频回顾                      |{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
+
+    # 扫描知识库
+    md_files = _scan_knowledge_base_md_files()
+    if not md_files:
+        print(f"{Fore.YELLOW}[WARN] 知识库中没有找到学习归档文件！{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}[INFO] 请先让机器人学习一些视频，或手动分析视频并归档{Style.RESET_ALL}")
+        input(f"\n{Fore.CYAN}按回车返回...{Style.RESET_ALL}")
+        return
+
+    # 按分类分组展示
+    from collections import defaultdict
+    by_category = defaultdict(list)
+    for item in md_files:
+        by_category[item[4]].append(item)
+
+    print(f"\n{Fore.GREEN}共找到 {len(md_files)} 个已学习视频，分布在 {len(by_category)} 个分类:{Style.RESET_ALL}\n")
+
+    # 展开所有文件，统一编号
+    all_items = []
+    idx = 1
+    for cat in sorted(by_category.keys()):
+        items = by_category[cat]
+        print(f"{Fore.CYAN}[{cat}] ({len(items)}个){Style.RESET_ALL}")
+        for bvid, title, fpath, up, cat_path in items:
+            up_str = f" @{up}" if up else ""
+            print(f"  {Fore.YELLOW}{idx:3d}.{Style.RESET_ALL} {title[:50]}{up_str}")
+            all_items.append((idx, bvid, title, fpath, up, cat_path))
+            idx += 1
+        print()
+
+    print(f"  {Fore.YELLOW}  0.{Style.RESET_ALL} 返回主菜单")
+
+    try:
+        choice = input(f"\n{Fore.CYAN}请选择要重温的视频 (1-{len(all_items)}): {Style.RESET_ALL}").strip()
+        if not choice or choice == "0":
+            print(f"{Fore.YELLOW}[INFO] 已取消{Style.RESET_ALL}")
+            return
+
+        sel_idx = int(choice)
+        if sel_idx < 1 or sel_idx > len(all_items):
+            print(f"{Fore.RED}[ERROR] 无效选项{Style.RESET_ALL}")
+            return
+
+        _, bvid, title, fpath, up, cat_path = all_items[sel_idx - 1]
+
+        # 选择模式
+        print(f"\n{Fore.CYAN}已选择: {title[:50]}{Style.RESET_ALL}")
+        print(f"\n{Fore.CYAN}请选择重温模式:{Style.RESET_ALL}")
+        print(f"  {Fore.GREEN}1.{Style.RESET_ALL} 🔄 完整重温 (重新看视频: 封面→简介→字幕/下载/ASR→评论→弹幕→AI决策→归档)")
+        print(f"  {Fore.BLUE}2.{Style.RESET_ALL} 📝 仅优化 (用现有知识库内容 + 最新评论/弹幕 → AI重新分析 → 归档)")
+        print(f"  {Fore.YELLOW}0.{Style.RESET_ALL} 取消")
+
+        mode_choice = input(f"\n{Fore.CYAN}请选择 (1/2/0): {Style.RESET_ALL}").strip()
+        if mode_choice == "0" or not mode_choice:
+            print(f"{Fore.YELLOW}[INFO] 已取消{Style.RESET_ALL}")
+            return
+        elif mode_choice == "1":
+            mode = "full"
+        elif mode_choice == "2":
+            mode = "optimize"
+        else:
+            print(f"{Fore.RED}[ERROR] 无效选项{Style.RESET_ALL}")
+            return
+
+        await revisit_knowledge_video(bvid, title, up, cat_path, fpath, mode)
+
+    except ValueError:
+        print(f"{Fore.RED}[ERROR] 请输入数字{Style.RESET_ALL}")
+    except KeyboardInterrupt:
+        print(f"\n{Fore.YELLOW}[WARN] 用户中断{Style.RESET_ALL}")
+    except Exception as e:
+        print(f"{Fore.RED}[ERROR] 重温异常: {e}{Style.RESET_ALL}")
+        import traceback
+        traceback.print_exc()
+
+
+# ==============================================================================
+# 📂 一键整理知识库：非3层文件 → AI自动归类到3层
+# ==============================================================================
+async def organize_knowledge_base():
+    """扫描并整理知识库：将非3层目录结构的文件AI自动归位。
+    
+    逻辑：
+    1. 扫描所有 .md 文件，找出非3层的（如 科技/xxx.md 或 科技/AI工具/xxx.md）
+    2. 检测同一BVID的重复文件（不同深度目录），保留最深的
+    3. 对每个非3层文件，读取内容 → AI分类 → 移动到3层目录
+    4. 支持4选1确认：本次允许/一直允许/不允许/AI审查
+    """
+    print(f"\n{Fore.LIGHTYELLOW_EX}╔══════════════════════════════════════════════════════════╗{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}║  📂 一键整理知识库 - AI智能归类到3层                      ║{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}╚══════════════════════════════════════════════════════════╝{Style.RESET_ALL}")
+
+    if not os.path.exists(KNOWLEDGE_BASE_DIR):
+        print(f"{Fore.YELLOW}[INFO] 知识库目录不存在，无需整理{Style.RESET_ALL}")
+        return
+
+    # ── 第1步：扫描 ──
+    print(f"\n{Fore.CYAN}[1/4] 扫描知识库文件...{Style.RESET_ALL}")
+    all_files = _scan_knowledge_base_md_files()
+    if not all_files:
+        print(f"{Fore.YELLOW}[INFO] 知识库为空{Style.RESET_ALL}")
+        return
+
+    # 分类：3层 ok / 非3层 / 重复BVID
+    ok_files = []       # 3层，已到位
+    shallow_files = []  # 非3层，需要整理
+    bvid_map = {}       # bvid -> [(depth, bvid, title, path, up, cat), ...]
+
+    for bvid, title, fpath, up, cat in all_files:
+        depth = cat.count('/') + 1 if cat and cat != '未分类' else 1
+        if bvid not in bvid_map:
+            bvid_map[bvid] = []
+        bvid_map[bvid].append((depth, bvid, title, fpath, up, cat))
+
+    for bvid, entries in bvid_map.items():
+        entries.sort(key=lambda x: x[0], reverse=True)  # depth降序
+        for depth, bv, t, fp, u, c in entries:
+            if depth >= 3:
+                ok_files.append((bv, t, fp, u, c, depth))
+            else:
+                shallow_files.append((bv, t, fp, u, c, depth))
+
+    # ── 检测重复BVID ──
+    duplicates = []
+    unique_shallow = []
+    for entry in shallow_files:
+        bv = entry[0]
+        all_entries = bvid_map[bv]
+        has_deep = any(e[0] >= 3 for e in all_entries)
+        if has_deep:
+            duplicates.append(entry)
+        else:
+            unique_shallow.append(entry)
+
+    print(f"\n{Fore.CYAN}扫描结果:{Style.RESET_ALL}")
+    print(f"  {Fore.GREEN}✓ 3层已到位: {len(ok_files)} 个{Style.RESET_ALL}")
+    print(f"  {Fore.YELLOW}⚠ 非3层需整理: {len(unique_shallow)} 个{Style.RESET_ALL}")
+    print(f"  {Fore.RED}🗑 重复文件(可清理): {len(duplicates)} 个{Style.RESET_ALL}")
+
+    if not unique_shallow and not duplicates:
+        print(f"{Fore.GREEN}[OK] 知识库已全部整理完毕！{Style.RESET_ALL}")
+        return
+
+    # ── 显示详情 ──
+    if duplicates:
+        print(f"\n{Fore.RED}【重复文件】(同BVID有更深层版本，建议删除):{Style.RESET_ALL}")
+        for bv, t, fp, u, c, d in duplicates[:20]:
+            rel = os.path.relpath(fp, KNOWLEDGE_BASE_DIR)
+            print(f"  [{bv}] {t[:40]} | {c}")
+
+    if unique_shallow:
+        print(f"\n{Fore.YELLOW}【需要整理】(非3层，将AI归类):{Style.RESET_ALL}")
+        for bv, t, fp, u, c, d in unique_shallow[:20]:
+            rel = os.path.relpath(fp, KNOWLEDGE_BASE_DIR)
+            print(f"  [{bv}] {t[:40]} | 当前: {c} ({d}层)")
+
+    # ── 第2步：确认 ──
+    print(f"\n{Fore.LIGHTYELLOW_EX}╔══════════════════════════════════════════════════════════╗{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}║  [整理确认]                                                ║{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}╠══════════════════════════════════════════════════════════╣{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}║{Style.RESET_ALL}  将整理 {len(unique_shallow)} 个文件 + 清理 {len(duplicates)} 个重复文件")
+    print(f"{Fore.LIGHTYELLOW_EX}╠══════════════════════════════════════════════════════════╣{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}║{Style.RESET_ALL}  {Fore.GREEN}1.{Style.RESET_ALL} 一键整理全部    {Fore.LIGHTGREEN_EX}2.{Style.RESET_ALL} 逐个确认(每文件4选1)")
+    print(f"{Fore.LIGHTYELLOW_EX}║{Style.RESET_ALL}  {Fore.RED}3.{Style.RESET_ALL} 取消")
+    print(f"{Fore.LIGHTYELLOW_EX}╚══════════════════════════════════════════════════════════╝{Style.RESET_ALL}")
+
+    mode_choice = input(f"{Fore.CYAN}[整理] 选择 (1-3, 回车=1): {Style.RESET_ALL}").strip()
+    if mode_choice == "3":
+        print(f"{Fore.YELLOW}已取消{Style.RESET_ALL}")
+        return
+
+    per_file_confirm = (mode_choice == "2")
+
+    # ── 第3步：初始化分类器 ──
+    classifier = KnowledgeBaseClassifier()
+    all_cats = classifier._get_all_categories()
+
+    # ── 第4步：执行整理 ──
+    print(f"\n{Fore.CYAN}[3/4] 开始整理...{Style.RESET_ALL}")
+
+    moved_count = 0
+    deleted_count = 0
+    skipped_count = 0
+    auto_allow_all = False  # 一键模式
+
+    async def confirm_action(action_desc, detail=""):
+        """简化版4选1确认"""
+        nonlocal auto_allow_all
+        if auto_allow_all or not per_file_confirm:
+            return "allow"
+
+        print(f"\n{Fore.YELLOW}  ╔ 操作确认 ╗{Style.RESET_ALL}")
+        print(f"  {Fore.YELLOW}║{Style.RESET_ALL} {action_desc[:60]}")
+        if detail:
+            print(f"  {Fore.YELLOW}║{Style.RESET_ALL} {detail[:100]}")
+        print(f"  {Fore.YELLOW}║{Style.RESET_ALL} {Fore.GREEN}1.{Style.RESET_ALL}本次允许 {Fore.LIGHTGREEN_EX}2.{Style.RESET_ALL}全部允许 {Fore.RED}3.{Style.RESET_ALL}跳过 {Fore.CYAN}4.{Style.RESET_ALL}AI审查")
+        print(f"  {Fore.CYAN}[整理] 选择 (1-4, 回车=1): {Style.RESET_ALL}", end="")
+
+        import sys
+        sys.stdout.flush()
+        ch = input().strip()
+
+        if ch == "2":
+            auto_allow_all = True
+            print(f"  {Fore.GREEN}已设置: 全部自动允许{Style.RESET_ALL}")
+            return "always"
+        elif ch == "3":
+            return "deny"
+        elif ch == "4":
+            return "ai_review"
+        return "allow"
+
+    async def ai_review(action_desc, detail=""):
+        """AI审查"""
+        try:
+            resp = await _call_ai_with_retry_static(
+                model=MODEL_BRAIN,
+                messages=[{"role": "user", "content": f"你是安全审查助手。评估此操作是否合理:{action_desc}。详情:{detail[:300]}。只返回JSON: {{\"safe\":true/false,\"reason\":\"理由\"}}"}],
+                request_timeout=20
+            )
+            raw = resp.choices[0].message.content
+            s = raw.find("{")
+            e = raw.rfind("}")
+            if s >= 0 and e >= s:
+                d = json.loads(raw[s:e+1])
+                if d.get("safe", True):
+                    print(f"  {Fore.GREEN}AI审查通过: {d.get('reason','')}{Style.RESET_ALL}")
+                    return True
+                else:
+                    print(f"  {Fore.RED}AI审查不通过: {d.get('reason','')}{Style.RESET_ALL}")
+                    return False
+            return True
+        except Exception as ex:
+            print(f"  {Fore.YELLOW}AI审查异常，默认通过{Style.RESET_ALL}")
+            return True
+
+    # ── 处理重复文件：直接删除浅层版本 ──
+    if duplicates:
+        print(f"\n{Fore.CYAN}[清理重复] 删除 {len(duplicates)} 个重复文件...{Style.RESET_ALL}")
+        for bv, t, fp, u, c, d in duplicates:
+            rel = os.path.relpath(fp, KNOWLEDGE_BASE_DIR)
+            if per_file_confirm:
+                result = await confirm_action(f"删除重复文件: [{bv}] {t[:30]}", f"已有3层版本，此文件位于 {c}")
+                if result == "deny":
+                    skipped_count += 1
+                    continue
+                if result == "ai_review":
+                    if not await ai_review("删除重复知识库文件", f"[{bv}] {t[:50]}"):
+                        skipped_count += 1
+                        continue
+            try:
+                os.remove(fp)
+                print(f"  {Fore.GREEN}已删除: {rel}{Style.RESET_ALL}")
+                deleted_count += 1
+                # 清理空目录
+                dir_path = os.path.dirname(fp)
+                if not os.listdir(dir_path):
+                    os.rmdir(dir_path)
+            except Exception as e:
+                print(f"  {Fore.RED}删除失败: {e}{Style.RESET_ALL}")
+
+    # ── 处理非3层文件：AI分类 → 移动 ──
+    if unique_shallow:
+        print(f"\n{Fore.CYAN}[归类整理] AI分类 {len(unique_shallow)} 个文件...{Style.RESET_ALL}")
+
+        for idx, (bv, t, fp, u, c, d) in enumerate(unique_shallow, 1):
+            rel = os.path.relpath(fp, KNOWLEDGE_BASE_DIR)
+            print(f"\n  {Fore.CYAN}[{idx}/{len(unique_shallow)}] [{bv}] {t[:40]}{Style.RESET_ALL}")
+            print(f"  当前: {c} ({d}层)")
+
+            if per_file_confirm:
+                result = await confirm_action(f"AI归类: [{bv}] {t[:30]}", f"从 {c} → AI自动分类到3层")
+                if result == "deny":
+                    skipped_count += 1
+                    continue
+                if result == "ai_review":
+                    if not await ai_review("AI归类知识库文件", f"[{bv}] {t[:50]}"):
+                        skipped_count += 1
+                        continue
+
+            # 读取文件内容用于AI分类
+            file_content = ""
+            try:
+                with open(fp, 'r', encoding='utf-8') as fh:
+                    file_content = fh.read(3000)
+            except Exception as e:
+                log(f'非预期异常: {e}', 'WARN')
+
+            # AI分类
+            try:
+                ai_result = classifier._find_best_category(t, file_content, all_cats)
+                new_cat = ai_result.get("selected_category", "未分类")
+                conf = ai_result.get("confidence", 0)
+                is_new = ai_result.get("is_new", False)
+
+                if is_new:
+                    new_cat = classifier._create_category_structure(new_cat)
+
+                # 确保恰好3层
+                parts = [p.strip() for p in new_cat.split('/') if p.strip()]
+                while len(parts) < 3:
+                    parts.append(f"子类{len(parts)+1}")
+                parts = parts[:3]
+                final_cat = '/'.join(parts)
+
+                print(f"  AI分类: {Fore.GREEN}{final_cat}{Style.RESET_ALL} (置信度: {conf:.0%})")
+
+                if conf < 0.3:
+                    print(f"  {Fore.YELLOW}置信度过低，跳过{Style.RESET_ALL}")
+                    skipped_count += 1
+                    continue
+
+                # 移动文件
+                new_folder = classifier.get_or_create_folder(final_cat)
+                fname = os.path.basename(fp)
+                dst = os.path.join(new_folder, fname)
+
+                if os.path.exists(dst):
+                    print(f"  {Fore.YELLOW}目标位置已有同名文件，删除源文件{Style.RESET_ALL}")
+                    os.remove(fp)
+                    deleted_count += 1
+                else:
+                    shutil.move(fp, dst)
+                    print(f"  {Fore.GREEN}已移动: {rel} → {final_cat}/{Style.RESET_ALL}")
+                    moved_count += 1
+
+                # 更新分类器元数据
+                if final_cat not in classifier.metadata.get("file_index", {}):
+                    classifier.metadata.setdefault("file_index", {})[final_cat] = []
+                classifier.metadata["file_index"][final_cat].append({
+                    "bvid": bv,
+                    "title": t,
+                    "added": datetime.now().isoformat()
+                })
+                # 从旧分类移除
+                old_cat = c if c != '未分类' else '未分类'
+                if old_cat in classifier.metadata.get("file_index", {}):
+                    classifier.metadata["file_index"][old_cat] = [
+                        e for e in classifier.metadata["file_index"][old_cat]
+                        if e.get("bvid") != bv
+                    ]
+
+                # 清理旧空目录
+                old_dir = os.path.dirname(fp)
+                if os.path.exists(old_dir) and not os.listdir(old_dir):
+                    try:
+                        os.rmdir(old_dir)
+                    except Exception as e:
+                        log(f'非预期异常: {e}', 'WARN')
+
+                # 添加新分类路径到已知列表供后续分类使用
+                if final_cat not in all_cats:
+                    all_cats.append(final_cat)
+
+            except Exception as e:
+                print(f"  {Fore.RED}AI分类异常: {e}{Style.RESET_ALL}")
+                skipped_count += 1
+
+    # ── 保存分类器元数据 ──
+    try:
+        classifier._sync_categories_from_file_index()
+        classifier._save_metadata()
+        classifier.cleanup_empty_folders()
+    except Exception as e:
+        log(f'非预期异常: {e}', 'WARN')
+
+    # ── 汇总 ──
+    print(f"\n{Fore.LIGHTYELLOW_EX}╔══════════════════════════════════════════════════════════╗{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}║  📂 整理完成！                                            ║{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}╠══════════════════════════════════════════════════════════╣{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}║{Style.RESET_ALL}  {Fore.GREEN}✓ AI归类移动: {moved_count} 个{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}║{Style.RESET_ALL}  {Fore.RED}🗑 重复清理: {deleted_count} 个{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}║{Style.RESET_ALL}  {Fore.YELLOW}⊘ 跳过: {skipped_count} 个{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}║{Style.RESET_ALL}  {Fore.GREEN}✓ 3层文件: {len(ok_files)} 个 (未动){Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}╚══════════════════════════════════════════════════════════╝{Style.RESET_ALL}")
+
+    # 显示新的分类结构
+    try:
+        classifier.show_category_structure()
+    except Exception as e:
+        log(f'非预期异常: {e}', 'WARN')
+
+
+async def _call_ai_with_retry_static(model, messages, request_timeout=30, max_retries=2):
+    """静态AI调用辅助函数（不依赖brain实例），带重试"""
+    for attempt in range(max_retries + 1):
+        try:
+            resp = openai.ChatCompletion.create(
+                model=model,
+                messages=messages,
+                timeout=request_timeout
+            )
+            return resp
+        except Exception as e:
+            if attempt < max_retries:
+                wait = min(3 * (2 ** attempt), 10)
+                print(f"  {Fore.YELLOW}AI重试 ({attempt+1}/{max_retries})，等待{wait}s...{Style.RESET_ALL}")
+                await asyncio.sleep(wait)
+            else:
+                raise
+
+
+# ==============================================================================
+# [START] 主程序入口
+# ==============================================================================
+if False:  # [DISABLED] 重复主入口，已禁用
+    if os.name == 'nt':
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+    # ── 免责声明确认（必须手动输入"我同意"）──
+    _disclaimer_confirm()
+
+    while True:
+        show_main_menu()
+        choice = input(f"{Fore.CYAN}请输入选项 (0-9/D/E/F/G/I/K/M/O/R/V): {Style.RESET_ALL}").strip()
+
+        if choice == "0":
+            print(f"{Fore.YELLOW}👋 再见！{Style.RESET_ALL}")
+            break
+        elif choice == "1":
+            print(f"{Fore.GREEN}[START] 启动机器人...{Style.RESET_ALL}")
+            try:
+                asyncio.run(AgentBrain().run())
+            except KeyboardInterrupt:
+                print(f"\n{Fore.YELLOW}[WARN]  机器人被用户中断{Style.RESET_ALL}")
+            except Exception as e:
+                print(f"{Fore.RED}[ERROR] 机器人运行异常: {e}{Style.RESET_ALL}")
+                import traceback
+                traceback.print_exc()
+            finally:
+                # 🔒 确保锁文件被释放（atexit 只在 Python 退出时触发，
+                # 但主菜单循环会继续运行，所以需要显式释放）
+                _release_bot_lock()
+        elif choice == "2":
+            show_config_menu()
+        elif choice == "3":
+            show_login_menu()
+        elif choice == "4":
+            show_knowledge_base_menu()
+        elif choice == "5":
+            show_interest_menu()
+        elif choice == "6":
+            show_comment_menu()
+        elif choice == "7":
+            show_private_message_menu()
+        elif choice == "8":
+            show_diary_evolution_menu()
+        elif choice == "9":
+            show_agent_skill_menu()
+        elif choice.lower() == "f":
+            show_up_danmaku_menu()
+        elif choice.lower() == "g":
+            _configure_asr_settings()
+            if save_config(config):
+                print(f"{Fore.GREEN}[OK] ASR设置已保存{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.RED}[ERROR] ASR设置保存失败{Style.RESET_ALL}")
+        elif choice.lower() == "d":
+            _configure_dry_goods_settings()
+        elif choice.lower() == "m":
+            show_mood_menu()
+        elif choice.lower() == "v":
+            try:
+                asyncio.run(manual_video_analysis())
+            except KeyboardInterrupt:
+                print(f"\n{Fore.YELLOW}[WARN] 用户中断{Style.RESET_ALL}")
+            except Exception as e:
+                print(f"{Fore.RED}[ERROR] 手动视频分析异常: {e}{Style.RESET_ALL}")
+                import traceback
+                traceback.print_exc()
+        elif choice.lower() == "k":
+            try:
+                asyncio.run(revisit_knowledge_base_menu())
+            except KeyboardInterrupt:
+                print(f"\n{Fore.YELLOW}[WARN] 用户中断{Style.RESET_ALL}")
+            except Exception as e:
+                print(f"{Fore.RED}[ERROR] 知识库重温异常: {e}{Style.RESET_ALL}")
+                import traceback
+                traceback.print_exc()
+        elif choice.lower() == "r":
+            factory_reset_all()
+        elif choice.lower() == "e":
+            export_config()
+        elif choice.lower() == "i":
+            import_config()
+        elif choice.lower() == "o":
+            try:
+                asyncio.run(organize_knowledge_base())
+            except KeyboardInterrupt:
+                print(f"\n{Fore.YELLOW}[WARN] 用户中断{Style.RESET_ALL}")
+            except Exception as e:
+                print(f"{Fore.RED}[ERROR] 知识库整理异常: {e}{Style.RESET_ALL}")
+                import traceback
+                traceback.print_exc()
+        else:
+            print(f"{Fore.RED}[ERROR] 无效选项，请重新选择！{Style.RESET_ALL}")
+    def _judge_asr_skip(self, bvid, title=""):
+        """
+        [已废弃，由 _ai_judge_has_human_voice 替代]
+        AI预判：根据标题/分区/标签判断是否跳过ASR
+        返回 (是否跳过, 原因)
+        """
+        from xingye_bot.asr_engine import ASREngine
+
+        title_str = title or ""
+        return ASREngine.should_skip_asr(
+            title=title_str,
+            tags=getattr(self, "_current_video_tags", None) or [],
+            category=getattr(self, "_current_video_category", "") or "",
+            cover_desc=getattr(self, "_current_video_cover_desc", "") or "",
+            duration=getattr(self, "_current_video_duration", 0) or 0,
+        )
+
+    async def _download_video_for_asr(self, bvid):
+        """为ASR下载视频（完全对齐video_modes.py的下载逻辑：http2/Origin/Referer/长超时）"""
+        try:
+            import tempfile, hashlib as _h, time as _t
+            referer = f'https://www.bilibili.com/video/{bvid}'
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Referer': referer,
+                'Origin': 'https://www.bilibili.com',
+            }
+            async with httpx.AsyncClient(
+                http2=True,
+                headers=headers, cookies=self.cookies,
+                timeout=90.0, follow_redirects=True
+            ) as client:
+                # [FIX] WBI签名：独立获取，不依赖 self.bili._wbi_keys 避免 AttributeError
+                wkeys = None
+                try:
+                    nav = await client.get('https://api.bilibili.com/x/web-interface/nav')
+                    nd = nav.json()
+                    if nd.get('code') == 0:
+                        wi = nd['data'].get('wbi_img', {})
+                        im = re.search(r'/([^/]+)\.(?:png|svg)$', wi.get('img_url', ''))
+                        sm = re.search(r'/([^/]+)\.(?:png|svg)$', wi.get('sub_url', ''))
+                        if im and sm:
+                            wkeys = (im.group(1), sm.group(1))
+                            # 顺便缓存到 bili 实例（如果可用）
+                            bili = getattr(self, 'bili', None)
+                            if bili and hasattr(bili, '_wbi_keys'):
+                                try:
+                                    bili._wbi_keys = wkeys
+                                    bili._wbi_keys_ts = time.time()
+                                except Exception as e:
+                                    log(f'非预期异常: {e}', 'WARN')
+                except Exception as e:
+                    log(f"[WARN] ASR下载WBI密钥获取失败: {e}", "WARN")
+
+                params = {'bvid': bvid}
+                if wkeys:
+                    wts = int(_t.time())
+                    sp = dict(params)
+                    sp['wts'] = wts
+                    si = sorted(sp.items(), key=lambda x: x[0])
+                    qs = '&'.join(f'{k}={v}' for k, v in si)
+                    sp['w_rid'] = _h.md5((qs + wkeys[0] + wkeys[1]).encode()).hexdigest()
+                    params = sp
+
+                v_res = await client.get('https://api.bilibili.com/x/web-interface/view', params=params)
+                v_data = v_res.json()
+                if v_data.get('code') != 0:
+                    return None
+                info = v_data['data']
+                cid = info.get('cid', 0)
+
+                # 获取视频流
+                play_params = {'bvid': bvid, 'cid': cid, 'qn': 32, 'fnval': 0, 'fourk': 0}
+                if wkeys:
+                    wts = int(_t.time())
+                    sp = dict(play_params)
+                    sp['wts'] = wts
+                    si = sorted(sp.items(), key=lambda x: x[0])
+                    qs = '&'.join(f'{k}={v}' for k, v in si)
+                    sp['w_rid'] = _h.md5((qs + wkeys[0] + wkeys[1]).encode()).hexdigest()
+                    play_params = sp
+                play = await client.get(
+                    'https://api.bilibili.com/x/player/playurl',
+                    params=play_params
+                )
+                play_data = play.json()
+                durls = play_data.get('data', {}).get('durl', [])
+                if not durls:
+                    return None
+                video_url = durls[0]['url']
+
+                # 下载
+                out_dir = os.path.join(tempfile.gettempdir(), "bilibili_asr", bvid)
+                os.makedirs(out_dir, exist_ok=True)
+                out_path = os.path.join(out_dir, f"{bvid}.mp4")
+
+                async with client.stream("GET", video_url, headers=headers) as resp:
+                    resp.raise_for_status()
+                    with open(out_path, "wb") as f:
+                        async for chunk in resp.aiter_bytes(1024 * 256):
+                            f.write(chunk)
+
+                return out_path
+        except Exception as e:
+            log(f"ASR视频下载失败: {e}", "WARN")
+            return None
+
+    async def analyze_vision(self, pic_url):
+        if not pic_url: return "无封面", 0
+        if self._is_ai_degraded(): return "AI降级,跳过", 0
+        try:
+            resp = await self._call_ai_with_retry(
+                model=MODEL_VISION,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT_VISION},
+                    {"role": "user", "content": [
+                        {"type": "text", "text": "评价"},
+                        {"type": "image_url", "image_url": {"url": pic_url}}
+                    ]}
+                ],
+                request_timeout=90
+            )
+            content = resp.choices[0].message.content
+            score = 5.0
+            if "Score:" in content:
+                try:
+                    parts = content.split("Score:")
+                    desc = parts[0].strip()[:15]
+                    score = float(parts[1].strip())
+                except (ValueError, IndexError):
+                    desc = content[:15]
+            else:
+                desc = content[:15]
+            return desc, score
+        except Exception as e:
+            log(f"封面分析失败(已重试): {_mask_urls(str(e)[:80])}", "WARN")
+            return "分析失败", 0
+
+    async def judge_interest_with_ai(self, title, up, vis_desc, vis_score):
+        interests = self.interest_mgr.get_interests()
+        if not interests:
+            return True, [], "未设置兴趣，默认通过"
+
+        matched = self.interest_mgr.get_matching_interests(title, up)
+        if matched:
+            return True, matched, f"关键词匹配: {', '.join(matched)}"
+
+        prompt = f"""
+请判断这个B站视频是否符合用户兴趣。
+
+用户兴趣: {", ".join(interests)}
+视频标题: {title}
+UP主: {up}
+封面印象: {vis_desc}
+封面印象分: {vis_score}
+
+要求:
+1. 综合标题、UP主、封面印象判断，不要只做关键词匹配。
+2. 只输出JSON，格式为:
+{{"interested": true, "matched": ["兴趣1"], "reason": "一句话理由"}}
+3. 如果明显不相关，interested=false，matched=[]。
+"""
+        try:
+            resp = await self._call_ai_with_retry(
+                model=MODEL_BRAIN,
+                messages=[
+                    {"role": "system", "content": "你是B站视频兴趣筛选器，只输出合法JSON。"},
+                    {"role": "user", "content": prompt}
+                ],
+                request_timeout=90
+            )
+            raw = resp.choices[0].message.content.strip()
+            # [FIX] 多策略JSON提取：嵌套匹配 + rfind兜底
+            start = raw.find("{")
+            json_str = raw
+            if start >= 0:
+                # 嵌套匹配找闭合的 }
+                depth = 0
+                match_end = -1
+                for i in range(start, len(raw)):
+                    if raw[i] == '{':
+                        depth += 1
+                    elif raw[i] == '}':
+                        depth -= 1
+                        if depth == 0:
+                            match_end = i
+                            break
+                if match_end >= 0:
+                    json_str = raw[start:match_end + 1]
+                else:
+                    end = raw.rfind("}")
+                    if end >= start:
+                        json_str = raw[start:end + 1]
+            # ── 修复模型偶尔用单引号/不规范JSON的错误 ──
+            try:
+                data = json.loads(json_str)
+            except json.JSONDecodeError:
+                # 尝试修复常见问题：单引号→双引号
+                fixed = json_str.replace("'", '"')
+                # 修复 True/False/None 大小写（replace单引号后可能被误改）
+                fixed = re.sub(r'\bTrue\b', 'true', fixed)
+                fixed = re.sub(r'\bFalse\b', 'false', fixed)
+                fixed = re.sub(r'\bNone\b', 'null', fixed)
+                data = json.loads(fixed)
+            ai_matched = data.get("matched") or []
+            if isinstance(ai_matched, str):
+                ai_matched = [ai_matched]
+            reason = str(data.get("reason") or "AI综合判断")
+            return bool(data.get("interested")), ai_matched, reason
+        except Exception as e:
+            log(f"AI兴趣判断失败(已重试)，退回关键词判断: {str(e)[:80]}", "WARN")
+            return False, [], "关键词未匹配"
+
+    async def _get_comments_context(self, aid: int):
+        c_list_raw = await self.bili.get_hot_comments(aid, limit=8)
+        if not c_list_raw: return "暂无评论", []
+
+        # [SPEED] 两阶段并行：先收集所有评论基本信息，再并行分析图片
+        comment_entries = []
+        image_tasks = []
+        for i, c in enumerate(c_list_raw):
+            try:
+                cid, user, msg = c['rpid'], c['member']['uname'], c['content']['message']
+                entry = {"cid": cid, "user": user, "content": msg, "pic_info": ""}
+                if VISION_COMMENT_IMAGES_ENABLED:
+                    pictures = c.get('content', {}).get('pictures', [])
+                    if pictures:
+                        img_urls = [p.get('img_src', '') for p in pictures[:3] if p.get('img_src')]
+                        if img_urls:
+                            image_tasks.append(self._analyze_comment_images(cid, img_urls, user_msg=msg))
+                            entry["_img_idx"] = len(image_tasks) - 1
+                comment_entries.append(entry)
+            except (KeyError, TypeError):
+                continue
+
+        # 并行分析所有评论图片
+        pic_results = await asyncio.gather(*image_tasks, return_exceptions=True) if image_tasks else []
+
+        # 组装结果
+        context_str = "【热门评论】:\n"
+        c_list_clean = []
+        for entry in comment_entries:
+            cid, user, msg = entry["cid"], entry["user"], entry["content"]
+            pic_info = ""
+            if "_img_idx" in entry:
+                result = pic_results[entry["_img_idx"]]
+                if isinstance(result, str) and result:
+                    pic_info = f" [附图描述: {result}]"
+            context_str += f"ID:{cid} User:{user} Msg:{msg}{pic_info}\n"
+            c_list_clean.append({"id": cid, "user": user, "content": msg, "pic_info": pic_info.strip()})
+        return context_str, c_list_clean
+
+    async def _analyze_comment_images(self, cid, img_urls, user_msg=""):
+        """[VISION] 下载评论文图片并用视觉AI描述，同时展示评论文字+图片"""
+        if not img_urls or self._is_ai_degraded():
+            return ""
+        max_images = min(len(img_urls), VISION_MAX_COMMENT_IMAGES)
+        import httpx as _httpx, base64 as _b64
+
+        async def _dl_and_analyze(idx, url):
+            try:
+                async with _httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+                    r = await client.get(url, headers={
+                        'User-Agent': 'Mozilla/5.0',
+                        'Referer': 'https://www.bilibili.com'
+                    })
+                    if r.status_code != 200:
+                        return None
+                    data_url = "data:image/jpeg;base64," + _b64.b64encode(r.content).decode("ascii")
+                resp = await self._call_ai_with_retry(
+                    model=MODEL_VISION,
+                    messages=[{
+                        "role": "system",
+                        "content": "你是评论图片分析助手。用一句简短中文描述图片内容（是什么类型的图、主要内容、情绪倾向）。"
+                    }, {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "描述这张评论区的图片"},
+                            {"type": "image_url", "image_url": {"url": data_url}}
+                        ]
+                    }],
+                    request_timeout=20
+                )
+                desc = resp.choices[0].message.content.strip()[:80]
+                return f"[图{idx+1}]{desc}"
+            except Exception as e:
+                log(f"评论图片分析失败(cid={cid} img{idx}): {e}", "DEBUG")
+                return None
+
+        # [SPEED] 并行下载+分析所有图片
+        tasks = [_dl_and_analyze(i, url) for i, url in enumerate(img_urls[:max_images])]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        analyzed = [r for r in results if isinstance(r, str)]
+        if analyzed:
+            msg_preview = user_msg[:40] + "..." if len(user_msg) > 40 else user_msg
+            log(f"[EYE] 评论({msg_preview}) + 附图({len(analyzed)}张): {'; '.join(analyzed)}", "EYE")
+        return "; ".join(analyzed)
+
+    async def watch_and_sync_history(self, bvid):
+        sec = random.uniform(VIDEO_INTERVAL_MIN, VIDEO_INTERVAL_MAX)
+        log(f"短暂休息 {sec:.1f} 秒后继续...", "INFO")
+        try:
+            res = await self.bili.report_history(bvid, played_time=random.randint(60,120))
+            if res.get('code') == 0:
+                log("已同步观看历史 (手机可见)", "NOTE")
+            else:
+                log(f"历史记录同步失败: {res.get('message')}", "WARN")
+        except Exception as e:
+            log(f"上报历史时异常: {e}", "ERROR")
+
+        await asyncio.sleep(sec)
+
+    async def energy_recovery_session(self):
+        log(f"精力耗尽 ({self.energy}%)，进入恢复模式... [FAST]", "ENERGY")
+
+        recovery_rounds = random.randint(ROUNDS_MIN, ROUNDS_MAX)
+        log(f"预计恢复 {recovery_rounds} 轮，请耐心等待...", "ENERGY")
+
+        for round_num in range(1, recovery_rounds + 1):
+            energy_gain = random.randint(ENERGY_RECOVERY_MIN, ENERGY_RECOVERY_MAX)
+            self.energy = min(MAX_ENERGY, self.energy + energy_gain)
+
+            round_interval = random.randint(ROUND_INTERVAL_MIN, ROUND_INTERVAL_MAX)
+
+            log(f"第 {round_num}/{recovery_rounds} 轮恢复: +{energy_gain}% → {self.energy}% (等待{round_interval}秒)", "ENERGY")
+
+            if round_num < recovery_rounds:
+                # [SPEED] 一次性睡眠替代逐10秒循环
+                log(f"下次恢复倒计时: {round_interval}秒...", "ENERGY")
+                await asyncio.sleep(round_interval)
+
+            self.last_energy_recovery = datetime.now()
+
+        log(f"恢复完成！当前精力: {self.energy}%，准备继续工作！", "SUCCESS")
+
+    async def check_and_handle_comments(self):
+        """检查并处理新评论，返回处理数量"""
+        if not COMMENT_CHECK_ENABLED:
+            return 0
+        if not self.comment_mgr:
+            return 0
+        
+        now = datetime.now()
+        if self.last_comment_check and (now - self.last_comment_check).total_seconds() < COMMENT_CHECK_INTERVAL:
+            return 0
+        
+        try:
+            processed = await self.comment_mgr.process_new_comments(self.bili)
+            if processed > 0:
+                log(f"本次处理了 {processed} 条评论互动", "COMMENT")
+                # 消耗精力
+                self.energy -= processed
+                if self.energy < 0:
+                    self.energy = 0
+                log(f"评论互动消耗 {processed} 点精力，剩余: {self.energy}%", "ENERGY")
+            return processed
+        except Exception as e:
+            log(f"检查评论失败: {e}", "ERROR")
+            return 0
+        finally:
+            self.last_comment_check = now
+
+    async def check_and_handle_private_messages(self):
+        """检查并处理新私信"""
+        if not PRIVATE_MESSAGE_ENABLED:
+            return 0
+
+        now = datetime.now()
+        if self.last_private_message_check and (now - self.last_private_message_check).total_seconds() < PRIVATE_MESSAGE_CHECK_INTERVAL:
+            return 0
+
+        if not self.private_message_mgr:
+            return 0
+
+        try:
+            processed = await self.private_message_mgr.process_new_messages()
+            if processed > 0:
+                log(f"本次处理了 {processed} 条私信", "DM")
+            return processed
+        except Exception as e:
+            log(f"检查私信失败: {e}", "ERROR")
+            return 0
+        finally:
+            self.last_private_message_check = now
+
+    async def maybe_initiate_chat(self):
+        """[MSG] 偶尔主动找人聊天（学而时习之的社交版）。"""
+        if not ACTIVE_CHAT_ENABLED:
+            return
+        if not PRIVATE_MESSAGE_ENABLED or not PRIVATE_MESSAGE_AUTO_REPLY:
+            return
+        if not self.private_message_mgr:
+            return
+        if self._active_chat_count >= ACTIVE_CHAT_MAX_PER_SESSION:
+            return
+        cooldown_ok = (datetime.now() - self._last_active_chat_at).total_seconds() / 60 >= ACTIVE_CHAT_COOLDOWN_MINUTES
+        if not cooldown_ok:
+            return
+        # [FIX] 时间段守卫：深夜/凌晨不主动打扰别人（23:00-07:00）
+        hour = datetime.now().hour
+        if hour >= 23 or hour < 7:
+            return
+        if random.random() >= PROB_INITIATE_CHAT:
+            return
+
+        try:
+            # 随机从关注/粉丝列表里挑一个人
+            target_uid = None
+            target_name = ""
+            try:
+                # 优先从粉丝里找
+                followers = await self.private_message_mgr.toolbox.followers_search("", limit=20)
+                if followers and isinstance(followers, list) and len(followers) > 0:
+                    pick = random.choice(followers)
+                    target_uid = int(pick.get("mid") or 0)
+                    target_name = str(pick.get("name", ""))
+            except Exception as e:
+                log(f"[WARN] 获取粉丝列表失败: {e}", "WARN")
+            if not target_uid:
+                try:
+                    followings = await self.private_message_mgr.toolbox.followings_search("", limit=20)
+                    if followings and isinstance(followings, list) and len(followings) > 0:
+                        pick = random.choice(followings)
+                        target_uid = int(pick.get("mid") or 0)
+                        target_name = str(pick.get("name", ""))
+                except Exception as e:
+                    log(f"[WARN] 获取关注列表失败: {e}", "WARN")
+            if not target_uid or target_uid == self.bili.uid:
+                return
+
+            self._active_chat_count += 1
+            self._last_active_chat_at = datetime.now()
+            log(f"[MSG] 主动找 @{target_name}(uid:{target_uid}) 聊聊天... (第{self._active_chat_count}次)", "CHAT")
+
+            # ── 🔍 先看对方主页：拉取个人信息 + 最近投稿 ──
+            target_profile = {}
+            target_videos = []
+            try:
+                target_profile = await self.bili.get_up_info(target_uid) or {}
+                if not target_profile.get("error"):
+                    log(f"   📋 {target_name} 主页: Lv.{target_profile.get('level',0)} "
+                        f"签名={str(target_profile.get('sign',''))[:40]}", "DEBUG")
+            except Exception as e:
+                log(f"   [WARN] 无法获取 {target_name} 主页: {e}", "DEBUG")
+
+            try:
+                target_videos = await self.bili.get_up_videos(target_uid, limit=5) or []
+                if target_videos:
+                    titles = [v.get("title","")[:40] for v in target_videos[:3]]
+                    log(f"   [VIDEO] {target_name} 最近投稿: {'; '.join(titles)}", "DEBUG")
+            except Exception as e:
+                log(f"   [WARN] 无法获取 {target_name} 视频: {e}", "DEBUG")
+
+            # 构建目标用户画像
+            target_sign = str(target_profile.get("sign", "")).strip()
+            target_level = target_profile.get("level", 0)
+            target_follower = target_profile.get("follower", 0)
+            target_video_count = target_profile.get("video_count", 0)
+
+            video_summary = ""
+            if target_videos:
+                video_summary = "对方最近投稿: " + "；".join(
+                    [v.get("title","")[:50] for v in target_videos[:5]]
+                )
+
+            target_profile_block = f"""【目标用户主页信息】
+用户名: {target_name}
+个性签名: {target_sign if target_sign else "（无）"}
+B站等级: Lv.{target_level}
+粉丝数: {target_follower}
+投稿数: {target_video_count}
+{video_summary if video_summary else "（未拉取到投稿信息）"}
+"""
+
+            # 生成开场白
+            interests = self.interest_mgr.get_interests()
+            interest_str = "、".join(interests[:5]) if interests else "随便聊聊"
+            persona_block = self.persona_mgr.build_prompt_block()
+            mood_block = self.mood_mgr.build_prompt_block()
+
+            prompt = f"""
+你要给B站上的一个用户「{target_name}」发一条初次私信打招呼。
+这是主动发起聊天，不是回复别人的消息。
+
+{persona_block}
+{mood_block}
+你的兴趣: {interest_str}
+{target_profile_block}
+当前时间: {datetime.now().isoformat(timespec='seconds')}
+
+要求：
+1. 自然、轻松、不油腻，像普通B站用户之间的寒暄
+2. 🚫 不要聊你自己的兴趣爱好！先看看目标用户的签名和投稿内容——
+   - 如果对方投稿了具体领域的视频（游戏/动画/科技/音乐等），围绕对方的创作内容展开话题
+   - 如果对方签名里有信息，可以顺着签名聊
+   - 只有当对方主页完全空白时，才简单聊聊日常
+3. 不要太长，50字以内
+4. 不要用客服腔、不要自来熟、不要"大佬""up主"之类刻意恭维
+5. 禁止承诺做违法、刷量、侵权的事
+6. 结尾带上"{config.get('behavior', {}).get('ai_marker', '（内容由AI生成并由AI回复）')}"
+7. 如果看了对方主页实在不知道聊什么，返回空字符串
+
+只返回要发送的内容，不要解释。
+"""
+            # [FIX] 用线程池异步执行，防止同步AI调用阻塞事件循环导致崩溃
+            resp = await asyncio.to_thread(
+                openai.ChatCompletion.create,
+                model=MODEL_BRAIN,
+                messages=[
+                    {"role": "system", "content": "你是B站上的一个普通用户。看了对方主页后再开口——围绕对方的投稿内容或签名展开话题。友好、有边界感、不油腻。"},
+                    {"role": "user", "content": prompt}
+                ],
+                timeout=60
+            )
+            chat_text = resp.choices[0].message.content.strip()
+            if not chat_text or chat_text.upper() == "END":
+                log(f"AI判断不适合主动聊天 @{target_name}，跳过", "CHAT")
+                return
+
+            chat_text = ensure_ai_marker(chat_text)
+            ok, reason, hits = ReplySafetyGuard().review("(主动发起聊天)", chat_text)
+            if not ok:
+                log(f"主动聊天内容被拦截: {reason} | 命中: {', '.join(hits)}", "WARN")
+                return
+
+            await asyncio.sleep(human_reply_delay())
+            result = await self.private_message_mgr.send_reply(target_uid, chat_text)
+            log(f"[MSG] 已主动发消息给 @{target_name}: {chat_text[:60]}", "CHAT")
+
+            # 记录到日记
+            self.record_session_event(
+                "active_chat",
+                target_uid=target_uid,
+                target_name=target_name,
+                content=chat_text[:120]
+            )
+        except Exception as e:
+            log(f"主动聊天失败: {e}", "WARN")
+
+    # ── [*] UP主关注（AI自动关注喜欢的UP主）───────────────────────────────
+    def _reset_daily_follows(self):
+        today = datetime.now().strftime("%Y-%m-%d")
+        if self.daily_follows_date != today:
+            self.daily_follows = 0
+            self.daily_follows_date = today
+
+    def _reset_daily_danmaku_likes(self):
+        today = datetime.now().strftime("%Y-%m-%d")
+        if self.daily_danmaku_likes_date != today:
+            self.daily_danmaku_likes = 0
+            self.daily_danmaku_likes_date = today
+
+    def _reset_daily_danmaku_sent(self):
+        today = datetime.now().strftime("%Y-%m-%d")
+        if self.daily_danmaku_sent_date != today:
+            self.daily_danmaku_sent = 0
+            self.daily_danmaku_sent_date = today
+
+    async def maybe_follow_up(self, up_uid: int, up_name: str, score: float):
+        """根据AI评分和印象积累决定是否关注UP主。
+        
+        关注即认可，不是抽奖——设计理念：
+        1. 评分 ≥ UP_FOLLOW_MIN_SCORE（默认7分）才进入候选池
+        2. 需积累 ≥ UP_FOLLOW_MIN_IMPRESSIONS 次正面印象（首次观看不计）
+        3. 特别优秀（≥ UP_FOLLOW_EXCEPTIONAL_SCORE）可首看即关注
+        4. 已关注的不重复关注（followed 标志）
+        """
+        if not UP_FOLLOW_ENABLED or not up_uid or not up_name:
+            return False
+        
+        self._reset_daily_follows()
+        if self.daily_follows >= UP_FOLLOW_MAX_DAILY:
+            return False
+        
+        # 冷却检查
+        cooldown_ok = (datetime.now() - self.last_follow_at).total_seconds() / 60 >= UP_FOLLOW_COOLDOWN_MINUTES
+        if not cooldown_ok:
+            return False
+        
+        # ── [*] 核心强化：评分门槛 ──
+        # 不得因概率到了就关注评分平庸的 UP
+        exceptional = score >= UP_FOLLOW_EXCEPTIONAL_SCORE
+        if not exceptional and score < UP_FOLLOW_MIN_SCORE:
+            return False  # 评分不达标，直接拒绝
+        
+        # ── [*] 核心强化：已关注不重复 ──
+        up_entry = self.memory.setdefault("known_ups", {}).get(up_name, {})
+        if up_entry.get("followed"):
+            return False  # 已关注过
+        
+        # ── [*] 核心强化：印象积累 ──
+        views = up_entry.get("views", 0)
+        avg_score = up_entry.get("avg_score", score)
+        if not exceptional and views < UP_FOLLOW_MIN_IMPRESSIONS:
+            # 看的次数不够，不关注（但记录印象）
+            return False
+        
+        # ── 概率计算 ──
+        # 基础概率 × 评分因子 × 印象奖励（看得越多越可能关注，但有上限）
+        score_factor = min(score / 5.0, 2.0) if score > 0 else 1.0
+        impression_bonus = min(views / max(UP_FOLLOW_MIN_IMPRESSIONS, 1), 2.0)
+        adjusted_prob = UP_FOLLOW_AUTO_PROB * score_factor * impression_bonus
+        if not exceptional and random.random() >= adjusted_prob:
+            return False
+        
+        try:
+            avg_str = f", 均分:{avg_score:.1f}" if views else ""
+            log(f"[*] 正在关注 UP主 @{up_name} (UID:{up_uid})... (评分:{score}, 观看{views}次{avg_str}, 概率:{adjusted_prob:.3f})", "FOLLOW")
+            result = await self.bili.follow_up(up_uid)
+            if result.get("code") == 0:
+                self.daily_follows += 1
+                self.last_follow_at = datetime.now()
+                # 设置 followed 标志
+                up_entry["followed"] = True
+                up_entry["followed_at"] = datetime.now().isoformat()
+                if not up_entry.get("uid"):
+                    up_entry["uid"] = up_uid
+                self._save_memory()
+                log(f"[OK] 已关注 UP主 @{up_name}！今日已关注 {self.daily_follows}/{UP_FOLLOW_MAX_DAILY}", "SUCCESS")
+                self.record_session_event("follow_up", up_uid=up_uid, up_name=up_name, score=score, views=views, avg_score=round(avg_score, 1) if views else score)
+                return True
+            elif result.get("code") == 22014:
+                # 已经关注过（比如之前网页/App上关注的），同步本地内存即可
+                up_entry["followed"] = True
+                if not up_entry.get("uid"):
+                    up_entry["uid"] = up_uid
+                self._save_memory()
+                log(f"已关注过 UP主 @{up_name} (之前已关注，已同步记录)", "INFO")
+                return True
+            else:
+                log(f"关注失败: {result.get('msg')}", "WARN")
+        except Exception as e:
+            log(f"关注 UP主异常: {e}", "WARN")
+        return False
+
+    async def maybe_browse_up_videos(self, force_up_uid=None, up_name_hint=None):
+        """浏览UP主的主页视频，优先浏览喜欢的UP主，可作为推荐流替代目标。
+        
+        Returns: 单个视频dict（格式兼容主循环target）或 None
+        """
+        if not UP_FOLLOW_ENABLED:
+            return None
+        
+        # 冷却检查（force_up_uid 可跳过冷却）
+        elapsed = (datetime.now() - self.last_up_browse_at).total_seconds() / 60
+        if elapsed < UP_FOLLOW_COOLDOWN_MINUTES and not force_up_uid:
+            return None
+        
+        target_uid = force_up_uid
+        chosen_up_name = up_name_hint
+        is_favorite = False
+        
+        if not target_uid:
+            # ── [*] 优先浏览喜欢的UP主（更高概率）──
+            favorite_ups = self.get_favorite_ups()
+            if favorite_ups and random.random() < UP_FOLLOW_FAVORITE_PROB:
+                fav = random.choice(favorite_ups)
+                fav_uid = fav.get("uid")
+                if fav_uid:
+                    target_uid = int(fav_uid)
+                    chosen_up_name = fav.get("name")
+                    is_favorite = True
+                # 也检查全局配置中的喜爱UID列表
+                elif UP_FOLLOW_FAVORITE_UID_LIST and len(UP_FOLLOW_FAVORITE_UID_LIST) > 0:
+                    target_uid = random.choice(UP_FOLLOW_FAVORITE_UID_LIST)
+                    is_favorite = True
+            
+            # 回退：随机浏览已知UP主
+            if not target_uid:
+                if random.random() >= UP_FOLLOW_BROWSE_PROB:
+                    return None
+                known_ups = self.memory.get("known_ups", {})
+                if not known_ups:
+                    return None
+                # 随机选择一个已关注的UP主
+                chosen_up_name = random.choice(list(known_ups.keys()))
+                uid_from_mem = known_ups.get(chosen_up_name, {}).get("uid")
+                if uid_from_mem:
+                    target_uid = int(uid_from_mem)
+                else:
+                    # 尝试从user_profile获取UID
+                    profile = self.user_profile_mgr.get_profile(f"up::{chosen_up_name}")
+                    if profile and profile.get("uid"):
+                        target_uid = int(profile["uid"])
+                    else:
+                        return None
+            
+            if not target_uid:
+                return None
+        
+        self.last_up_browse_at = datetime.now()
+        tag = "[STAR]喜爱" if is_favorite else "📺"
+        log(f"{tag} 浏览 UP主 {'@'+chosen_up_name if chosen_up_name else ''} (UID:{target_uid}) 的主页视频...", "BROWSE")
+        
+        try:
+            videos = await self.bili.get_up_videos(target_uid, limit=UP_FOLLOW_MAX_BROWSE)
+            if videos:
+                log(f"获取到 {len(videos)} 个视频:", "BROWSE")
+                for v in videos:
+                    log(f"  • {v.get('title','')[:40]} | 播放:{v.get('play',0)}", "BROWSE")
+                # 返回一个随机视频作为可用的目标
+                chosen = random.choice(videos)
+                return {
+                    "bvid": chosen.get("bvid", ""),
+                    "title": chosen.get("title", ""),
+                    "owner": {"name": chosen_up_name or "", "mid": target_uid},
+                    "id": chosen.get("aid", 0),
+                    "aid": chosen.get("aid", 0),
+                    "pic": chosen.get("pic", ""),
+                    "_source": "up_browse",
+                    "_is_favorite_up": is_favorite
+                }
+            else:
+                log("该UP主暂无视频或获取失败", "INFO")
+        except Exception as e:
+            log(f"浏览UP主视频异常: {e}", "WARN")
+        return None
+
+    # ── [MSG] 弹幕互动 ──────────────────────────────────────────────────
+    async def maybe_read_danmaku(self, bvid: str):
+        """读取视频弹幕，融入AI决策上下文。"""
+        if not DANMAKU_ENABLED or not bvid:
+            return []
+        
+        if random.random() >= DANMAKU_READ_PROB:
+            return []
+        
+        try:
+            log("[MSG] 正在读取弹幕...", "DANMAKU")
+            cid, danmaku_list = await self.bili.get_danmakus(bvid, limit=30)
+            if danmaku_list:
+                self._last_danmaku_videos[bvid] = danmaku_list
+                self._last_danmaku_cids[bvid] = cid
+                # 清理旧缓存（保留最近10个视频的弹幕）
+                if len(self._last_danmaku_videos) > 10:
+                    oldest = list(self._last_danmaku_videos.keys())[0]
+                    del self._last_danmaku_videos[oldest]
+                
+                log(f"读取到 {len(danmaku_list)} 条弹幕 (cid={cid})", "DANMAKU")
+                # 显示几条代表性弹幕
+                for dm in danmaku_list[:5]:
+                    log(f"  弹幕: {dm.get('text','')[:40]}", "DANMAKU")
+                
+                # 同时触发点赞和发送
+                await self.maybe_like_danmaku(bvid, danmaku_list, cid)
+                await self.maybe_send_danmaku(bvid)
+                return danmaku_list
+        except Exception as e:
+            log(f"读取弹幕异常: {e}", "WARN")
+        return []
+
+    async def maybe_like_danmaku(self, bvid: str, danmaku_list: list, cid: int = 0):
+        """对有趣的弹幕进行点赞。cid 由 get_danmakus 返回。"""
+        if not DANMAKU_ENABLED or not danmaku_list:
+            return False
+        
+        if random.random() >= DANMAKU_LIKE_PROB:
+            return False
+        
+        self._reset_daily_danmaku_likes()
+        if self.daily_danmaku_likes >= DANMAKU_MAX_DAILY_LIKES:
+            return False
+        
+        if not cid:
+            # 降级尝试从缓存获取 cid
+            cid = self._last_danmaku_cids.get(bvid, 0)
+        if not cid:
+            return False
+        
+        try:
+            # 随机选一条弹幕点赞（必须用 id_str 字符串ID）
+            target_dm = random.choice(danmaku_list)
+            dm_id_str = target_dm.get("id_str", "")
+            dm_text = target_dm.get("text", "")
+            if not dm_id_str:
+                return False
+            
+            log(f"👍 点赞弹幕: {dm_text[:30]}... (id_str={dm_id_str[:16]}...)", "DANMAKU")
+            result = await self.bili.like_danmaku(dmid=dm_id_str, cid=cid, bvid=bvid)
+            if result.get("code") == 0:
+                self.daily_danmaku_likes += 1
+                log(f"弹幕点赞成功！今日已赞 {self.daily_danmaku_likes}/{DANMAKU_MAX_DAILY_LIKES}", "SUCCESS")
+                return True
+            else:
+                log(f"弹幕点赞未成功: {result.get('msg')}", "INFO")
+        except Exception as e:
+            log(f"弹幕点赞异常: {e}", "WARN")
+        return False
+
+    async def maybe_send_danmaku(self, bvid: str, title: str = "", subtitle_text: str = ""):
+        """生成并发送一条B站风格弹幕。"""
+        if not DANMAKU_ENABLED or not bvid:
+            return False
+        
+        if random.random() >= DANMAKU_SEND_PROB:
+            return False
+        
+        self._reset_daily_danmaku_sent()
+        if self.daily_danmaku_sent >= DANMAKU_MAX_DAILY_SEND:
+            return False
+        
+        try:
+            # 用AI生成一条弹幕
+            context = f"视频标题: {title}\n视频内容摘要: {subtitle_text[:200] if subtitle_text and '[未读取' not in subtitle_text else '未知'}"
+            persona_block = self.persona_mgr.build_prompt_block()
+            
+            resp = await self._call_ai_with_retry(
+                model=MODEL_BRAIN,
+                messages=[
+                    {"role": "system", "content": f"你是B站上的一个普通观众。{persona_block}请根据视频内容发送一条弹幕。要求：1. 简短（20字以内）2. 符合B站弹幕风格 3. 有趣或表达到位 4. 不要发送引战、敏感内容。只返回弹幕文字，不要解释。"},
+                    {"role": "user", "content": f"为这个视频发一条弹幕: {context}"}
+                ],
+                max_tokens=50,
+                request_timeout=60
+            )
+            dm_text = resp.choices[0].message.content.strip()
+            if not dm_text or len(dm_text) > 50:
+                return False
+            
+            log(f"📤 发送弹幕: {dm_text}", "DANMAKU")
+            result = await self.bili.send_danmaku(bvid, dm_text)
+            if result.get("code") == 0:
+                self.daily_danmaku_sent += 1
+                log(f"弹幕发送成功！今日已发 {self.daily_danmaku_sent}/{DANMAKU_MAX_DAILY_SEND}", "SUCCESS")
+                self.record_session_event("send_danmaku", bvid=bvid, text=dm_text)
+                return True
+            else:
+                log(f"弹幕发送失败: {result.get('msg')}", "WARN")
+        except Exception as e:
+            log(f"弹幕发送异常: {e}", "WARN")
+        return False
+
+    async def initialize_login(self):
+        self.bili.credential = self.bili._load_credential()
+
+        # 有 cookie 文件直接加载，跳过网络验证，秒进
+        if self.bili.credential and os.path.exists(COOKIE_FILE):
+            with open(COOKIE_FILE, 'r', encoding='utf-8') as f:
+                self.cookies = json.load(f)
+            self.credential = self.bili.credential
+            try:
+                self.bili.uid = int(self.cookies.get("DedeUserID", 0))
+            except Exception:
+                self.bili.uid = 0
+            log(f"登录已就绪 (UID: {self.bili.uid})", "SUCCESS")
+            self._init_psycho_engine()
+            self.comment_mgr = CommentInteractionManager(self.credential, self.bili.uid, since_ts=self.previous_seen_ts)
+            self.private_message_mgr = PrivateMessageManager(
+                self.credential,
+                self.bili.uid,
+                since_ts=self.previous_seen_ts,
+                previous_seen_at=self.previous_seen_at
+            )
+            return True
+
+        # 没有 cookie → 走完整登录流程
+        log("需要登录B站账号", "LOGIN")
+        print("\n" + "="*50)
+        print("           B站登录向导")
+        print("="*50)
+
+        login_success = await login_bilibili()
+        if not login_success:
+            log("登录失败，程序退出", "ERROR")
+            return False
+
+        self.bili.credential = self.bili._load_credential()
+        if not self.bili.credential:
+            log("登录后加载凭据失败", "ERROR")
+            return False
+
+        login_success = await self.bili.init_user_info()
+        if not login_success:
+            log("登录验证失败", "ERROR")
+            return False
+
+        with open(COOKIE_FILE, 'r', encoding='utf-8') as f:
+            self.cookies = json.load(f)
+
+        self.credential = Credential(
+            sessdata=self.cookies.get("SESSDATA"),
+            bili_jct=self.cookies.get("bili_jct"),
+            buvid3=self.cookies.get("buvid3"),
+            dedeuserid=self.cookies.get("DedeUserID"),
+        )
+        
+        # 初始化评论管理器
+        self._init_psycho_engine()
+        self.comment_mgr = CommentInteractionManager(self.credential, self.bili.uid, since_ts=self.previous_seen_ts)
+        self.private_message_mgr = PrivateMessageManager(
+            self.credential,
+            self.bili.uid,
+            since_ts=self.previous_seen_ts,
+            previous_seen_at=self.previous_seen_at
+        )
+
+        log("登录完成，准备开始工作！", "SUCCESS")
+        return True
+
+    def _init_psycho_engine(self):
+        """初始化心理画像引擎（登录后调用）
+        
+        即使 PSYCHO_ENGINE_ENABLED=False，也会初始化基础追踪和避雷系统，
+        只是跳过 AI 深度分析和智能推荐。
+        """
+        try:
+            self.psycho_profile = PsychoProfile(ai_caller=self._psycho_ai_caller if PSYCHO_ENGINE_ENABLED else None)
+            self.recommend_engine = RecommendationEngine(
+                psycho_profile=self.psycho_profile,
+                ai_caller=self._psycho_ai_caller if PSYCHO_ENGINE_ENABLED else None,
+            )
+            status = "[PSYCHO]已激活" if PSYCHO_ENGINE_ENABLED else "[NOTE]仅追踪(无AI分析)"
+            log(f"智能分析系统 {status} | 多维度追踪已激活", "SUCCESS")
+        except Exception as e:
+            log(f"智能分析系统初始化失败: {e}", "ERROR")
+            self.psycho_profile = None
+            self.recommend_engine = None
+
+    async def run(self):
+        # 🔒 单实例锁：防止多个 bot 进程同时运行
+        if not _acquire_bot_lock():
+            log("[LOCK] ❌ 已有 bot 实例正在运行，退出", "ERROR")
+            return
+        log("[LOCK] ✅ 单实例锁已获取", "INFO")
+        
+        log("bilibili_learning_bot - 启动...", "SUCCESS")
+        self.update_runtime_clock(starting=True)
+        if self.previous_seen_at:
+            log(f"上次运行最后记录时间: {self.previous_seen_at}，本次只处理之后的新评论/私信", "INFO")
+
+        os.makedirs(KNOWLEDGE_BASE_DIR, exist_ok=True)
+        log(f"知识库模块已加载，路径: {KNOWLEDGE_BASE_DIR}", "INFO")
+        
+        # 显示兴趣状态
+        interests = self.interest_mgr.get_interests()
+        if interests:
+            log(f"兴趣列表: {', '.join(interests)}", "INTEREST")
+        else:
+            log("兴趣列表为空，将对所有视频感兴趣", "INTEREST")
+        log(f"当前人格: {self.persona_mgr.get_active_persona_name()} | 当前心情: {self.mood_mgr.get_mood()}", "INFO")
+        
+        print(f"\n{Fore.CYAN}知识库分类系统已初始化:{Style.RESET_ALL}")
+        self.classifier.show_category_structure()
+        # 启动时清理空文件夹
+        cleaned = self.classifier.cleanup_empty_folders()
+        if cleaned > 0:
+            log(f"已清理 {cleaned} 个空文件夹", "KB")
+
+        login_success = await self.initialize_login()
+        if not login_success:
+            log("登录失败，程序退出", "ERROR")
+            return
+
+        log(f"初始化完成 | 最大精力: {MAX_ENERGY}% | 视频间隔: {VIDEO_INTERVAL_MIN}-{VIDEO_INTERVAL_MAX}秒", "INFO")
+        if SESSION_MAX_VIDEOS > 0:
+            log(f"会话限制: 最多处理 {SESSION_MAX_VIDEOS} 个视频后自动停止", "SESSION")
+        if SESSION_MAX_DURATION_MINUTES > 0:
+            log(f"会话限制: 最长运行 {SESSION_MAX_DURATION_MINUTES} 分钟后自动停止", "SESSION")
+        log(f"评论互动: {'已启用' if COMMENT_CHECK_ENABLED else '⏸️ 已关闭'} | 检查间隔: {COMMENT_CHECK_INTERVAL}秒", "COMMENT")
+        log(f"私信互动: {'已启用' if PRIVATE_MESSAGE_ENABLED else '⏸️ 已关闭'} | {'自动发送' if PRIVATE_MESSAGE_AUTO_REPLY else '仅拟不发送'} | 检查间隔: {PRIVATE_MESSAGE_CHECK_INTERVAL}秒", "DM")
+        log(f"日记: {'自动' if DIARY_ENABLED and DIARY_AUTO_ENABLED else '手动/关闭'} | 自我进化: {'自动应用' if EVOLUTION_ENABLED and EVOLUTION_AUTO_ENABLED and EVOLUTION_AUTO_APPLY else '手动/仅记录'}", "EVOLVE")
+        print("="*80)
+
+        # 🔵 Cookie 预热：模拟人类打开App行为，先访问一次首页暖机
+        log("🍪 Cookie预热：模拟打开B站首页...", "INFO")
+        try:
+            warmup_client = await self.bili._get_http_client()
+            await warmup_client.get(
+                'https://www.bilibili.com',
+                cookies=self.bili.raw_cookies,
+                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'},
+                timeout=15.0
+            )
+            log("🍪 Cookie预热完成", "SUCCESS")
+        except Exception as e:
+            log(f"Cookie预热跳过: {e}", "INFO")
+
+        # [WARN] 启动冷却：等待几秒再进入扫描循环，模拟真人打开App后的浏览节奏
+        try:
+            startup_cool = max(0.1, random.uniform(float(COOLDOWN_STARTUP_MIN or 1), float(COOLDOWN_STARTUP_MAX or 3)))
+        except (ValueError, TypeError):
+            startup_cool = 1.5
+        log(f"启动冷却 {startup_cool:.1f} 秒，模拟真人打开App后的浏览节奏...", "INFO")
+        await asyncio.sleep(startup_cool)
+
+        # [FIX] 启动守卫：前几轮主循环强制跳过Agent深度搜索（防止旧pyc缓存或冷却bug导致启动即触发）
+        _loop_count = 0
+
+        while True:
+            try:
+                _loop_count += 1
+                self.update_runtime_clock()
+
+                # ── 会话限制检查 ──
+                session_elapsed = (datetime.now() - self.session_start_time).total_seconds() / 60.0
+                limit_reached = False
+                limit_reason = ""
+
+                if SESSION_MAX_DURATION_MINUTES > 0 and session_elapsed >= SESSION_MAX_DURATION_MINUTES:
+                    limit_reached = True
+                    limit_reason = f"已达到最长运行时间 {SESSION_MAX_DURATION_MINUTES} 分钟（实际 {session_elapsed:.1f} 分钟）"
+                elif SESSION_MAX_VIDEOS > 0 and self.videos_processed >= SESSION_MAX_VIDEOS:
+                    limit_reached = True
+                    limit_reason = f"已处理 {self.videos_processed} 个视频（上限 {SESSION_MAX_VIDEOS}）"
+
+                if limit_reached:
+                    log(f"⏰ 会话限制触发: {limit_reason}", "SESSION")
+                    log(f"[STATS] 本次会话统计: 处理 {self.videos_processed} 个视频, 运行 {session_elapsed:.1f} 分钟", "SESSION")
+                    break
+
+                # [SPEED] 并行检查评论和私信（独立API，可并发提速）
+                comments_task = asyncio.create_task(self.check_and_handle_comments())
+                msgs_task = asyncio.create_task(self.check_and_handle_private_messages())
+                comments_processed, msgs_processed = await asyncio.gather(comments_task, msgs_task)
+                # [FIX] 只有实际处理了评论才睡冷却，无操作则跳过
+                if comments_processed > 0:
+                    await asyncio.sleep(max(0.1, random.uniform(
+                        float(COOLDOWN_POST_COMMENT_MIN or 1), float(COOLDOWN_POST_COMMENT_MAX or 3))))
+                
+                if self.energy <= 0:
+                    await self.energy_recovery_session()
+                    continue
+
+                session_info = ""
+                if SESSION_MAX_VIDEOS > 0:
+                    session_info += f" | 已看: {self.videos_processed}/{SESSION_MAX_VIDEOS}"
+                elif SESSION_MAX_DURATION_MINUTES > 0:
+                    session_info += f" | 已看: {self.videos_processed}"
+                log(f"精力: {self.energy}% | 今日已投: {self.coins_spent}/{MAX_COINS_DAILY} | 记忆UP: {len(self.memory['known_ups'])}{session_info}", "INFO")
+
+                # [FIX] 只有实际处理了私信才睡冷却，无操作则跳过
+                if msgs_processed > 0:
+                    await asyncio.sleep(max(0.1, random.uniform(
+                        float(COOLDOWN_POST_DM_MIN or 1), float(COOLDOWN_POST_DM_MAX or 3))))
+
+                # ── 🤖 Agent深度搜索：定期触发，深入了解某个主题 ──
+                # [FIX] 启动守卫：前3轮主循环硬跳过（防止旧pyc缓存/冷却bug导致启动即触发）
+                if AGENT_ENABLED and AGENT_DIVE_ENABLED and _loop_count > 3:
+                    agent_dive_elapsed = (datetime.now() - self.last_agent_run_at).total_seconds() / 60
+                    # [FIX] 必须至少看过3个视频+冷却到期+精力够+25%随机
+                    if (self.videos_processed >= 3 and agent_dive_elapsed >= max(AGENT_COOLDOWN_MINUTES, 5)
+                            and self.energy >= 15 and random.random() < 0.25):
+                        # 优先用刚看过的感兴趣视频主题，没有则从兴趣/知识库选
+                        dive_topic = await self._pick_agent_dive_topic()
+                        if dive_topic:
+                            log(f"🤖 Agent深度搜索启动！主题: '{dive_topic[:50]}'", "CONFIG")
+                            self.last_agent_run_at = datetime.now()  # [FIX] 立即记录，防止重复触发
+                            self.energy -= 8  # [FIX] 先扣精力，防止异步并发超扣
+                            # [FIX] 异步非阻塞：不卡主循环，后台默默搜索看视频
+                            async def _dive_async(topic=dive_topic):
+                                try:
+                                    run = await self.agent_runner.run_goal(topic)
+                                    ok_steps = sum(1 for item in run.get("results", []) if item.get("result", {}).get("ok"))
+                                    watched_count = 0
+                                    for item in run.get("results", []):
+                                        if item.get("step", {}).get("skill") == "watch_bilibili_videos":
+                                            watched_count = item.get("result", {}).get("count", 0)
+                                    log(f"🤖 Agent深度搜索完成: {ok_steps}/{len(run.get('results', []))}步骤, 看了{watched_count}个视频", "SUCCESS")
+                                except Exception as e:
+                                    log(f"🤖 Agent深度搜索异常: {e}", "WARN")
+                            task = asyncio.create_task(_dive_async())
+                            task.add_done_callback(_safe_task_callback("agent_dive_async"))
+
+                # ── 📂 [KB] 自动重分类"未分类"文件夹 ──
+                if AUTO_RECLASSIFY_ENABLED and _loop_count > 5:
+                    reclass_elapsed = (datetime.now() - getattr(self, '_last_reclassify_at', datetime.min)).total_seconds() / 60
+                    if reclass_elapsed >= AUTO_RECLASSIFY_INTERVAL_MINUTES and random.random() < 0.5:
+                        try:
+                            ok, fail = self.classifier.reclassify_uncategorized(max_per_run=3)
+                            if ok > 0 or fail > 0:
+                                self._last_reclassify_at = datetime.now()
+                                # 清理空文件夹
+                                cleaned = self.classifier.cleanup_empty_folders()
+                                if cleaned > 0:
+                                    log(f"[KB] 已清理 {cleaned} 个空文件夹", "KB")
+                        except Exception as e:
+                            log(f"[KB] 自动重分类异常: {e}", "ERROR")
+
+                # ── [SPEED] 并行：回顾复习 + 主动聊天，互不依赖 ──
+                revisit_target = None
+
+                async def _do_revisit():
+                    if not REVISIT_ENABLED or not self.history_videos.get("videos"):
+                        return None
+                    revisit_cooldown_ok = (datetime.now() - self.last_revisit_at).total_seconds() / 60 >= REVISIT_COOLDOWN_MINUTES
+                    if not revisit_cooldown_ok or random.random() >= PROB_REVISIT:
+                        return None
+                    candidate = self.get_revisit_candidate()
+                    if not candidate:
+                        return None
+                    try:
+                        log(f"📖 学而时习之：回顾复习《{candidate.get('title','')[:30]}》({candidate.get('action')}) ...", "REVISIT")
+                        await _bili_throttle("回顾复习-get_info")
+                        v = Video(bvid=candidate.get("bvid"), credential=self.credential)
+                        vid_info = await v.get_info()
+                        if vid_info:
+                            target = {
+                                "bvid": candidate["bvid"],
+                                "title": vid_info.get("title", candidate.get("title", "")),
+                                "owner": vid_info.get("owner", {}),
+                                "id": vid_info.get("aid") or candidate.get("aid"),
+                                "pic": vid_info.get("pic", ""),
+                                "aid": vid_info.get("aid") or candidate.get("aid"),
+                                "_is_revisit": True,
+                                "_original_action": candidate.get("action", "")
+                            }
+                            self.last_revisit_at = datetime.now()
+                            self.mark_revisited(candidate["bvid"])
+                            log(f"回顾复习锁定: 《{target['title']}》", "REVISIT")
+                            return target
+                        else:
+                            log(f"获取复习视频信息失败，跳过", "WARN")
+                    except Exception as e:
+                        log(f"回顾复习异常: {e}", "WARN")
+                    return None
+
+                async def _do_chat():
+                    try:
+                        await self.maybe_initiate_chat()
+                    except Exception as e:
+                        log(f"主动聊天模块异常(主循环): {e}", "ERROR")
+
+                revisit_target, _ = await asyncio.gather(_do_revisit(), _do_chat(), return_exceptions=True)
+                if isinstance(revisit_target, Exception):
+                    revisit_target = None
+
+                if revisit_target:
+                    # 使用复习视频代替推荐流
+                    target = revisit_target
+                    self.videos_processed += 1
+                    bvid = target['bvid']
+                    title = target.get('title', '无标题')
+                    up = target.get('owner', {}).get('name', '未知')
+                    up_uid = target.get('owner', {}).get('mid', 0)
+                    aid = target.get('id') or target.get('aid')
+                    pic_url = target.get('pic', '')
+                    video_url = f"https://www.bilibili.com/video/{bvid}"
+                    log(f"📖 复习目标:《{title}》- @{up}", "REVISIT")
+                    # 🔍 知识验证：回顾时联网核实知识的真实性和时效性（带异常回调）
+                    task = asyncio.create_task(self.verify_knowledge_file(bvid, title))
+                    task.add_done_callback(_safe_task_callback("verify_knowledge_file"))
+                    # 顺便浏览该UP的视频（副作用：记录到浏览历史）
+                    await self.maybe_browse_up_videos(force_up_uid=up_uid if up_uid else None, up_name_hint=up)
+                else:
+                    # ── [*] 优先浏览喜欢/已知UP主的新视频 ──
+                    up_browse_target = await self.maybe_browse_up_videos()
+                    if up_browse_target and up_browse_target.get("bvid"):
+                        target = up_browse_target
+                        self.videos_processed += 1
+                        bvid = target['bvid']
+                        title = target.get('title', '无标题')
+                        up = target.get('owner', {}).get('name', '未知')
+                        up_uid = target.get('owner', {}).get('mid', 0)
+                        aid = target.get('id') or target.get('aid')
+                        pic_url = target.get('pic', '')
+                        video_url = f"https://www.bilibili.com/video/{bvid}"
+                        source_tag = "[STAR]喜爱UP" if target.get("_is_favorite_up") else "📺已关注UP"
+                        log(f"{source_tag} 新视频:《{title}》- @{up}", "BROWSE")
+                    else:
+                        # [PSYCHO] 主动推荐：每N轮触发一次AI驱动的惊喜/探索/反茧房推荐
+                        rec_target = None
+                        if (self.recommend_engine 
+                            and self._psycho_profile_analysis_count > PSYCHO_MIN_VIEWS_BEFORE_RECOMMEND 
+                            and random.random() < PSYCHO_RECOMMEND_PROB):
+                            rec_modes = ["surprise", "explore", "anticocoon", "trend"]
+                            # 轮换模式，避免重复
+                            if self._last_recommend_mode:
+                                try:
+                                    idx = rec_modes.index(self._last_recommend_mode)
+                                    rec_modes = rec_modes[idx+1:] + rec_modes[:idx+1]
+                                except ValueError as e:
+                                    log(f'值错误: {e}', 'DEBUG')
+                            for mode in rec_modes[:2]:  # 尝试2种模式
+                                try:
+                                    queries = await self.recommend_engine.generate_search_queries(mode=mode, count=2)
+                                    if queries:
+                                        log(f"{get_mode_emoji(mode)} {get_mode_label(mode)}: 搜索「{queries[0]}」...", "RECOMMEND")
+                                        results = await self.bili.search_bilibili(queries[0])
+                                        if results:
+                                            # 过滤已看过的
+                                            fresh = [r for r in results if r.get("bvid") not in self.recommend_engine._seen_bvids]
+                                            if fresh:
+                                                chosen = random.choice(fresh[:5])
+                                                chosen["_rec_mode"] = mode
+                                                chosen["_rec_query"] = queries[0]
+                                                rec_target = chosen
+                                                self._last_recommend_mode = mode
+                                                self.recommend_engine._seen_bvids.add(chosen.get("bvid"))
+                                                # 生成推荐理由
+                                                chosen["_rec_reason"] = self.recommend_engine.explain_recommendation(
+                                                    {"title": chosen.get("title",""), "tags": chosen.get("tag","").split(",") if chosen.get("tag") else [],
+                                                     "up_name": chosen.get("author",""), "up_uid": chosen.get("mid",""),
+                                                     "category": chosen.get("typename",""), "bvid": chosen.get("bvid","")},
+                                                    mode
+                                                )
+                                                log(f"  → 推荐理由: {chosen['_rec_reason'][:80]}...", "RECOMMEND")
+                                                break
+                                except Exception as e:
+                                    log(f"推荐生成失败({mode}): {e}", "WARN")
+                        
+                        if rec_target and rec_target.get("bvid"):
+                            target = rec_target
+                            if not isinstance(target, dict):
+                                continue
+                            self.videos_processed += 1
+                            bvid = target.get('bvid', '')
+                            if not bvid:
+                                continue
+                            title = target.get('title', '无标题')
+                            owner = target.get('owner')
+                            if isinstance(owner, dict):
+                                up = target.get('author') or owner.get('name', '未知')
+                                up_uid = target.get('mid') or owner.get('mid', 0)
+                            else:
+                                up = target.get('author', '未知')
+                                up_uid = target.get('mid', 0)
+                            aid = target.get('aid') or target.get('id', 0)
+                            pic_url = target.get('pic', '')
+                            video_url = f"https://www.bilibili.com/video/{bvid}"
+                            log(f"{get_mode_emoji(target.get('_rec_mode','surprise'))} 主动推荐:《{title}》- @{up}", "RECOMMEND")
+                            if target.get("_rec_reason"):
+                                log(f"  [IDEA] 为什么推荐: {target['_rec_reason'][:120]}", "RECOMMEND")
+                            # 追踪推荐点击
+                            self.psycho_profile.tracker.record("recommend_click", 
+                                bvid=bvid, title=title, mode=target.get("_rec_mode",""))
+                        else:
+                            log("正在刷新推荐流...", "SCAN")
+                            items = await self._get_cached_recommendations()
+                            if not items or not isinstance(items, list):
+                                await asyncio.sleep(3)
+                                continue
+
+                            target = random.choice(items)
+                            if not isinstance(target, dict):
+                                log(f"推荐流返回异常元素类型: {type(target).__name__}", "WARN")
+                                continue
+                            self.videos_processed += 1
+                            bvid = target.get('bvid', '')
+                            if not bvid:
+                                log("推荐流元素缺少bvid，跳过", "WARN")
+                                continue
+                            title = target.get('title', '无标题')
+                            owner = target.get('owner')
+                            if isinstance(owner, dict):
+                                up = owner.get('name', '未知')
+                                up_uid = owner.get('mid', 0)
+                            else:
+                                up = '未知'
+                                up_uid = 0
+                            aid = target.get('id') or target.get('aid')
+                            pic_url = target.get('pic', '')
+                            video_url = f"https://www.bilibili.com/video/{bvid}"
+
+                            log(f"锁定目标:《{title}》- @{up}", "SCAN")
+
+                # [SPEED] 锁定后立即后台预取推荐流 + 短暂休息并行
+                prefetch_task = asyncio.create_task(self._prefetch_recommendations())
+                prefetch_task.add_done_callback(_safe_task_callback("prefetch_recs"))
+                await asyncio.sleep(random.uniform(0.3, 0.8))
+
+                # 提取标签、时长、分类（供心理画像引擎/避雷系统使用）
+                tags = []
+                raw_tag = target.get('tag', '')
+                if isinstance(raw_tag, str) and raw_tag:
+                    tags = [t.strip() for t in raw_tag.split(',') if t.strip()]
+                elif isinstance(raw_tag, list):
+                    tags = raw_tag
+                duration = target.get('duration', 0)
+                if isinstance(duration, str) and ':' in duration:
+                    try:
+                        parts = duration.split(':')
+                        duration = int(parts[0]) * 60 + int(parts[1])
+                    except Exception:
+                        duration = 0
+                elif isinstance(duration, str):
+                    try:
+                        duration = int(duration)
+                    except Exception:
+                        duration = 0
+                category = target.get('typename') or target.get('tname') or ''
+
+                # [ASR] 缓存视频元数据供 ASR AI预判使用
+                self._current_video_tags = tags
+                self._current_video_category = category
+                self._current_video_duration = duration
+
+                # ── 视频过滤模式 ──
+                if VIDEO_FILTER_MODE == "watch_all":
+                    vis_desc, vis_score = "全量模式，跳过封面分析", 0
+                    log(f"[FAST] 全量模式：不看封面标题，直接看视频", "MODE")
+                    interested = True
+                    matched_interests = []
+                    interest_reason = "全量模式(所有视频都看)"
+                else:
+                    # cover_and_title 模式：封面分析 + AI兴趣判断
+                    vis_desc, vis_score = await self.analyze_vision(pic_url)
+                    log(f"封面速览: {vis_desc} [印象分:{vis_score}]", "EYE")
+                    # [ASR] 缓存封面描述供 ASR AI预判
+                    self._current_video_cover_desc = vis_desc
+                    # [DEF] 避雷系统检查
+                    if self.psycho_profile:
+                        aversion_score, aversion_reasons = self.psycho_profile.aversion.get_aversion_score(
+                            title=title, tags=tags, up_uid=up_uid
+                        )
+                        if aversion_score >= PSYCHO_AVERSION_BLOCK_SCORE:
+                            log(f"[DEF] 避雷拦截: {title[:30]}... | 反感度{aversion_score:.1%} | {'; '.join(aversion_reasons)}", "AVERSION")
+                            self.psycho_profile.tracker.record_skip(bvid, title, reason=f"避雷: {'; '.join(aversion_reasons)}")
+                            continue
+                        elif aversion_score >= PSYCHO_AVERSION_WARN_SCORE:
+                            log(f"[DEF] 避雷提示: {title[:30]}... | 反感度{aversion_score:.1%} | {'; '.join(aversion_reasons)} (仍继续判断)", "AVERSION")
+                    
+                    interested, matched_interests, interest_reason = await self.judge_interest_with_ai(title, up, vis_desc, vis_score)
+                    if not interested:
+                        log(f"视频《{title}》与兴趣不匹配，跳过 | {interest_reason}", "INTEREST")
+                        await self.watch_and_sync_history(bvid)
+                        continue
+                    # 补充关键词匹配结果到展示列表中（确保所有命中兴趣都显示）
+                    kw_matched = self.interest_mgr.get_matching_interests(title, up)
+                    all_matched = list(dict.fromkeys((matched_interests or []) + kw_matched))  # 去重合并
+                    if all_matched:
+                        log(f"视频《{title}》匹配兴趣: {', '.join(all_matched)} | {interest_reason}", "INTEREST")
+                        # [FIX] 记住这个感兴趣的视频上下文，供Agent深度搜索使用
+                        self._last_interesting_topic = f"深入了解「{title[:40]}」（匹配: {', '.join(all_matched[:3])}）"
+                    else:
+                        log(f"视频《{title}》通过兴趣判断 | {interest_reason}", "INTEREST")
+
+                subtitle_text = "[未读取字幕]"
+                comment_text = "[未读取评论]"
+                danmaku_text = ""
+                c_list = []
+
+                # [SPEED] 并行读取字幕+评论+弹幕，减少串行等待
+                async def _read_subtitles_task():
+                    nonlocal subtitle_text
+                    mode_label = normalize_mode(VIDEO_UNDERSTANDING_MODE) if normalize_mode else VIDEO_UNDERSTANDING_MODE
+                    log(f"开始研究视频内容... 当前视频理解模式: {mode_label}", "BRAIN")
+                    success, result = await self.understand_video_for_decision(bvid, title=title)
+                    if success:
+                        subtitle_text = result
+                        log(f"视频理解GET: {subtitle_text[:80].strip()}...", "SUCCESS")
+                    else:
+                        subtitle_text = "[无可用字幕/语音内容]"
+                        log(f"视频理解遇到问题: {result}", "WARN")
+
+                async def _read_comments_task():
+                    nonlocal comment_text, c_list, danmaku_text
+                    log("看看大家都在说啥...", "BRAIN")
+                    comment_text, c_list = await self._get_comments_context(aid)
+                    # [MSG] 同时读取弹幕
+                    danmaku_list = await self.maybe_read_danmaku(bvid)
+                    danmaku_text = ""
+                    if danmaku_list:
+                        danmaku_text = f"【视频弹幕（共{len(danmaku_list)}条，随机采样）】:\n" + "\n".join(
+                            f"  {dm.get('text','')}" for dm in danmaku_list[:15]
+                        )
+                    if not c_list:
+                        log("评论区空空如也...", "COMMENT")
+                    else:
+                        preview_parts = []
+                        for i, c in enumerate(c_list[:5]):
+                            part = f"#{i+1}[{c['user']}]: {c['content'][:30]}"
+                            if c.get('pic_info'):
+                                # 截取图片描述的前15字作为标签
+                                pic_tag = c['pic_info'][:15] + "..." if len(c['pic_info']) > 15 else c['pic_info']
+                                part += f" [图:{pic_tag}]"
+                            preview_parts.append(part)
+                        preview = ", ".join(preview_parts)
+                        log(f"评论区速览({len(c_list)}条): {preview}", "COMMENT")
+
+                await asyncio.sleep(random.uniform(0.2, 0.5))
+                await asyncio.gather(_read_subtitles_task(), _read_comments_task())
+
+                log("信息整合，AI决策中...", "BRAIN")
+                sys_prompt = self.build_dynamic_brain_prompt(up)
+                # [FIX] 当视频理解失败时，提醒AI更多依赖评论区/弹幕/标题做判断
+                video_fallback_hint = ""
+                _st = str(subtitle_text)
+                if any(kw in _st for kw in ["【无字幕无人声】", "无可用字幕", "无可用字幕/语音", "[未读取"]):
+                    video_fallback_hint = "\n[WARN] 视频字幕/语音内容不可用，请主要根据评论区讨论、弹幕反应和标题来推断视频质量与价值。\n"
+                context = (f"视频标题: {title}\nUP主: {up}\n封面描述: {vis_desc}\n封面印象分: {vis_score}\n"
+                           f"{video_fallback_hint}"
+                           f"【📺 视频内容字幕】: {subtitle_text}\n"
+                           f"{comment_text}"
+                           f"{danmaku_text}")
+
+                try:
+                    resp = await self._call_ai_with_retry(
+                        model=MODEL_BRAIN,
+                        messages=[
+                            {"role": "system", "content": sys_prompt},
+                            {"role": "user", "content": context}
+                        ],
+                        request_timeout=60
+                    )
+                    raw = resp.choices[0].message.content
+                    # ── 提取JSON（模型可能返回前缀文本）──
+                    start = raw.find("{")
+                    end = raw.rfind("}")
+                    if start >= 0 and end >= start:
+                        json_str = raw[start:end + 1]
+                    else:
+                        raise ValueError(f"AI返回未找到JSON结构，原始内容: {raw[:200]}")
+                    # ── 修复模型偶尔用单引号/不规范JSON ──
+                    try:
+                        decision = json.loads(json_str)
+                    except json.JSONDecodeError:
+                        try:
+                            fixed = json_str.replace("'", '"')
+                            fixed = re.sub(r'\bTrue\b', 'true', fixed)
+                            fixed = re.sub(r'\bFalse\b', 'false', fixed)
+                            fixed = re.sub(r'\bNone\b', 'null', fixed)
+                            decision = json.loads(fixed)
+                        except (json.JSONDecodeError, Exception):
+                            # 二次修复仍失败，使用安全默认值
+                            decision = {"mode": "普通", "score": 5, "thought": "AI返回格式异常，使用默认决策", "comment_intent": False, "coin_intent": False, "like_intent": False, "collect_intent": False}
+                except Exception as e:
+                    log(f"AI决策模块异常(已重试): {_mask_urls(str(e)[:120])}", "ERROR")
+                    continue
+
+                mode = decision.get('mode', '普通')
+                thought = decision.get('thought', '...')
+                score = decision.get('score', 0)
+
+                log(f"[{mode}模式] AI想法: {thought}", "BRAIN")
+                log(f"AI最终评分: {score} / 10", "BRAIN")
+                self.user_profile_mgr.update_impression(f"up::{up}", up, thought)
+
+                # [*] 记录UP主印象 + 决定是否关注
+                if up_uid:
+                    self.record_up_impression(up, up_uid, score)
+                    await self.maybe_follow_up(up_uid, up, score)
+                
+                # [PSYCHO] 心理画像追踪：记录本次观看
+                if self.psycho_profile:
+                    self.psycho_profile.tracker.record_view(
+                        bvid=bvid, title=title, tags=tags or [],
+                        duration=duration, up_name=up, up_uid=up_uid,
+                        category=category or "", score=score,
+                        interested=(score >= INTEREST_THRESHOLD)
+                    )
+                    self.psycho_profile.update_surface_interest(
+                        title=title, tags=tags, category=category or "",
+                        duration=duration, up_uid=up_uid, up_name=up,
+                        score=score
+                    )
+                    # 触发茧房检测 + 启发式L2更新
+                    self._psycho_profile_analysis_count += 1
+                    if self._psycho_profile_analysis_count % PSYCHO_HEURISTIC_UPDATE_INTERVAL == 0:
+                        self.psycho_profile.heuristic_update_l2()
+                        metrics = self.psycho_profile.update_cocoon_metrics()
+                        if metrics.get("diversity_score", 1.0) < PSYCHO_COCOON_WARNING_THRESHOLD:
+                            log(f"[STATS] 内容多样性提醒: {metrics.get('cocoon_risk')} | 多样性={metrics.get('diversity_score')} | 稀少领域={metrics.get('underrepresented_areas', [])}", "WARN")
+                    # 触发深度AI分析
+                    if self._psycho_profile_analysis_count % PSYCHO_DEEP_ANALYZE_INTERVAL == 0:
+                        task = asyncio.create_task(self.psycho_profile.deep_analyze())
+                        task.add_done_callback(_safe_task_callback("deep_analyze"))
+                        self.psycho_profile.detect_interest_shifts()
+
+                self.energy -= 1
+
+                # 🎯 学习归档：只归档高质量内容，低分/短时长/浅内容一律跳过
+                learning_topic = decision.get("learning_topic")
+                learn_success = False
+                learn_text = subtitle_text
+                if not learn_text or "[未读取字幕]" in str(learn_text) or "[该视频无有效CC字幕]" in str(learn_text):
+                    learn_text = ""
+                    if title: learn_text += f"【视频标题】{title}\n"
+                    if up: learn_text += f"【UP主】{up}\n"
+                    if thought: learn_text += f"【AI判断】{thought}\n"
+                    if danmaku_text: learn_text += f"【弹幕】{danmaku_text}\n"
+                    if comment_text and comment_text != "[未读取评论]": learn_text += f"【评论】{comment_text}\n"
+                    learn_text = learn_text.strip()
+                
+                # 🔒 三层质量门槛：分数 + 时长 + 内容长度
+                skip_reason = None
+                if score < LEARN_MIN_SCORE:
+                    skip_reason = f"分数过低({score:.1f}<{LEARN_MIN_SCORE})"
+                elif duration > 0 and duration < LEARN_MIN_DURATION_SECONDS:
+                    skip_reason = f"视频太短({duration}s<{LEARN_MIN_DURATION_SECONDS}s)"
+                elif not learn_text or len(learn_text) < 150:
+                    skip_reason = f"可学内容不足({len(learn_text) if learn_text else 0}字<150)"
+                
+                if skip_reason:
+                    log(f"📭 跳过学习归档: {skip_reason} | 《{title}》", "LEARN")
+                elif learning_topic and learn_text and len(learn_text) > 20:
+                    try:
+                        _desc = getattr(self, "_last_video_desc", "")
+                        learn_success = await self.learn_from_video(bvid, title, up, video_url, learn_text, learning_topic, video_desc=_desc, score=score)
+                        if learn_success:
+                            self.mood_mgr.shift("学到有价值内容", 2)
+                            if score >= INTEREST_THRESHOLD:
+                                self.energy -= 2
+                                log(f"学习归档消耗2点精力，当前剩余精力: {self.energy}%", "INFO")
+                    except Exception as learn_e:
+                        log(f"学习归档异常: {learn_e}", "WARN")
+
+                # ★ 评论区知识收集：从讨论中提取有价值的信息
+                if c_list and len(c_list) >= 3 and (comment_text and comment_text != "[未读取评论]"):
+                    try:
+                        comment_learn_success = await self.learn_from_comments(
+                            bvid, title, up, video_url, comment_text, c_list,
+                            topic_suggestion=learning_topic or (decision.get("learning_topic") or "评论知识")
+                        )
+                        if comment_learn_success:
+                            log("评论区知识收集消耗1点精力", "INFO")
+                            self.energy -= 1
+                    except Exception as clearn_e:
+                        log(f"评论区知识收集异常: {clearn_e}", "WARN")
+
+                if score < INTEREST_THRESHOLD:
+                    self.mood_mgr.shift("刷到低分视频", -1)
+                    log(f"分数({score})过低，不感兴趣，划走~ (消耗1点精力, 剩余: {self.energy}%)", "INFO")
+                    # [PSYCHO] 心理画像：记录跳过 + 避雷学习
+                    if self.psycho_profile:
+                        self.psycho_profile.tracker.record_skip(bvid, title, reason=f"低于兴趣阈值(score={score})")
+                        self.psycho_profile.aversion.report_aversion(
+                            bvid=bvid, title=title, reason=f"低分({score})",
+                            tags=tags, up_uid=up_uid, up_name=up
+                        )
+                    self.record_session_event(
+                        "video_skipped",
+                        title=title,
+                        up=up,
+                        score=score,
+                        thought=thought,
+                        reason="低于兴趣阈值",
+                        url=video_url
+                    )
+                    await self.maybe_auto_diary()
+                    await self.maybe_self_evolve()
+                    await self.watch_and_sync_history(bvid)
+                    continue
+
+                action_log = []
+                v = Video(bvid=bvid, credential=self.credential)
+
+                # 随机检定：RANDOM_ENABLED=False 时全部通过（只看分数阈值），True 时进行概率检定
+                coin_check = random.random() < PROB_COIN if RANDOM_ENABLED else True
+                fav_check = random.random() < PROB_FAV if RANDOM_ENABLED else True
+                reply_check = random.random() < PROB_REPLY_TRIGGER if RANDOM_ENABLED else True
+                like_solo_check = random.random() < PROB_LIKE_SOLO if RANDOM_ENABLED else True
+
+                ai_wants_coin = decision.get('coin_intention', False)
+                ai_wants_fav = decision.get('fav_intention', False)
+                ai_wants_reply = bool(decision.get('replies', []))
+                video_comment_allowed, video_comment_reason, video_comment_hits = ReplySafetyGuard().review_video_for_comment(
+                    title=title,
+                    up=up,
+                    subtitle=subtitle_text,
+                    comments=json.dumps(c_list[:5], ensure_ascii=False)
+                )
+                if not video_comment_allowed:
+                    if ai_wants_reply:
+                        log(f"视频命中涉政/敏感内容，强制清空评论意图: {video_comment_reason} | 命中: {', '.join(video_comment_hits)}", "WARN")
+                    decision["replies"] = []
+                    ai_wants_reply = False
+
+                do_coin = ai_wants_coin and score >= COIN_THRESHOLD and self.coins_spent < MAX_COINS_DAILY and coin_check
+                do_fav = ai_wants_fav and score >= FAV_THRESHOLD and fav_check
+                do_replies = decision.get('replies', []) if (ai_wants_reply and reply_check) else []
+                do_like_trigger = do_fav or do_coin or bool(do_replies) or (score >= 6.5 and like_solo_check)
+
+                if RANDOM_ENABLED:
+                    log(f"🎲 投币 | 意图:{'✓' if ai_wants_coin else '✗'} 分数:{'✓' if score >= COIN_THRESHOLD else '✗'} 限额:{'✓' if self.coins_spent < MAX_COINS_DAILY else '✗'} 检定({int(PROB_COIN*100)}%):{'✓' if coin_check else '✗'} => {'执行' if do_coin else '跳过'}", "DIAG")
+                    log(f"🎲 收藏 | 意图:{'✓' if ai_wants_fav else '✗'} 分数:{'✓' if score >= FAV_THRESHOLD else '✗'} 检定({int(PROB_FAV*100)}%):{'✓' if fav_check else '✗'} => {'执行' if do_fav else '跳过'}", "DIAG")
+                    log(f"🎲 评论 | 意图:{'✓' if ai_wants_reply else '✗'} 检定({int(PROB_REPLY_TRIGGER*100)}%):{'✓' if reply_check else '✗'} => {'执行' if bool(do_replies) else '跳过'}", "DIAG")
+                    log(f"🎲 点赞 | 收藏:{'✓' if do_fav else '✗'} 投币:{'✓' if do_coin else '✗'} 评论:{'✓' if bool(do_replies) else '✗'} 单独(分数/检定):{'✓' if score >= 6.5 else '✗'}/{'✓' if like_solo_check else '✗'} => {'执行' if do_like_trigger else '跳过'}", "DIAG")
+                else:
+                    log(f"🔒 投币 | 意图:{'✓' if ai_wants_coin else '✗'} 分数:{'✓' if score >= COIN_THRESHOLD else '✗'} 限额:{'✓' if self.coins_spent < MAX_COINS_DAILY else '✗'} => {'执行' if do_coin else '跳过'}", "DIAG")
+                    log(f"🔒 收藏 | 意图:{'✓' if ai_wants_fav else '✗'} 分数:{'✓' if score >= FAV_THRESHOLD else '✗'} => {'执行' if do_fav else '跳过'}", "DIAG")
+                    log(f"🔒 评论 | 意图:{'✓' if ai_wants_reply else '✗'} => {'执行' if bool(do_replies) else '跳过'}", "DIAG")
+                    log(f"🔒 点赞 | 收藏:{'✓' if do_fav else '✗'} 投币:{'✓' if do_coin else '✗'} 评论:{'✓' if bool(do_replies) else '✗'} 单独(分数):{'✓' if score >= 6.5 else '✗'} => {'执行' if do_like_trigger else '跳过'}", "DIAG")
+
+                # [FIX] 学习归档已提前执行（在分数门槛之前，所有视频都学）
+                if learn_success:
+                    action_log.append("学习归档")
+                    # 异步非阻塞：后台Agent继续探索
+                    self.last_agent_run_at = datetime.now()
+                    goal1 = f"继续了解这个主题：{learning_topic}。搜索相关视频，先看1-3个，如果内容有价值再继续多看。"
+                    task = asyncio.create_task(self._agent_goal_async(goal1, score=score))
+                    task.add_done_callback(_safe_task_callback("agent_goal1"))
+
+                # 🧭 好奇心驱动深度搜索：遇到感兴趣/不了解的内容，B站搜索深入学（动态2-10个视频）
+                if CURIOSITY_DEEP_DIVE_ENABLED and score >= CURIOSITY_DEEP_DIVE_MIN_SCORE:
+                    dive_cooldown_ok = (datetime.now() - self._last_curiosity_dive_at).total_seconds() / 60 >= CURIOSITY_DEEP_DIVE_COOLDOWN_MINUTES
+                    today_str = datetime.now().strftime("%Y%m%d")
+                    if self._curiosity_dive_date != today_str:
+                        self._curiosity_dive_count_today = 0
+                        self._curiosity_dive_date = today_str
+                    
+                    # 触发条件：高分视频AND(有学习主题OR AI表示想深入了解OR随机触发)
+                    dive_trigger = (learning_topic or
+                                   any(w in (thought + title).lower() for w in ["想了解", "深入", "探索", "好奇", "不懂", "学习", "研究"]) or
+                                   random.random() < CURIOSITY_DEEP_DIVE_PROB)
+                    
+                    if dive_trigger and dive_cooldown_ok and self._curiosity_dive_count_today < 3 and self.energy >= 10:
+                        dive_topic = learning_topic or title[:20]
+                        log(f"🧭 触发好奇心深度搜索！主题: '{dive_topic}' (评分:{score})", "LEARN")
+                        self._last_curiosity_dive_at = datetime.now()
+                        self._curiosity_dive_count_today += 1
+                        self.energy -= 3
+                        await self.curiosity_deep_dive(dive_topic, trigger_title=title, trigger_bvid=bvid)
+
+                if score >= AGENT_AUTO_MIN_SCORE and any(word in title.lower() + " " + thought.lower() for word in ["模型", "ai", "gpt", "agent", "机器人", "开源", "教程", "工具", "开发"]):
+                    # [FIX] 异步非阻塞：后台探索，不卡主循环
+                    self.last_agent_run_at = datetime.now()
+                    goal2 = f"深入了解这个主题：{title}。搜索相关视频，先看1-3个，有价值再继续。"
+                    task = asyncio.create_task(self._agent_goal_async(goal2, score=score))
+                    task.add_done_callback(_safe_task_callback("agent_goal2"))
+
+                if decision.get('remember_up') and up not in self.memory['known_ups']:
+                    self.remember_up(up, uid=up_uid)
+
+                # [*] 自动喜欢UP主：高分视频且UP主有趣 → 标记为喜欢
+                if score >= 8.0 and up_uid and up and not self.is_favorite_up(up):
+                    fav_prob = 0.12 + (score - 8.0) * 0.08  # score=8→12%, score=10→28%
+                    if random.random() < fav_prob:
+                        self.favorite_up(up, uid=up_uid)
+                        action_log.append("[STAR]喜欢UP主")
+                        log(f"[STAR] 自动标记喜欢的UP主: @{up} (UID:{up_uid}) [评分:{score}, 概率:{fav_prob:.0%}]", "FAVORITE")
+
+                if do_like_trigger:
+                    try:
+                        await asyncio.sleep(random.uniform(2, 4))
+                        has_liked = await v.has_liked()
+                        if not has_liked:
+                            log("正在尝试点赞...", "ACT")
+                            aid = v.get_aid()
+                            await _bili_throttle()  # 🔒 全局节流
+                            await request("POST", "https://api.bilibili.com/x/web-interface/archive/like",
+                                data={"aid": aid, "bvid": bvid, "like": 1},
+                                credential=self.credential)
+                            log("点赞成功！", "SUCCESS")
+                            action_log.append("点赞")
+                            if self.psycho_profile:
+                                self.psycho_profile.tracker.record_interaction("like", bvid, title, up)
+                                self.psycho_profile.update_surface_interest(
+                                    title=title, tags=tags, up_uid=up_uid, up_name=up,
+                                    liked=True, score=score
+                                )
+                            self.user_profile_mgr.adjust_affinity(f"up::{up}", up, 1, "点赞视频")
+                            # 存入互动历史，供回顾复习（带评分）
+                            self.add_history_video(str(bvid), title, up, aid, "like", score)
+                        else:
+                            log("视频已经点过赞了。", "INFO")
+                    except Exception as e:
+                        log(f"点赞失败 (可能受限): {e}", "ERROR")
+
+                if do_fav:
+                    try:
+                        await asyncio.sleep(random.uniform(0.5, 1.5))
+                        has_favorited = await v.has_favoured()
+
+                        if not has_favorited:
+                            await _bili_throttle("收藏夹列表")  # 🔒 全局节流
+                            fav_list_data = await favorite_list.get_video_favorite_list(uid=self.credential.dedeuserid, credential=self.credential)
+                            if fav_list_data and fav_list_data.get('list'):
+                                default_folder_id = fav_list_data['list'][0]['id']
+                                log(f"正在尝试收藏到默认收藏夹...", "ACT")
+                                aid = v.get_aid()
+                                await _bili_throttle()  # 🔒 全局节流
+                                await request("POST", "https://api.bilibili.com/x/v3/fav/resource/deal",
+                                    data={"aid": aid, "bvid": bvid, "rid": aid, "type": 2,
+                                          "add_media_ids": str(default_folder_id)},
+                                    credential=self.credential)
+                                log("收藏成功！", "SUCCESS")
+                                action_log.append("收藏")
+                                if self.psycho_profile:
+                                    self.psycho_profile.tracker.record_interaction("favorite", bvid, title, up)
+                                    self.psycho_profile.update_surface_interest(
+                                        title=title, tags=tags, up_uid=up_uid, up_name=up,
+                                        favorited=True, score=score
+                                )
+                                self.user_profile_mgr.adjust_affinity(f"up::{up}", up, 2, "收藏视频")
+                                # 存入互动历史，供回顾复习（带评分）
+                                self.add_history_video(str(bvid), title, up, aid, "fav", score)
+                            else:
+                                log("未能获取到收藏夹列表，无法收藏。", "WARN")
+                        else:
+                            log("视频已在收藏夹中。", "INFO")
+                    except Exception as e:
+                        log(f"收藏失败: {e}", "ERROR")
+
+                if do_coin:
+                    try:
+                        await asyncio.sleep(random.uniform(2, 4))
+                        aid = v.get_aid()
+                        await _bili_throttle()  # 🔒 全局节流
+                        await request("POST", "https://api.bilibili.com/x/web-interface/coin/add",
+                            data={"aid": aid, "bvid": bvid, "multiply": 1, "select_like": 1},
+                            credential=self.credential)
+                        self.coins_spent += 1
+                        log(f"投币成功！今日已投 {self.coins_spent} 枚。", "COIN")
+                        action_log.append("投币")
+                        if self.psycho_profile:
+                            self.psycho_profile.tracker.record_interaction("coin", bvid, title, up)
+                            self.psycho_profile.update_surface_interest(
+                                title=title, tags=tags, up_uid=up_uid, up_name=up,
+                                coined=True, score=score
+                            )
+                        self.user_profile_mgr.adjust_affinity(f"up::{up}", up, 3, "投币支持")
+                    except Exception as e:
+                        log(f"投币失败: {e}", "ERROR")
+
+                # 回复他人评论的功能
+                if do_replies and PROB_COMMENT_OTHERS > 0:
+                    for reply in do_replies:
+                        try:
+                            target_id = reply.get('target_id', 0)
+                            reply_content = reply.get('content', '')
+                            
+                            if target_id and reply_content:
+                                target_comment = next((item for item in c_list if str(item.get("id")) == str(target_id)), {})
+                                incoming_text = target_comment.get("content", "")
+                                pacing_ok, pacing_reason = self.comment_mgr._should_reply_user(target_comment.get("user_id"), incoming_text) if self.comment_mgr else (True, "通过")
+                                if not pacing_ok:
+                                    log(f"视频评论节奏控制跳过 ID:{target_id}: {pacing_reason}", "COMMENT")
+                                    continue
+                                reply_content = ensure_ai_marker(reply_content)
+                                ok, reason, hits = ReplySafetyGuard().review(incoming_text, reply_content)
+                                if not ok:
+                                    log(f"已拦截视频评论回复 ID:{target_id}: {reason} | 命中: {', '.join(hits)}", "WARN")
+                                    if self.comment_mgr:
+                                        self.comment_mgr.log_blocked_reply(target_id, incoming_text, reply_content, reason, hits, target_comment.get("user", "视频评论"))
+                                    continue
+
+                                log(f"正在回复评论 ID:{target_id}: {reply_content[:50]}...", "COMMENT")
+                                await asyncio.sleep(human_reply_delay())
+                                if COMMENT_MODE == "simulate":
+                                    log(f"[模拟] 拟回复视频评论 ID:{target_id}: {reply_content[:50]}...", "SIMULATE")
+                                else:
+                                    await _bili_throttle()  # 🔒 全局节流
+                                    await comment.send_comment(
+                                        text=reply_content,
+                                        oid=aid,
+                                        type_=CommentResourceType.VIDEO,
+                                        root=target_id,
+                                        parent=target_id,
+                                        credential=self.credential
+                                    )
+                                    log("回复评论成功！", "SUCCESS")
+                                action_log.append(f"回复评论({target_id})")
+                                self.mood_mgr.shift("成功参与评论区互动", 1)
+                                
+                                # 记录评论日志
+                                if self.comment_mgr:
+                                    self.comment_mgr.log_interaction(target_id, "reply", reply_content, "视频评论")
+                                    self.comment_mgr._mark_user_replied(target_comment.get("user_id"))
+                                
+                                await asyncio.sleep(random.uniform(1, 3))
+                        except Exception as e:
+                            log(f"回复评论失败: {e}", "ERROR")
+
+                if action_log:
+                    self.energy -= 3
+                    self.mood_mgr.shift("主动互动完成", 1)
+                    log(f"深度交互额外消耗3点精力，当前剩余精力: {self.energy}%", "INFO")
+                    self.write_journal(title, up, score, f"[{mode}] {thought}", " + ".join(action_log), video_url)
+                else:
+                    self.mood_mgr.shift("观望未互动", -1)
+                    log("所有互动检定均未通过或无需操作，本次不进行额外操作。", "INFO")
+
+                self.record_session_event(
+                    "video_processed",
+                    title=title,
+                    up=up,
+                    score=score,
+                    mode=mode,
+                    thought=thought,
+                    actions=action_log,
+                    mood=self.mood_mgr.get_mood(),
+                    url=video_url
+                )
+                await self.maybe_auto_diary()
+                await self.maybe_self_evolve()
+
+                await self.watch_and_sync_history(bvid)
+
+                # 📚 知识库定期审查：每N个视频后随机抽查归档质量
+                if KNOWLEDGE_REVIEW_INTERVAL > 0:
+                    self._knowledge_review_countdown -= 1
+                    if self._knowledge_review_countdown <= 0:
+                        self._knowledge_review_countdown = KNOWLEDGE_REVIEW_INTERVAL
+                        try:
+                            await self._review_knowledge_periodically()
+                        except Exception as review_e:
+                            log(f"知识库定期审查异常: {review_e}", "WARN")
+
+            except asyncio.CancelledError:
+                log("主循环被取消 (CancelledError)，正常退出", "WARN")
+                raise  # 重新抛出，让 asyncio.run() 正确处理
+            except KeyboardInterrupt:
+                log("主循环收到中断信号，正常退出", "WARN")
+                raise
+            except Exception as e:
+                log(f"主循环发生严重错误: {e}", "ERROR")
+                import traceback
+                traceback.print_exc()
+                await asyncio.sleep(3)
+
+
+# ==============================================================================
+# [V] 手动视频分析 — 用户输入链接/标题/UP主名，AI客观解析
+# ==============================================================================
+def _extract_bvid(text: str):
+    """从文本中提取 BV 号。
+    支持: 完整URL、短链接、纯BV号
+    """
+    # 纯 BV 号
+    m = re.search(r'\b(BV[0-9A-Za-z]{10})\b', text)
+    if m:
+        return m.group(1)
+    # b23.tv 短链接
+    m = re.search(r'b23\.tv/([0-9A-Za-z]+)', text)
+    if m:
+        return m.group(1)
+    return None
+
+async def _resolve_b23_short(short_code: str) -> str:
+    """解析 b23.tv 短链接为完整 BV 号"""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            resp = await client.get(f"https://b23.tv/{short_code}",
+                                    headers={"User-Agent": "Mozilla/5.0"})
+            url = str(resp.url)
+            m = re.search(r'BV[0-9A-Za-z]{10}', url)
+            if m:
+                return m.group(0)
+    except Exception as e:
+        log(f'非预期异常: {e}', 'WARN')
+    return ""
+
+async def manual_video_analysis():
+    """手动视频分析：用户输入链接/标题/UP主名，AI客观解析视频内容。"""
+    print(f"\n{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}|               📹 手动视频分析 - 客观AI解析                    |{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
+    print(f"{Fore.YELLOW}[INFO] 支持: B站视频链接 | BV号 | 视频标题 | UP主名字{Style.RESET_ALL}")
+    print(f"{Fore.YELLOW}[INFO] 此模式下AI不带心情/人格滤镜，纯客观分析{Style.RESET_ALL}")
+
+    user_input = input(f"\n{Fore.CYAN}请输入视频链接/标题/UP主名字: {Style.RESET_ALL}").strip()
+    if not user_input:
+        print(f"{Fore.YELLOW}[WARN] 输入为空，已取消{Style.RESET_ALL}")
+        return
+
+    # ── 第一步：判断输入类型 ──
+    bvid = None
+    title = None
+    up_name = None
+    up_uid = None
+    from_search = False
+
+    raw_bvid = _extract_bvid(user_input)
+    if raw_bvid:
+        # 可能是 b23.tv 短链接
+        if 'b23.tv' in user_input.lower():
+            resolved = await _resolve_b23_short(raw_bvid)
+            if resolved:
+                bvid = resolved
+                log(f"短链接解析: b23.tv/{raw_bvid} -> {bvid}", "RESOLVE")
+            else:
+                print(f"{Fore.RED}[ERROR] 短链接解析失败，尝试直接搜索...{Style.RESET_ALL}")
+                from_search = True
+        else:
+            bvid = raw_bvid
+
+    if not bvid and not from_search:
+        from_search = True
+
+    # ── 提前创建 AgentBrain，加载凭证用于搜索 ──
+    brain = AgentBrain()
+    brain.bili._load_credential()
+    # [FIX] 同时加载 cookies，否则 fetch_bilibili_subtitles 无 cookie 无法获取AI字幕
+    cookie_loaded = False
+    if os.path.exists(COOKIE_FILE):
+        with open(COOKIE_FILE, 'r', encoding='utf-8') as f:
+            brain.cookies = json.load(f)
+        cookie_loaded = True
+    else:
+        # [AUTO] 尝试从 bilibili_claw 兄弟目录加载 cookie（用户可能只在一个项目登录过）
+        sibling_cookie = os.path.join(os.path.dirname(BASE_DIR), "bilibili_claw", "Data", "bilibili_cookies.json")
+        if os.path.exists(sibling_cookie):
+            try:
+                with open(sibling_cookie, 'r', encoding='utf-8') as f:
+                    brain.cookies = json.load(f)
+                log(f"[AUTO] 从 bilibili_claw 项目加载到登录Cookie (UID: {brain.cookies.get('DedeUserID','?')})", "LOGIN")
+                cookie_loaded = True
+            except Exception as e:
+                log(f'非预期异常: {e}', 'WARN')
+    if not cookie_loaded:
+        print(f"{Fore.YELLOW}[HINT] 未登录(Cookie文件不存在)，部分视频的AI字幕可能需要登录才能获取{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}       建议先运行菜单 3 录入登录Cookie，以获取完整AI字幕功能{Style.RESET_ALL}")
+
+    # ── 从搜索中选择视频 ──
+    if from_search:
+        print(f"\n{Fore.CYAN}正在B站搜索: {user_input}...{Style.RESET_ALL}")
+        results = await brain.bili.search_bilibili(user_input, limit=12)
+        if not results:
+            print(f"{Fore.RED}[ERROR] 未找到相关视频或UP主{Style.RESET_ALL}")
+            return
+
+        print(f"\n{Fore.GREEN}找到 {len(results)} 个相关结果，请选择:{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}{'─' * 80}{Style.RESET_ALL}")
+        for i, r in enumerate(results):
+            dur = r.get("duration", "??")
+            play = r.get("play", 0)
+            play_str = f"{play/10000:.1f}w" if play >= 10000 else str(play)
+            title_display = r['title'][:50]
+            author = r.get('author', '?')
+            print(f"  {Fore.YELLOW}{i+1:>2}.{Style.RESET_ALL} {title_display}")
+            print(f"      {Fore.LIGHTBLACK_EX}@{author}  |  ▶ {play_str}  |  ⏱ {dur}{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}{'─' * 80}{Style.RESET_ALL}")
+        print(f"  {Fore.YELLOW} 0.{Style.RESET_ALL} 取消")
+        print(f"  {Fore.CYAN}输入UP主名字可搜索TA的最新视频{Style.RESET_ALL}")
+
+        choice = input(f"\n{Fore.CYAN}请选择视频编号 (1-{len(results)}): {Style.RESET_ALL}").strip()
+
+        if choice == "0" or choice == "":
+            print(f"{Fore.YELLOW}[WARN] 已取消{Style.RESET_ALL}")
+            return
+
+        # 判断是数字选择还是UP主名
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < len(results):
+                chosen = results[idx]
+                bvid = chosen.get("bvid")
+                title = chosen.get("title", "")
+                up_name = chosen.get("author", "")
+                up_uid = chosen.get("mid")
+                print(f"{Fore.GREEN}[OK] 已选择: {title} - @{up_name}{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.RED}[ERROR] 无效选项{Style.RESET_ALL}")
+                return
+        except ValueError:
+            # 非数字 -> 搜索UP主，取TA最新视频
+            print(f"{Fore.CYAN}搜索UP主: {choice}...{Style.RESET_ALL}")
+            try:
+                data = await bili_search.search_by_type(
+                    choice,
+                    search_type=bili_search.SearchObjectType.USER,
+                    page=1
+                )
+                user_items = data.get("result") or []
+                if not user_items:
+                    print(f"{Fore.RED}[ERROR] 未找到UP主: {choice}{Style.RESET_ALL}")
+                    return
+                best = user_items[0]
+                up_uid = best.get("mid") or best.get("uid")
+                up_name = best.get("uname") or best.get("name") or choice
+                if up_uid:
+                    up_uid = int(up_uid)
+                    print(f"{Fore.GREEN}[OK] 找到UP主: {up_name} (UID: {up_uid}){Style.RESET_ALL}")
+                    print(f"{Fore.CYAN}获取 @{up_name} 的最新视频...{Style.RESET_ALL}")
+                    latest = await brain.bili.get_up_videos(up_uid, limit=1)
+                    if latest:
+                        bvid = latest[0].get("bvid")
+                        title = latest[0].get("title", "")
+                        if not up_name:
+                            up_name = choice
+                        print(f"{Fore.GREEN}[OK] 最新视频: {title}{Style.RESET_ALL}")
+                    else:
+                        print(f"{Fore.RED}[ERROR] 该UP主没有投稿视频{Style.RESET_ALL}")
+                        return
+                else:
+                    print(f"{Fore.RED}[ERROR] 无法获取UP主UID{Style.RESET_ALL}")
+                    return
+            except Exception as e:
+                print(f"{Fore.RED}[ERROR] 搜索UP主失败: {e}{Style.RESET_ALL}")
+                return
+
+    # ── 获取视频信息 ──
+    if not title or not up_name:
+        print(f"{Fore.CYAN}获取视频信息...{Style.RESET_ALL}")
+        try:
+            meta = await brain.bili._wbi_get(
+                'https://api.bilibili.com/x/web-interface/view',
+                params={'bvid': bvid}
+            )
+            vinfo = meta.json()
+            if vinfo.get('code') == 0:
+                vdata = vinfo['data']
+                title = title or vdata.get('title', '')
+                up_name = up_name or vdata.get('owner', {}).get('name', '未知')
+                up_uid = up_uid or vdata.get('owner', {}).get('mid', 0)
+            else:
+                print(f"{Fore.RED}[ERROR] 获取视频信息失败: code={vinfo.get('code')}{Style.RESET_ALL}")
+                return
+        except Exception as e:
+            print(f"{Fore.RED}[ERROR] 获取视频信息失败: {e}{Style.RESET_ALL}")
+            return
+
+    video_url = f"https://www.bilibili.com/video/{bvid}"
+    print(f"\n{Fore.GREEN}+------------------------------------------------------------+{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}|  视频: {title[:45]}{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}|  UP主: @{up_name}{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}|  链接: {video_url}{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}+------------------------------------------------------------+{Style.RESET_ALL}")
+
+    # ── 第二步：选择分析模式 ──
+    print(f"\n{Fore.CYAN}选择分析模式:{Style.RESET_ALL}")
+    print(f"  {Fore.GREEN}Enter (回车){Style.RESET_ALL} = 直接分析：输入一句话意图，自动看视频归档")
+    print(f"  {Fore.LIGHTMAGENTA_EX}A (Agent){Style.RESET_ALL}  = Agent对话：多轮对话确定目标、搜索知识库、增删改查文件")
+    mode_choice = input(f"\n{Fore.CYAN}模式 (回车=A-直接分析 / Agent对话): {Style.RESET_ALL}").strip().lower()
+
+    if mode_choice == "a":
+        # 提前获取 aid 供 Agent 使用
+        _aid = 0
+        try:
+            meta = await brain.bili._wbi_get(
+                'https://api.bilibili.com/x/web-interface/view',
+                params={'bvid': bvid}
+            )
+            vinfo = meta.json()
+            if vinfo.get('code') == 0:
+                _aid = vinfo.get('data', {}).get('aid', 0)
+        except Exception as e:
+            log(f'非预期异常: {e}', 'WARN')
+        await _agent_video_analysis(brain, bvid, title, up_name, video_url, _aid)
+        return
+
+    # ── 直接分析模式：用户意图输入 ──
+    intent = input(f"\n{Fore.CYAN}你的意图/要求 (如:帮我总结知识点/分析UP主风格/回车跳过): {Style.RESET_ALL}").strip()
+    if intent:
+        print(f"{Fore.GREEN}[OK] 意图: {intent}{Style.RESET_ALL}")
+    else:
+        print(f"{Fore.YELLOW}[INFO] 无额外意图，默认分析模式{Style.RESET_ALL}")
+
+    # ── 第三步：客观分析视频（覆盖心情为客观模式）──
+    original_custom = MOOD_CUSTOM_ENABLED
+    original_custom_value = MOOD_CUSTOM_VALUE
+    try:
+        globals()['MOOD_CUSTOM_ENABLED'] = True
+        globals()['MOOD_CUSTOM_VALUE'] = "客观冷静分析，专注内容质量，不带个人情绪"
+    except Exception as e:
+        log(f'非预期异常: {e}', 'WARN')
+
+    print(f"\n{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}|  [模式] 客观分析 - 开始解析视频内容                           |{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
+
+    # 1. 视频理解
+    print(f"\n{Fore.CYAN}[1/4] 理解视频内容 (字幕/ASR)...{Style.RESET_ALL}")
+    success, subtitle_text = await brain.understand_video_for_decision(bvid, title=title)
+    if success:
+        preview = subtitle_text[:200].replace('\n', ' ')
+        print(f"{Fore.GREEN}[OK] 视频内容获取成功: {preview}...{Style.RESET_ALL}")
+    else:
+        subtitle_text = f"[理解受限] {subtitle_text}"
+        print(f"{Fore.YELLOW}[WARN] 视频理解受限: {subtitle_text[:120]}{Style.RESET_ALL}")
+
+    # 2. 评论+弹幕
+    print(f"\n{Fore.CYAN}[2/4] 获取评论区讨论...{Style.RESET_ALL}")
+    try:
+        meta = await brain.bili._wbi_get(
+            'https://api.bilibili.com/x/web-interface/view',
+            params={'bvid': bvid}
+        )
+        vinfo = meta.json()
+        aid = vinfo.get('data', {}).get('aid', 0) if vinfo.get('code') == 0 else 0
+    except Exception:
+        aid = 0
+
+    comment_text = "[未读取评论]"
+    c_list = []
+    danmaku_text = ""
+    if aid:
+        try:
+            comment_text, c_list = await brain._get_comments_context(aid)
+            if c_list:
+                print(f"{Fore.GREEN}[OK] 获取到 {len(c_list)} 条评论{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.YELLOW}[WARN] 评论区无内容{Style.RESET_ALL}")
+        except Exception as e:
+            print(f"{Fore.YELLOW}[WARN] 评论获取失败: {e}{Style.RESET_ALL}")
+
+        try:
+            danmaku_list = await brain.maybe_read_danmaku(bvid)
+            if danmaku_list:
+                danmaku_text = f"【弹幕（共{len(danmaku_list)}条）】:\n" + "\n".join(
+                    f"  {dm.get('text','')}" for dm in danmaku_list[:15]
+                )
+                print(f"{Fore.GREEN}[OK] 获取到 {len(danmaku_list)} 条弹幕{Style.RESET_ALL}")
+        except Exception as e:
+            log(f'非预期异常: {e}', 'WARN')
+
+    # 3. AI决策分析（客观模式）
+    print(f"\n{Fore.CYAN}[3/4] AI客观决策分析中...{Style.RESET_ALL}")
+
+    # 构建不含心情/人格的客观prompt（手动分析模式：客观评价，不掷硬币）
+    objective_prompt = SYSTEM_PROMPT_BRAIN.replace("{bot_name}", get_bot_name()).replace("{memory_ups}", str(brain.get_known_up_names()))
+    # 覆盖随机性格：手动分析模式强制客观分析，不掷硬币
+    objective_prompt = objective_prompt.replace(
+        "【性格模式】掷硬币决定：- **夸夸模式**：真诚赞美。 - **吐槽模式**：犀利毒舌。",
+        "【性格模式】客观分析模式：基于内容质量公正评分，不随机切换夸夸/吐槽。评分标准：标题与内容匹配度、信息密度、观点深度、制作质量。"
+    )
+    if intent:
+        objective_prompt += f"\n\n【用户额外要求】{intent}"
+
+    context = (f"视频标题: {title}\nUP主: {up_name}\n"
+               f"【📺 视频内容字幕】: {subtitle_text}\n"
+               f"{comment_text}"
+               f"{danmaku_text}")
+
+    try:
+        resp = await brain._call_ai_with_retry(
+            model=MODEL_BRAIN,
+            messages=[
+                {"role": "system", "content": objective_prompt},
+                {"role": "user", "content": context}
+            ],
+            request_timeout=120
+        )
+        raw = resp.choices[0].message.content
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start >= 0 and end >= start:
+            json_str = raw[start:end + 1]
+        else:
+            raise ValueError(f"AI返回未找到JSON: {raw[:200]}")
+
+        try:
+            decision = json.loads(json_str)
+        except json.JSONDecodeError:
+            fixed = json_str.replace("'", '"')
+            fixed = re.sub(r'\bTrue\b', 'true', fixed)
+            fixed = re.sub(r'\bFalse\b', 'false', fixed)
+            fixed = re.sub(r'\bNone\b', 'null', fixed)
+            decision = json.loads(fixed)
+
+        score = decision.get('score', 0)
+        thought = decision.get('thought', '')
+        mode = decision.get('mode', '')
+        learning_topic = decision.get('learning_topic', '')
+
+        print(f"\n{Fore.CYAN}+------------------------------------------------------------+{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}|  [分析结果]                                                  |{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}+------------------------------------------------------------+{Style.RESET_ALL}")
+        print(f"  AI评分: {Fore.YELLOW}{score}/10{Style.RESET_ALL}")
+        print(f"  AI想法: {thought}")
+        if mode:
+            print(f"  模式: {mode}")
+        if learning_topic:
+            print(f"  主题: {learning_topic}")
+        print(f"{Fore.CYAN}+------------------------------------------------------------+{Style.RESET_ALL}")
+
+    except Exception as e:
+        print(f"{Fore.RED}[ERROR] AI决策失败: {_mask_urls(str(e)[:200])}{Style.RESET_ALL}")
+        score = 0
+        thought = ""
+        learning_topic = ""
+
+    # ── 恢复心情设置 ──
+    try:
+        globals()['MOOD_CUSTOM_ENABLED'] = original_custom
+        globals()['MOOD_CUSTOM_VALUE'] = original_custom_value
+    except Exception as e:
+        log(f'非预期异常: {e}', 'WARN')
+
+    # 4. 如果干货 → 学习归档
+    if score >= 6.0 or learning_topic:
+        print(f"\n{Fore.CYAN}[4/4] 检测到有价值内容，触发学习归档...{Style.RESET_ALL}")
+        learn_text = subtitle_text
+        if not learn_text or "[无可用字幕" in str(learn_text) or "[未读取" in str(learn_text):
+            learn_text = f"【视频标题】{title}\n【AI判断】{thought}\n"
+            if danmaku_text:
+                learn_text += f"{danmaku_text}\n"
+            if comment_text and comment_text != "[未读取评论]":
+                learn_text += f"{comment_text}\n"
+            learn_text = learn_text.strip()
+
+        if not learning_topic:
+            learning_topic = title[:15] if title else "手动分析"
+
+        if learn_text and len(learn_text) > 20:
+            try:
+                _desc = getattr(brain, "_last_video_desc", "")
+                learn_success = await brain.learn_from_video(bvid, title, up_name, video_url, learn_text, learning_topic, video_desc=_desc, score=score)
+                if learn_success:
+                    print(f"{Fore.GREEN}[OK] 知识已归档到知识库！{Style.RESET_ALL}")
+                else:
+                    print(f"{Fore.YELLOW}[INFO] 该知识可能已存在，跳过归档{Style.RESET_ALL}")
+            except Exception as e:
+                print(f"{Fore.RED}[ERROR] 学习归档失败: {e}{Style.RESET_ALL}")
+        else:
+            print(f"{Fore.YELLOW}[INFO] 可学习内容不足，跳过归档{Style.RESET_ALL}")
+    else:
+        print(f"\n{Fore.CYAN}[4/4] 评分 {score}/10 < 6.0，内容质量一般，跳过学习归档{Style.RESET_ALL}")
+
+    print(f"\n{Fore.GREEN}+============================================================+{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}|  手动视频分析完成！                                         |{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}+============================================================+{Style.RESET_ALL}")
+
+
+# ==============================================================================
+# [REVISIT] 知识库视频重温优化
+# ==============================================================================
+
+def _scan_knowledge_base_md_files():
+    """扫描 KnowledgeBase/ 下所有 .md 文件，提取 [BVxxx] 视频信息。
+    返回: [(bvid, title, file_path, up, category_path), ...]"""
+    results = []
+    if not os.path.exists(KNOWLEDGE_BASE_DIR):
+        return results
+
+    for root, dirs, files in os.walk(KNOWLEDGE_BASE_DIR):
+        dirs[:] = [d for d in dirs if not d.startswith('.')]
+        for fname in files:
+            if not fname.endswith('.md'):
+                continue
+            fpath = os.path.join(root, fname)
+            # 提取 BV 号: [BVxxx] - 标题.md
+            bv_match = re.match(r'^\[(BV[0-9A-Za-z]{10})\]\s*-\s*(.+)\.md$', fname)
+            if not bv_match:
+                continue
+            bvid = bv_match.group(1)
+            title = bv_match.group(2).strip()
+            rel_path = os.path.relpath(fpath, KNOWLEDGE_BASE_DIR)
+            # 尝试从文件头部读取 UP主 信息
+            up_name = ""
+            try:
+                with open(fpath, 'r', encoding='utf-8') as f:
+                    head = f.read(800)
+                    up_m = re.search(r'\*\*UP主\*\*:\s*(.+)', head)
+                    if up_m:
+                        up_name = up_m.group(1).strip()
+            except Exception as e:
+                log(f'非预期异常: {e}', 'WARN')
+            # 分类路径: 去掉文件名后的目录部分
+            category_path = os.path.dirname(rel_path).replace(os.sep, '/')
+            if not category_path or category_path == '.':
+                category_path = '未分类'
+            results.append((bvid, title, fpath, up_name, category_path))
+    # 按分类路径排序
+    results.sort(key=lambda x: (x[4], x[1]))
+    return results
+
+
+# Agent模式可用工具的常量定义
+AGENT_TOOLS_HELP = """你拥有以下工具能力，在回复中使用 [TOOL:工具名] 参数 的格式来调用。可以同时调用多个工具：
+
+1. [TOOL:fetch_subtitles]
+   获取视频的AI字幕/CC字幕文本（仅获取字幕，不做AI分析）。
+   **是视频内容分析的第一步，拿到字幕后才能判断后续操作。**
+
+2. [TOOL:search_knowledge] 搜索词
+   在知识库中搜索相关内容，返回匹配的文件路径和摘要
+   
+3. [TOOL:read_file] 相对路径
+   读取知识库中的指定文件内容，路径相对于 KnowledgeBase/ 目录
+   例: [TOOL:read_file] 科技/AI工具/video_creation/[BVxxx] - 标题.md
+
+4. [TOOL:list_files] 可选分类路径
+   列出知识库文件，不传参数=列出全部，传路径=列出子目录
+   例: [TOOL:list_files] 科技
+
+5. [TOOL:delete_file] 相对路径
+   删除知识库中的指定文件（需确认，会提示用户）
+
+6. [TOOL:update_file] 相对路径
+   ---新内容---
+   替换/更新知识库文件的全部内容（需确认）
+   例: [TOOL:update_file] 科技/AI工具/[BVxxx] - 标题.md
+   ---
+   新的完整Markdown内容...
+
+7. [TOOL:analyze_video]
+   触发完整的视频分析：封面+字幕/ASR/视觉帧+评论+弹幕 → AI决策 → 学习归档
+   **仅在已拿到字幕且确实需要深度分析时使用。**
+
+8. [TOOL:quick_preview]
+   只看标题/简介/评论/弹幕，不做完整视频分析，快速了解视频热度/反馈
+   **不获取视频字幕/内容！想分析内容先调用 fetch_subtitles。**
+
+9. [TOOL:open_file] 文件绝对路径
+   用系统默认程序打开任意文件（md→记事本/Typora, html→浏览器 等）
+   例: [TOOL:open_file] C:\\Users\\用户名\\Desktop\\视频总结.md
+   **仅在update_file写文件成功后使用。路径必须用双反斜杠 \\\\ 分隔。**
+
+[DONE] 完成任务后输出此标记结束对话
+
+工作流程：
+- 用户提到"字幕"/"内容"/"分析视频/总结"等 → 第一步必须先 [TOOL:fetch_subtitles]
+- 用户只要热度/评论反馈 → 可以用 [TOOL:quick_preview]
+- 拿到字幕后，按用户要求分析/总结/归档
+- 可一次调用多个工具以提高效率"""
+
+
+async def _agent_video_analysis(brain, bvid, title, up_name, video_url, aid=0):
+    """Agent对话模式：多轮对话确定目标、搜索知识库、增删改查文件、智能分析视频。
+    
+    工具:
+    - search_knowledge: 搜索知识库文件
+    - read_file: 读取指定 .md 文件
+    - list_files: 列出知识库文件
+    - update_file: 更新/替换知识库文件
+    - delete_file: 删除知识库文件
+    - analyze_video: 触发完整视频分析管道
+    - quick_preview: 只看标题/简介/评论/弹幕
+    """
+    print(f"\n{Fore.LIGHTMAGENTA_EX}+============================================================+{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTMAGENTA_EX}|  🤖 Agent对话模式 - 多轮对话 + 文件CRUD + 智能分析          |{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTMAGENTA_EX}+============================================================+{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}[Agent] 视频: {title[:50]}{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}[Agent] 输入你的要求，AI会提问/搜索知识库/增删改查文件/决定如何分析{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}[Agent] 命令: /help 帮助 | /exit 退出 | /files 列文件 | /done 直接分析{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTMAGENTA_EX}+------------------------------------------------------------+{Style.RESET_ALL}")
+
+    # 缓存已分析结果
+    analysis_cache = {
+        "analyzed": False,
+        "subtitle_text": "",
+        "comment_text": "",
+        "c_list": [],
+        "danmaku_text": "",
+        "score": 0,
+        "thought": "",
+        "learning_topic": "",
+    }
+
+    # 本次会话自动允许的工具集合（用户选了"一直允许"后加入）
+    auto_allow_tools = set()
+
+    # 对话历史
+    messages = [
+        {"role": "system", "content": f"""你是bilibili_learning_bot的Agent助手，负责帮用户分析B站视频并管理知识库。
+
+当前视频信息:
+- 标题: {title}
+- UP主: {up_name}
+- BV号: {bvid}
+- 链接: {video_url}
+
+{AGENT_TOOLS_HELP}
+
+重要规则:
+1. 用中文回复，简洁专业
+2. 先理解用户意图，可以反问缩小目标
+3. 善用搜索/读取知识库，对比已有知识
+4. 文件操作(update/delete)前要说明理由并等待用户确认
+5. 可以同时调用多个工具，尤其 fetch_subtitles+search_knowledge 可并行
+6. 任务完成或用户满意时输出 [DONE]
+
+工作流程（与"直接分析模式"一致）：
+- 用户要求分析视频/总结内容 → 第一步 [TOOL:fetch_subtitles] 获取字幕
+- 拿到字幕后 → 调用 [TOOL:analyze_video] 做完整评分分析（含评论弹幕+AI决策+归档）
+- 分析完成后 → 根据用户要求输出总结/写文件/打开文件
+- 用户如中途要调整方向（如只总结某部分/改输出格式），在上一步完成后提出来即可
+- 不要用 quick_preview 替代 fetch_subtitles（quick_preview 不看视频内容！）
+- 写文件后如果用户要求打开，用 [TOOL:open_file] 绝对路径 打开它
+
+自动连续模式（重要！）：
+- 用户一句话包含了"分析+总结+写桌面+打开"这种多步需求时，你在同一轮回复中依次列出所有 [TOOL:] 步骤
+- 例如用户说"帮我分析视频总结到桌面并打开" → 你回复:
+  好的，我来一步到位：
+  [TOOL:fetch_subtitles]
+  （系统会自动继续执行后续工具，你只需列出第一步）
+- 如果工具执行结果返回后任务未完成，系统会自动再次调用你继续，无需等待用户输入
+- 所有步骤完成后输出 [DONE] 结束"""},
+    ]
+
+    # ── Agent 确认函数：4选1（本次允许 / 一直允许 / 不允许 / AI审查） ──
+    async def _agent_confirm(tool_name: str, action_desc: str, detail: str = "") -> str:
+        """通用确认对话框，返回: 'allow' | 'always' | 'deny' | 'ai_review'
+        
+        - allow: 仅本次允许
+        - always: 一直允许（当前视频会话内该工具自动放行）
+        - deny: 拒绝本次操作
+        - ai_review: 让AI自动审查安全性后决定
+        """
+        # 如果该工具已被加入"一直允许"，直接放行
+        if tool_name in auto_allow_tools:
+            return "always"
+
+        print(f"\n{Fore.YELLOW}╔══════════════════════════════════════════════════════════╗{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}║  [Agent权限确认] {tool_name}{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}╠══════════════════════════════════════════════════════════╣{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}║  {action_desc}{Style.RESET_ALL}")
+        if detail:
+            # 截断过长细节
+            detail_short = detail[:200] + ("..." if len(detail) > 200 else "")
+            print(f"{Fore.CYAN}║  详情: {detail_short}{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}╠══════════════════════════════════════════════════════════╣{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}║{Style.RESET_ALL}  {Fore.GREEN}1.{Style.RESET_ALL} 本次允许    {Fore.LIGHTGREEN_EX}2.{Style.RESET_ALL} 一直允许(本视频)    {Fore.RED}3.{Style.RESET_ALL} 不允许")
+        print(f"{Fore.YELLOW}║{Style.RESET_ALL}  {Fore.CYAN}4.{Style.RESET_ALL} AI自动审查")
+        print(f"{Fore.YELLOW}╚══════════════════════════════════════════════════════════╝{Style.RESET_ALL}")
+
+        choice = input(f"{Fore.CYAN}[Agent] 选择 (1-4, 回车=1): {Style.RESET_ALL}").strip()
+
+        if choice == "2":
+            auto_allow_tools.add(tool_name)
+            print(f"{Fore.GREEN}[Agent] 已设置: 本视频会话内 {tool_name} 自动放行{Style.RESET_ALL}")
+            return "always"
+        elif choice == "3":
+            print(f"{Fore.RED}[Agent] 已拒绝本次操作{Style.RESET_ALL}")
+            return "deny"
+        elif choice == "4":
+            print(f"{Fore.CYAN}[Agent] 启动AI安全审查...{Style.RESET_ALL}")
+            return "ai_review"
+        else:
+            # 默认=本次允许（包括回车和输入1）
+            return "allow"
+
+    async def _agent_ai_review(tool_name: str, action_desc: str, detail: str = "") -> bool:
+        """AI自动审查：调用AI判断该操作是否安全合理"""
+        review_prompt = f"""你是安全审查助手。Agent要执行以下操作，请判断是否安全合理：
+
+工具: {tool_name}
+操作: {action_desc}
+详情: {detail[:500]}
+
+判断标准：
+- 删除/修改知识库文件是否合理（不会误删重要数据）
+- 操作范围是否在知识库目录内
+- 是否可能造成数据丢失
+
+只返回JSON: {{"safe": true/false, "reason": "简短理由(20字内)"}}"""
+
+        try:
+            resp = await brain._call_ai_with_retry(
+                model=MODEL_BRAIN,
+                messages=[{"role": "user", "content": review_prompt}],
+                request_timeout=30
+            )
+            raw = resp.choices[0].message.content
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if start >= 0 and end >= start:
+                decision = json.loads(raw[start:end+1])
+                safe = decision.get("safe", True)
+                reason = decision.get("reason", "无")
+                if safe:
+                    print(f"{Fore.GREEN}[Agent] AI审查通过: {reason}{Style.RESET_ALL}")
+                    return True
+                else:
+                    print(f"{Fore.RED}[Agent] AI审查不通过: {reason}{Style.RESET_ALL}")
+                    return False
+            else:
+                print(f"{Fore.YELLOW}[Agent] AI审查无法解析，默认放行{Style.RESET_ALL}")
+                return True
+        except Exception as e:
+            print(f"{Fore.YELLOW}[Agent] AI审查异常({e})，默认放行{Style.RESET_ALL}")
+            return True
+
+    def _agent_list_files(cat_path=""):
+        """列出知识库文件"""
+        all_files = _scan_knowledge_base_md_files()
+        if not all_files:
+            return "知识库为空，没有已学习的视频"
+        if cat_path:
+            filtered = [(b,t,f,u,c) for b,t,f,u,c in all_files if c.startswith(cat_path)]
+            if not filtered:
+                return f"分类 '{cat_path}' 下没有文件"
+            result = f"分类 '{cat_path}' 下的文件 ({len(filtered)}个):\n"
+            for b, t, f, u, c in filtered:
+                result += f"  [{b}] {t[:50]} | {c}\n"
+            return result.strip()
+        # 按分类统计
+        from collections import Counter
+        cats = Counter(c for _,_,_,_,c in all_files)
+        result = f"知识库共 {len(all_files)} 个文件:\n"
+        for cat, cnt in sorted(cats.items()):
+            result += f"  {cat}/ ({cnt}个)\n"
+        return result.strip()
+
+    def _agent_search_knowledge(query):
+        """搜索知识库（向量语义搜索 + 关键词匹配）"""
+        all_files = _scan_knowledge_base_md_files()
+        if not all_files:
+            return "知识库为空"
+
+        # 尝试向量搜索
+        vector_hits = set()
+        try:
+            if KBSearchEngine:
+                from xingye_bot.settings import load_settings as _ls
+                from xingye_bot.state import BotState as _bs
+                _s = _ls()
+                _engine = KBSearchEngine(ModelClient(_s, _bs()))
+                _vec_results = _engine.search(query, top_k=10)
+                if _vec_results:
+                    for vr in _vec_results:
+                        if vr.get("bvid"):
+                            vector_hits.add(vr["bvid"])
+        except Exception:
+            pass
+
+        q_lower = query.lower()
+        matches = []
+        for b, t, f, u, c in all_files:
+            score = 0
+            if vector_hits and b in vector_hits:
+                score += 10  # 向量命中最高权重
+            if q_lower in t.lower():
+                score += 3
+            for kw in q_lower.split():
+                if kw in t.lower():
+                    score += 2
+            if u and q_lower in u.lower():
+                score += 1
+            if score > 0:
+                preview = ""
+                try:
+                    with open(f, 'r', encoding='utf-8') as fh:
+                        preview = fh.read(200).replace('\n', ' ')
+                except Exception as e:
+                    log(f'非预期异常: {e}', 'WARN')
+                matches.append((score, b, t, f, u, c, preview))
+        matches.sort(key=lambda x: x[0], reverse=True)
+        if not matches:
+            return f"未找到与 '{query}' 相关的知识文件"
+        result = f"搜索 '{query}' 找到 {len(matches)} 个相关文件:\n"
+        for i, (s, b, t, f, u, c, p) in enumerate(matches[:10]):
+            result += f"  {i+1}. [{b}] {t[:45]} | {c} | 摘要: {p[:60]}...\n"
+        return result.strip()
+
+    def _agent_read_file(rel_path):
+        """读取知识库文件"""
+        full_path = os.path.join(KNOWLEDGE_BASE_DIR, rel_path)
+        if not os.path.exists(full_path):
+            # 尝试模糊匹配
+            all_files = _scan_knowledge_base_md_files()
+            best = None
+            for b, t, f, u, c in all_files:
+                if rel_path in f or rel_path in t:
+                    best = f
+                    break
+                if b in rel_path:
+                    best = f
+                    break
+            if best:
+                full_path = best
+                print(f"{Fore.CYAN}[Agent] 模糊匹配到: {os.path.relpath(full_path, KNOWLEDGE_BASE_DIR)}{Style.RESET_ALL}")
+            else:
+                return f"文件不存在: {rel_path}\n可用 /files 命令查看所有文件"
+        try:
+            with open(full_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            if len(content) > 5000:
+                content = content[:5000] + "\n\n... (文件过长，已截断至5000字)"
+            return f"文件内容 ({os.path.relpath(full_path, KNOWLEDGE_BASE_DIR)}):\n---\n{content}\n---"
+        except Exception as e:
+            return f"读取失败: {e}"
+
+    async def _agent_delete_file(rel_path):
+        """删除知识库文件（需4选1确认）"""
+        full_path = os.path.join(KNOWLEDGE_BASE_DIR, rel_path)
+        if not os.path.exists(full_path):
+            return f"文件不存在: {rel_path}"
+        # 先预览文件内容
+        preview = ""
+        try:
+            with open(full_path, 'r', encoding='utf-8') as fh:
+                preview = fh.read(300).replace('\n', ' ')
+        except Exception as e:
+            log(f'非预期异常: {e}', 'WARN')
+        action_desc = f"删除知识库文件: {rel_path}"
+        detail = f"文件预览: {preview}..."
+        result = await _agent_confirm("delete_file", action_desc, detail)
+        if result == "deny":
+            return "用户取消删除"
+        if result == "ai_review":
+            if not await _agent_ai_review("delete_file", action_desc, detail):
+                return "AI审查不通过，取消删除"
+        try:
+            os.remove(full_path)
+            return f"已删除: {rel_path}"
+        except Exception as e:
+            return f"删除失败: {e}"
+
+    async def _agent_update_file(rel_path, new_content):
+        """更新/新建知识库文件（需4选1确认）"""
+        full_path = os.path.join(KNOWLEDGE_BASE_DIR, rel_path)
+        exists = os.path.exists(full_path)
+        action = "替换" if exists else "新建"
+        action_desc = f"{action}知识库文件: {rel_path}"
+        detail = f"新内容({len(new_content)}字): {new_content[:150]}..."
+        result = await _agent_confirm("update_file", action_desc, detail)
+        if result == "deny":
+            return f"用户取消{action}"
+        if result == "ai_review":
+            if not await _agent_ai_review("update_file", action_desc, detail):
+                return f"AI审查不通过，取消{action}"
+        try:
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            with open(full_path, 'w', encoding='utf-8') as f:
+                f.write(new_content)
+            return f"已{action}: {rel_path} ({len(new_content)}字)"
+        except Exception as e:
+            return f"写入失败: {e}"
+
+    async def _agent_open_file(file_path: str):
+        """用系统默认程序打开文件"""
+        import subprocess, platform
+        fp = file_path.strip()
+        if not os.path.isabs(fp):
+            # 尝试在桌面找
+            desktop = os.path.join(os.path.expanduser("~"), "Desktop")
+            fp = os.path.join(desktop, fp)
+        if not os.path.exists(fp):
+            return f"文件不存在: {fp}"
+        try:
+            if platform.system() == "Windows":
+                os.startfile(fp)
+            elif platform.system() == "Darwin":
+                subprocess.run(["open", fp])
+            else:
+                subprocess.run(["xdg-open", fp])
+            return f"已用系统默认程序打开: {fp}"
+        except Exception as e:
+            return f"打开失败: {e}"
+
+    async def _agent_fetch_subtitles():
+        """获取视频字幕（AI字幕优先，CC字幕备选），缓存结果供后续分析复用"""
+        print(f"\n{Fore.CYAN}[Agent] 获取视频字幕...{Style.RESET_ALL}")
+        # 已缓存则直接返回
+        if analysis_cache.get("subtitle_text"):
+            cached_len = len(analysis_cache["subtitle_text"])
+            print(f"{Fore.GREEN}[Agent] 使用缓存字幕 ({cached_len}字){Style.RESET_ALL}")
+            return analysis_cache["subtitle_text"]
+
+        subtitle_text = ""
+        try:
+            # 优先直接获取B站AI/CC字幕（快，不走LLM）
+            # fetch_bilibili_subtitles 是模块级函数，返回 (success, content, desc)
+            cookies = getattr(brain, 'cookies', None)
+            ok, subs, _desc = await fetch_bilibili_subtitles(bvid, cookies)
+            if ok and subs and len(subs) > 100:
+                subtitle_text = subs
+                print(f"{Fore.GREEN}[Agent] 获取到B站字幕 ({len(subs)}字){Style.RESET_ALL}")
+            else:
+                # 字幕不足，走完整管道（可能触发ASR下载）
+                print(f"{Fore.YELLOW}[Agent] B站字幕不足({len(subs) if subs else 0}字)，尝试完整视频理解...{Style.RESET_ALL}")
+                success, st = await brain.understand_video_for_decision(bvid, title=title)
+                if success and st:
+                    subtitle_text = st
+        except Exception as e:
+            print(f"{Fore.RED}[Agent] 字幕获取异常: {e}{Style.RESET_ALL}")
+            subtitle_text = f"[字幕获取失败] {e}"
+
+        # 缓存
+        if subtitle_text:
+            analysis_cache["subtitle_text"] = subtitle_text
+        return subtitle_text or "[无字幕]"
+
+    async def _agent_quick_preview():
+        """快速预览：获取标题/简介/评论/弹幕"""
+        print(f"\n{Fore.CYAN}[Agent] 快速预览视频信息...{Style.RESET_ALL}")
+        # 获取简介
+        desc = ""
+        try:
+            meta = await brain.bili._wbi_get(
+                'https://api.bilibili.com/x/web-interface/view',
+                params={'bvid': bvid}
+            )
+            vinfo = meta.json()
+            if vinfo.get('code') == 0:
+                desc = vinfo['data'].get('desc', '')[:500]
+        except Exception as e:
+            log(f'非预期异常: {e}', 'WARN')
+
+        # 评论
+        comment_text = "[无评论]"
+        c_list = []
+        if aid:
+            try:
+                comment_text, c_list = await brain._get_comments_context(aid)
+            except Exception as e:
+                log(f'非预期异常: {e}', 'WARN')
+
+        # 弹幕
+        danmaku_text = ""
+        try:
+            danmaku_list = await brain.maybe_read_danmaku(bvid)
+            if danmaku_list:
+                danmaku_text = "\n".join(f"  {dm.get('text','')}" for dm in danmaku_list[:10])
+        except Exception as e:
+            log(f'非预期异常: {e}', 'WARN')
+
+        preview = f"""【视频信息】
+标题: {title}
+UP主: {up_name}
+简介: {desc[:300] if desc else '无'}
+
+【评论区摘要】
+{comment_text[:500]}
+
+【弹幕摘录】
+{danmaku_text[:300] if danmaku_text else '无弹幕数据'}"""
+        return preview
+
+    async def _agent_analyze_video():
+        """完整视频分析管道"""
+        print(f"\n{Fore.CYAN}[Agent] 触发完整视频分析管道...{Style.RESET_ALL}")
+
+        # 1. 视频理解（复用缓存字幕）
+        print(f"{Fore.CYAN}[Agent] [1/4] 视频内容理解 (字幕/ASR/视觉帧)...{Style.RESET_ALL}")
+        if analysis_cache.get("subtitle_text"):
+            print(f"{Fore.GREEN}[Agent] 复用已获取的字幕 ({len(analysis_cache['subtitle_text'])}字){Style.RESET_ALL}")
+            subtitle_text = analysis_cache["subtitle_text"]
+            success = True
+        else:
+            success, subtitle_text = await brain.understand_video_for_decision(bvid, title=title)
+            if success and subtitle_text:
+                analysis_cache["subtitle_text"] = subtitle_text
+        if not success:
+            subtitle_text = f"[理解受限] {subtitle_text}"
+
+        # 2. 评论+弹幕
+        comment_text = "[未读取评论]"
+        c_list = []
+        danmaku_text = ""
+        if aid:
+            try:
+                comment_text, c_list = await brain._get_comments_context(aid)
+            except Exception as e:
+                log(f'非预期异常: {e}', 'WARN')
+            try:
+                danmaku_list = await brain.maybe_read_danmaku(bvid)
+                if danmaku_list:
+                    danmaku_text = "\n".join(f"  {dm.get('text','')}" for dm in danmaku_list[:15])
+            except Exception as e:
+                log(f'非预期异常: {e}', 'WARN')
+
+        # 3. AI决策
+        print(f"{Fore.CYAN}[Agent] [2/4] AI决策分析...{Style.RESET_ALL}")
+        objective_prompt = SYSTEM_PROMPT_BRAIN.replace("{bot_name}", get_bot_name()).replace("{memory_ups}", str(brain.get_known_up_names()))
+        # Agent 模式特有提示：关注用户交互意图
+        objective_prompt += "\n\n【Agent模式】用户会通过对话指定分析目标，请结合对话上下文和用户意图做决策。"
+        # 覆盖随机性格：手动分析模式强制客观分析，不掷硬币
+        objective_prompt = objective_prompt.replace(
+            "【性格模式】掷硬币决定：- **夸夸模式**：真诚赞美。 - **吐槽模式**：犀利毒舌。",
+            "【性格模式】客观分析模式：基于内容质量公正评分，不随机切换夸夸/吐槽。评分标准：标题与内容匹配度、信息密度、观点深度、制作质量。"
+        )
+
+        context = (f"视频标题: {title}\nUP主: {up_name}\n"
+                   f"【视频内容】: {subtitle_text}\n"
+                   f"{comment_text}")
+
+        score, thought, learning_topic = 0, "", ""
+        try:
+            resp = await brain._call_ai_with_retry(
+                model=MODEL_BRAIN,
+                messages=[
+                    {"role": "system", "content": objective_prompt},
+                    {"role": "user", "content": context}
+                ],
+                request_timeout=120
+            )
+            raw = resp.choices[0].message.content
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if start >= 0 and end >= start:
+                json_str = raw[start:end + 1]
+            else:
+                json_str = "{}"
+            decision = json.loads(json_str)
+            score = decision.get('score', 0)
+            thought = decision.get('thought', '')
+            learning_topic = decision.get('learning_topic', '')
+        except Exception as e:
+            log(f'非预期异常: {e}', 'WARN')
+
+        # 4. 学习归档
+        print(f"{Fore.CYAN}[Agent] [3/4] 学习归档...{Style.RESET_ALL}")
+        archived_file = ""
+        if score >= 6.0 or learning_topic:
+            learn_text = subtitle_text
+            if not learn_text or len(learn_text) < 30:
+                learn_text = f"【视频标题】{title}\n【AI判断】{thought}"
+            if not learning_topic:
+                learning_topic = title[:15] if title else "手动分析"
+            try:
+                _desc = getattr(brain, "_last_video_desc", "")
+                learn_success = await brain.learn_from_video(
+                    bvid, title, up_name, video_url, learn_text, learning_topic, video_desc=_desc, score=score
+                )
+                if learn_success:
+                    print(f"{Fore.GREEN}[Agent] 已归档到知识库{Style.RESET_ALL}")
+                    archived_file = f"已归档: [{bvid}] - {title[:30]}.md"
+                else:
+                    print(f"{Fore.YELLOW}[Agent] 可能已存在，跳过归档{Style.RESET_ALL}")
+            except Exception as e:
+                print(f"{Fore.RED}[Agent] 归档失败: {e}{Style.RESET_ALL}")
+        else:
+            print(f"{Fore.YELLOW}[Agent] 评分 {score}/10 < 6.0，未触发归档{Style.RESET_ALL}")
+
+        # 缓存结果
+        analysis_cache["analyzed"] = True
+        analysis_cache["subtitle_text"] = subtitle_text
+        analysis_cache["comment_text"] = comment_text
+        analysis_cache["c_list"] = c_list
+        analysis_cache["danmaku_text"] = danmaku_text
+        analysis_cache["score"] = score
+        analysis_cache["thought"] = thought
+        analysis_cache["learning_topic"] = learning_topic
+
+        result = f"""【视频分析完成】
+AI评分: {score}/10
+AI判断: {thought}
+学习主题: {learning_topic if learning_topic else '无'}
+视频内容摘要: {subtitle_text[:300]}...
+评论数: {len(c_list)}条
+弹幕数: {len(danmaku_text.split(chr(10))) if danmaku_text else 0}条
+{archived_file}"""
+        return result
+
+    # =========================================================
+    # Agent对话主循环
+    # =========================================================
+    turn = 0
+    MAX_TURNS = 20
+
+    while turn < MAX_TURNS:
+        turn += 1
+        try:
+            user_msg = input(f"\n{Fore.LIGHTMAGENTA_EX}[Agent] 你 > {Style.RESET_ALL}").strip()
+        except (EOFError, KeyboardInterrupt):
+            print(f"\n{Fore.YELLOW}[Agent] 输入中断，退出Agent模式{Style.RESET_ALL}")
+            break
+
+        if not user_msg:
+            continue
+
+        # 快捷命令
+        if user_msg.lower() == "/exit":
+            print(f"{Fore.YELLOW}[Agent] 退出Agent模式{Style.RESET_ALL}")
+            break
+        if user_msg.lower() == "/help":
+            print(f"\n{Fore.CYAN}[Agent] 可用命令:{Style.RESET_ALL}")
+            print(f"  /exit  - 退出Agent模式")
+            print(f"  /files - 列出知识库所有文件")
+            print(f"  /search 关键词 - 搜索知识库")
+            print(f"  /done  - 直接触发完整视频分析")
+            print(f"  {Fore.YELLOW}直接输入你的要求，AI会智能响应{Style.RESET_ALL}")
+            continue
+        if user_msg.lower() == "/files":
+            result = _agent_list_files()
+            print(f"\n{Fore.GREEN}[Agent] {result}{Style.RESET_ALL}")
+            continue
+        if user_msg.lower().startswith("/search "):
+            query = user_msg[8:].strip()
+            result = _agent_search_knowledge(query)
+            print(f"\n{Fore.GREEN}[Agent] {result}{Style.RESET_ALL}")
+            continue
+        if user_msg.lower() == "/done":
+            # 直接运行完整分析管道（与Enter模式一致）
+            print(f"\n{Fore.CYAN}[Agent] /done: 自动运行完整分析管道...{Style.RESET_ALL}")
+            # Step 1: 获取字幕
+            if not analysis_cache.get("subtitle_text"):
+                sub_result = await _agent_fetch_subtitles()
+                if sub_result and not sub_result.startswith("[无字幕]") and not sub_result.startswith("[字幕获取失败]"):
+                    messages.append({"role": "system", "content": f"[已获取视频字幕 ({len(sub_result)}字)]"})
+            # Step 2: 完整分析
+            tool_result = await _agent_analyze_video()
+            print(f"\n{Fore.GREEN}[Agent] {tool_result}{Style.RESET_ALL}")
+            # 把分析结果加入对话，AI可以基于此回复
+            messages.append({"role": "system", "content": f"[自动分析完成]:\n{tool_result}\n\n请向用户汇报分析结果。如需输出文件请用update_file工具。"})
+            continue
+
+        # 添加用户消息
+        messages.append({"role": "user", "content": user_msg})
+
+        # 首轮意图检测：如果用户明确要求分析/总结/写桌面/打开，自动白名单相关工具
+        if turn == 1:
+            intent_keywords = {
+                "分析": ["fetch_subtitles", "analyze_video"],
+                "总结": ["fetch_subtitles", "analyze_video", "update_file"],
+                "桌面": ["update_file", "open_file"],
+                "打开": ["open_file"],
+                "md": ["update_file"],
+                "markdown": ["update_file"],
+                "写": ["update_file"],
+                "输出": ["update_file"],
+            }
+            for kw, tools in intent_keywords.items():
+                if kw in user_msg:
+                    for t in tools:
+                        auto_allow_tools.add(t)
+            if auto_allow_tools:
+                print(f"{Fore.CYAN}[Agent] 检测到意图关键词，自动放行工具: {', '.join(auto_allow_tools)}{Style.RESET_ALL}")
+
+        # 内层自动连续循环：AI调用 → 工具执行 → 自动继续（无需等用户输入）
+        sub_turn = 0
+        MAX_SUB_TURNS = 10  # 单次用户输入最多自动连续10轮
+        task_done = False
+
+        while sub_turn < MAX_SUB_TURNS:
+            sub_turn += 1
+
+            # 调用AI
+            print(f"{Fore.CYAN}[Agent] AI思考中...{Style.RESET_ALL}")
+            try:
+                resp = await brain._call_ai_with_retry(
+                    model=MODEL_BRAIN,
+                    messages=messages,
+                    request_timeout=90
+                )
+                ai_text = resp.choices[0].message.content
+            except Exception as e:
+                print(f"{Fore.RED}[Agent] AI调用失败: {e}{Style.RESET_ALL}")
+                break
+
+            messages.append({"role": "assistant", "content": ai_text})
+
+            # 解析AI回复中的工具调用
+            tool_pattern = re.compile(r'\[TOOL:(\w+)\]\s*(.*?)(?=\[TOOL:|\[DONE\]|$)', re.DOTALL)
+            stop_pattern = re.compile(r'\[DONE\]')
+
+            done_match = stop_pattern.search(ai_text)
+            tool_matches = tool_pattern.findall(ai_text)
+
+            # 先显示AI的文字回复（去掉工具调用和DONE标记）
+            display_text = ai_text
+            for tool_name, tool_body in tool_matches:
+                display_text = display_text.replace(f"[TOOL:{tool_name}] {tool_body}", "")
+            if done_match:
+                display_text = display_text.replace("[DONE]", "")
+            display_text = display_text.strip()
+            if display_text:
+                print(f"\n{Fore.LIGHTGREEN_EX}[Agent] AI > {Style.RESET_ALL}{display_text}")
+
+            if done_match and not tool_matches:
+                # 纯DONE，无工具，结束
+                print(f"\n{Fore.GREEN}[Agent] 对话结束{Style.RESET_ALL}")
+                task_done = True
+                break
+
+            # 执行工具调用（逐个执行，每次执行后把结果加入对话）
+            for tool_name, tool_body in tool_matches:
+                tool_body = tool_body.strip()
+                print(f"\n{Fore.YELLOW}[Agent] 执行工具: {tool_name}...{Style.RESET_ALL}")
+
+                tool_result = ""
+
+                if tool_name == "search_knowledge":
+                    tool_result = _agent_search_knowledge(tool_body)
+                elif tool_name == "read_file":
+                    tool_result = _agent_read_file(tool_body)
+                elif tool_name == "list_files":
+                    tool_result = _agent_list_files(tool_body)
+                elif tool_name == "delete_file":
+                    tool_result = await _agent_delete_file(tool_body)
+                elif tool_name == "update_file":
+                    # 格式: 相对路径\n---新内容---
+                    parts = tool_body.split('\n', 1)
+                    if len(parts) == 2:
+                        file_path = parts[0].strip()
+                        content = parts[1].strip()
+                        # 去掉可能的前导 --- 标记
+                        if content.startswith('---'):
+                            content = content[3:].strip()
+                        tool_result = await _agent_update_file(file_path, content)
+                    else:
+                        tool_result = "update_file格式错误: 需要 相对路径\\n新内容"
+                elif tool_name == "analyze_video":
+                    # 重量级操作，需要确认
+                    action_desc = f"完整分析视频《{title[:30]}》(ASR+视觉帧+评论+弹幕→归档)"
+                    result = await _agent_confirm("analyze_video", action_desc, "预计耗时30-90秒，消耗API配额")
+                    if result == "deny":
+                        tool_result = "用户取消完整分析"
+                    elif result == "ai_review":
+                        if await _agent_ai_review("analyze_video", action_desc, "完整视频分析管道"):
+                            print(f"{Fore.CYAN}[Agent] AI审查通过，开始完整视频分析...{Style.RESET_ALL}")
+                            tool_result = await _agent_analyze_video()
+                        else:
+                            tool_result = "AI审查不通过，取消完整分析"
+                    else:
+                        print(f"{Fore.CYAN}[Agent] 开始完整视频分析...{Style.RESET_ALL}")
+                        tool_result = await _agent_analyze_video()
+                elif tool_name == "fetch_subtitles":
+                    tool_result = await _agent_fetch_subtitles()
+                elif tool_name == "quick_preview":
+                    tool_result = await _agent_quick_preview()
+                elif tool_name == "open_file":
+                    tool_result = await _agent_open_file(tool_body)
+                else:
+                    tool_result = f"未知工具: {tool_name}"
+
+                # 显示工具结果
+                result_preview = tool_result[:500] + ("..." if len(tool_result) > 500 else "")
+                print(f"{Fore.GREEN}[Agent] 工具结果: {result_preview}{Style.RESET_ALL}")
+
+                # 把工具结果作为system消息加入对话
+                context_note = f"[工具 {tool_name} 执行结果]:\n{tool_result}"
+                # 根据已执行工具附加状态提示
+                if tool_name == "fetch_subtitles" and not tool_result.startswith("[无字幕]") and not tool_result.startswith("[字幕获取失败]"):
+                    context_note += f"\n\n[数据上下文] 已获取完整字幕({len(tool_result)}字)。下一步通常调用 analyze_video 做评分归档，或直接基于字幕回答用户问题。请勿再次调用 fetch_subtitles。"
+                elif tool_name == "analyze_video":
+                    context_note += "\n\n[数据上下文] 视频完整分析已完成（含字幕+评论+弹幕+AI评分+归档）。可以基于这些结果回复用户，或按用户要求生成总结/写文件。"
+                context_note += "\n\n请基于以上结果继续回复用户，如需更多工具可继续调用。"
+                messages.append({
+                    "role": "system",
+                    "content": context_note
+                })
+
+            # 工具执行完毕，决定下一步
+            if done_match:
+                # DONE + 工具已执行（如 open_file 后标 DONE）
+                print(f"\n{Fore.GREEN}[Agent] 任务完成{Style.RESET_ALL}")
+                task_done = True
+                break
+
+            if tool_matches:
+                # 还有工作没做完 → 自动继续
+                print(f"\n{Fore.CYAN}[Agent] 自动继续...{Style.RESET_ALL}")
+                messages.append({"role": "user", "content": "[系统自动继续] 请基于工具结果继续执行下一步，无需等待用户输入。如果所有步骤已完成，输出 [DONE]。"})
+                # 不 break，回到 inner while 顶部继续调 AI
+            else:
+                # 无工具调用，回到等待用户输入
+                break
+
+        # 内层循环结束
+        if task_done:
+            break
+
+    if not task_done and turn >= MAX_TURNS:
+        print(f"\n{Fore.YELLOW}[Agent] 达到最大对话轮次 ({MAX_TURNS})，自动退出{Style.RESET_ALL}")
+
+    print(f"\n{Fore.LIGHTMAGENTA_EX}+============================================================+{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTMAGENTA_EX}|  Agent对话结束                                               |{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTMAGENTA_EX}+============================================================+{Style.RESET_ALL}")
+
+
+async def revisit_knowledge_video(bvid, title, up_name, category_path, file_path, mode="full"):
+    """重温已学视频：完整管道(封面/标题/简介/评论/弹幕/视频内容/ASR/视觉帧) → AI决策 → 学习归档
+    Args:
+        mode: "full" = 重新看视频+优化, "optimize" = 只优化(用现有字幕/AI总结)
+    """
+    print(f"\n{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}|  🔄 知识库重温: {title[:40]}                          {Style.RESET_ALL}")
+    print(f"{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
+    print(f"  BV号: {bvid}")
+    print(f"  分类: {category_path}")
+    if up_name:
+        print(f"  UP主: {up_name}")
+    mode_label = "完整重温(重新看视频+优化)" if mode == "full" else "仅优化(用现有知识)"
+    print(f"  模式: {Fore.YELLOW}{mode_label}{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}+------------------------------------------------------------+{Style.RESET_ALL}")
+
+    video_url = f"https://www.bilibili.com/video/{bvid}"
+
+    # 创建 AgentBrain，加载凭证+ cookies
+    brain = AgentBrain()
+    brain.bili._load_credential()
+    # [FIX] 同时加载 cookies，否则 fetch_bilibili_subtitles 无 cookie 无法获取AI字幕
+    if os.path.exists(COOKIE_FILE):
+        with open(COOKIE_FILE, 'r', encoding='utf-8') as f:
+            brain.cookies = json.load(f)
+
+    # ── 获取视频元信息 ──
+    try:
+        meta = await brain.bili._wbi_get(
+            'https://api.bilibili.com/x/web-interface/view',
+            params={'bvid': bvid}
+        )
+        vinfo = meta.json()
+        if vinfo.get('code') == 0:
+            vdata = vinfo['data']
+            title = title or vdata.get('title', '')
+            up_name = up_name or vdata.get('owner', {}).get('name', '未知')
+            up_uid = vdata.get('owner', {}).get('mid', 0)
+            aid = vdata.get('aid', 0)
+            pic_url = vdata.get('pic', '')
+            tags = []
+            raw_tag = vdata.get('tag', '') or ''
+            if isinstance(raw_tag, str) and raw_tag:
+                tags = [t.strip() for t in raw_tag.split(',') if t.strip()]
+            category = vdata.get('tname', '')
+            duration_raw = vdata.get('duration', 0)
+            if isinstance(duration_raw, str) and ':' in duration_raw:
+                parts = duration_raw.split(':')
+                duration = int(parts[0]) * 60 + int(parts[1])
+            else:
+                try:
+                    duration = int(duration_raw)
+                except (ValueError, TypeError):
+                    duration = 0
+            video_desc = vdata.get('desc', '')
+            print(f"{Fore.GREEN}[OK] 视频信息获取成功: {title} | @{up_name}{Style.RESET_ALL}")
+        else:
+            print(f"{Fore.RED}[ERROR] 获取视频信息失败: code={vinfo.get('code')}{Style.RESET_ALL}")
+            return
+    except Exception as e:
+        print(f"{Fore.RED}[ERROR] 获取视频信息失败: {e}{Style.RESET_ALL}")
+        return
+
+    # 缓存视频元数据
+    brain._current_video_tags = tags
+    brain._current_video_category = category
+    brain._current_video_duration = duration
+
+    # ── [1/6] 封面分析 ──
+    print(f"\n{Fore.CYAN}[1/6] 封面视觉分析...{Style.RESET_ALL}")
+    cover_desc, vis_score = "", 0
+    if pic_url:
+        try:
+            cover_desc, vis_score = await brain.analyze_vision(pic_url)
+            print(f"{Fore.GREEN}[OK] 封面: {cover_desc} [印象分:{vis_score}]{Style.RESET_ALL}")
+            brain._current_video_cover_desc = cover_desc
+        except Exception as e:
+            print(f"{Fore.YELLOW}[WARN] 封面分析失败: {e}{Style.RESET_ALL}")
+
+    if video_desc:
+        print(f"{Fore.GREEN}[OK] 简介预览: {video_desc[:100]}...{Style.RESET_ALL}")
+
+    # ── [2/6] 视频内容理解 ──
+    print(f"\n{Fore.CYAN}[2/6] 视频内容理解 (字幕/ASR/视觉帧)...{Style.RESET_ALL}")
+    if mode == "full":
+        # 完整管道：重新下载视频 → ASR+视觉帧
+        success, subtitle_text = await brain._understand_super_smart(bvid, title=title)
+    else:
+        # 仅优化模式：读取现有 md 文件中的内容
+        subtitle_text = ""
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                existing = f.read()
+            # 提取 AI 总结部分
+            summary_match = re.search(r'##\s*\[BRAIN\]\s*AI内容总结\s*\n(.*)', existing, re.DOTALL)
+            if summary_match:
+                subtitle_text = f"【已有AI总结】\n{summary_match.group(1).strip()[:3000]}"
+            else:
+                # 回退：取文件后半部分
+                subtitle_text = existing[-3000:] if len(existing) > 3000 else existing
+            print(f"{Fore.GREEN}[OK] 使用现有知识库内容 ({len(subtitle_text)}字){Style.RESET_ALL}")
+        except Exception as e:
+            print(f"{Fore.YELLOW}[WARN] 读取现有知识失败: {e}，降级为完整模式{Style.RESET_ALL}")
+            success, subtitle_text = await brain._understand_super_smart(bvid, title=title)
+
+    if subtitle_text:
+        preview = subtitle_text[:200].replace('\n', ' ')
+        print(f"{Fore.GREEN}[OK] 视频内容: {preview}...{Style.RESET_ALL}")
+    else:
+        subtitle_text = f"【视频标题】{title}\n【简介】{video_desc}"
+        print(f"{Fore.YELLOW}[WARN] 无可用内容，使用标题+简介兜底{Style.RESET_ALL}")
+
+    # ── [3/6] 评论+弹幕 ──
+    print(f"\n{Fore.CYAN}[3/6] 评论区讨论+弹幕...{Style.RESET_ALL}")
+    comment_text = "[未读取评论]"
+    c_list = []
+    danmaku_text = ""
+    if aid:
+        try:
+            comment_text, c_list = await brain._get_comments_context(aid)
+            if c_list:
+                print(f"{Fore.GREEN}[OK] 获取到 {len(c_list)} 条评论{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.YELLOW}[WARN] 评论区无内容{Style.RESET_ALL}")
+        except Exception as e:
+            print(f"{Fore.YELLOW}[WARN] 评论获取失败: {e}{Style.RESET_ALL}")
+
+        try:
+            danmaku_list = await brain.maybe_read_danmaku(bvid)
+            if danmaku_list:
+                danmaku_text = f"【弹幕（共{len(danmaku_list)}条）】:\n" + "\n".join(
+                    f"  {dm.get('text','')}" for dm in danmaku_list[:15]
+                )
+                print(f"{Fore.GREEN}[OK] 获取到 {len(danmaku_list)} 条弹幕{Style.RESET_ALL}")
+        except Exception as e:
+            log(f'非预期异常: {e}', 'WARN')
+
+    # ── [4/6] AI决策 ──
+    print(f"\n{Fore.CYAN}[4/6] AI综合分析决策...{Style.RESET_ALL}")
+    objective_prompt = SYSTEM_PROMPT_BRAIN.replace("{bot_name}", get_bot_name()).replace("{memory_ups}", str(brain.get_known_up_names()))
+    # 重温模式特有提示
+    objective_prompt += (
+        "\n\n【重温优化模式】这是一个已经归档到知识库的视频。"
+        "请重新审视内容，看看有没有遗漏的要点、新的理解角度、或可以补充的知识点。"
+        "如果原归档质量已很高，可以给出更高的分数。"
+    )
+
+    context = (f"视频标题: {title}\nUP主: {up_name}\n"
+               f"视频简介: {video_desc}\n"
+               f"封面描述: {cover_desc}\n"
+               f"原分类: {category_path}\n"
+               f"【视频内容】: {subtitle_text}\n"
+               f"{comment_text}"
+               f"{danmaku_text}")
+
+    score = 0
+    thought = ""
+    learning_topic = ""
+    try:
+        resp = await brain._call_ai_with_retry(
+            model=MODEL_BRAIN,
+            messages=[
+                {"role": "system", "content": objective_prompt},
+                {"role": "user", "content": context}
+            ],
+            request_timeout=120
+        )
+        raw = resp.choices[0].message.content
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start >= 0 and end >= start:
+            json_str = raw[start:end + 1]
+        else:
+            raise ValueError(f"AI返回未找到JSON: {raw[:200]}")
+
+        try:
+            decision = json.loads(json_str)
+        except json.JSONDecodeError:
+            fixed = json_str.replace("'", '"')
+            fixed = re.sub(r'\bTrue\b', 'true', fixed)
+            fixed = re.sub(r'\bFalse\b', 'false', fixed)
+            fixed = re.sub(r'\bNone\b', 'null', fixed)
+            decision = json.loads(fixed)
+
+        score = decision.get('score', 0)
+        thought = decision.get('thought', '')
+        mode_decision = decision.get('mode', '')
+        learning_topic = decision.get('learning_topic', '')
+
+        print(f"\n{Fore.CYAN}+------------------------------------------------------------+{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}|  [重温分析结果]                                             |{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}+------------------------------------------------------------+{Style.RESET_ALL}")
+        print(f"  AI评分: {Fore.YELLOW}{score}/10{Style.RESET_ALL}")
+        print(f"  AI想法: {thought}")
+        if learning_topic:
+            print(f"  主题: {learning_topic}")
+        print(f"{Fore.CYAN}+------------------------------------------------------------+{Style.RESET_ALL}")
+
+    except Exception as e:
+        print(f"{Fore.RED}[ERROR] AI决策失败: {_mask_urls(str(e)[:200])}{Style.RESET_ALL}")
+
+    # ── [5/6] 评论区知识收集 ──
+    print(f"\n{Fore.CYAN}[5/6] 评论区知识收集...{Style.RESET_ALL}")
+    if c_list and len(c_list) >= 3:
+        try:
+            await brain.learn_from_comments(bvid, title, up_name, video_url, comment_text, c_list, learning_topic or title[:15])
+        except Exception as e:
+            print(f"{Fore.YELLOW}[WARN] 评论知识收集失败: {e}{Style.RESET_ALL}")
+    else:
+        print(f"{Fore.YELLOW}[INFO] 评论不足，跳过评论知识收集{Style.RESET_ALL}")
+
+    # ── [6/6] 学习归档（覆盖更新） ──
+    print(f"\n{Fore.CYAN}[6/6] 更新知识归档...{Style.RESET_ALL}")
+    learn_text = subtitle_text
+    if not learn_text or len(learn_text) < 30:
+        learn_text = f"【视频标题】{title}\n【简介】{video_desc}\n【AI判断】{thought}\n"
+        if danmaku_text:
+            learn_text += f"{danmaku_text}\n"
+        if comment_text and comment_text != "[未读取评论]":
+            learn_text += f"{comment_text}\n"
+        learn_text = learn_text.strip()
+
+    if not learning_topic:
+        learning_topic = title[:15] if title else category_path
+
+    if learn_text and len(learn_text) > 20:
+        try:
+            _desc = getattr(brain, "_last_video_desc", "") or video_desc
+            # 删除旧文件，让 learn_from_video 重新创建
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                print(f"{Fore.YELLOW}[INFO] 已删除旧归档文件，准备重新创建...{Style.RESET_ALL}")
+            learn_success = await brain.learn_from_video(bvid, title, up_name, video_url, learn_text, learning_topic, video_desc=_desc, score=score)
+            if learn_success:
+                print(f"{Fore.GREEN}[OK] 知识已更新归档！{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.YELLOW}[INFO] 归档未更新（可能已存在或分类未变）{Style.RESET_ALL}")
+        except Exception as e:
+            print(f"{Fore.RED}[ERROR] 学习归档失败: {e}{Style.RESET_ALL}")
+    else:
+        print(f"{Fore.YELLOW}[INFO] 可学习内容不足，跳过归档{Style.RESET_ALL}")
+
+    print(f"\n{Fore.GREEN}+============================================================+{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}|  🔄 重温完成: {title[:40]}                                  {Style.RESET_ALL}")
+    print(f"{Fore.GREEN}+============================================================+{Style.RESET_ALL}")
+
+
+async def revisit_knowledge_base_menu():
+    """知识库重温菜单：扫描所有 .md 文件，选择后重看视频优化或仅优化。"""
+    print(f"\n{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}|        🔄 知识库重温优化 - 已学习视频回顾                      |{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
+
+    # 扫描知识库
+    md_files = _scan_knowledge_base_md_files()
+    if not md_files:
+        print(f"{Fore.YELLOW}[WARN] 知识库中没有找到学习归档文件！{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}[INFO] 请先让机器人学习一些视频，或手动分析视频并归档{Style.RESET_ALL}")
+        input(f"\n{Fore.CYAN}按回车返回...{Style.RESET_ALL}")
+        return
+
+    # 按分类分组展示
+    from collections import defaultdict
+    by_category = defaultdict(list)
+    for item in md_files:
+        by_category[item[4]].append(item)
+
+    print(f"\n{Fore.GREEN}共找到 {len(md_files)} 个已学习视频，分布在 {len(by_category)} 个分类:{Style.RESET_ALL}\n")
+
+    # 展开所有文件，统一编号
+    all_items = []
+    idx = 1
+    for cat in sorted(by_category.keys()):
+        items = by_category[cat]
+        print(f"{Fore.CYAN}[{cat}] ({len(items)}个){Style.RESET_ALL}")
+        for bvid, title, fpath, up, cat_path in items:
+            up_str = f" @{up}" if up else ""
+            print(f"  {Fore.YELLOW}{idx:3d}.{Style.RESET_ALL} {title[:50]}{up_str}")
+            all_items.append((idx, bvid, title, fpath, up, cat_path))
+            idx += 1
+        print()
+
+    print(f"  {Fore.YELLOW}  0.{Style.RESET_ALL} 返回主菜单")
+
+    try:
+        choice = input(f"\n{Fore.CYAN}请选择要重温的视频 (1-{len(all_items)}): {Style.RESET_ALL}").strip()
+        if not choice or choice == "0":
+            print(f"{Fore.YELLOW}[INFO] 已取消{Style.RESET_ALL}")
+            return
+
+        sel_idx = int(choice)
+        if sel_idx < 1 or sel_idx > len(all_items):
+            print(f"{Fore.RED}[ERROR] 无效选项{Style.RESET_ALL}")
+            return
+
+        _, bvid, title, fpath, up, cat_path = all_items[sel_idx - 1]
+
+        # 选择模式
+        print(f"\n{Fore.CYAN}已选择: {title[:50]}{Style.RESET_ALL}")
+        print(f"\n{Fore.CYAN}请选择重温模式:{Style.RESET_ALL}")
+        print(f"  {Fore.GREEN}1.{Style.RESET_ALL} 🔄 完整重温 (重新看视频: 封面→简介→字幕/下载/ASR→评论→弹幕→AI决策→归档)")
+        print(f"  {Fore.BLUE}2.{Style.RESET_ALL} 📝 仅优化 (用现有知识库内容 + 最新评论/弹幕 → AI重新分析 → 归档)")
+        print(f"  {Fore.YELLOW}0.{Style.RESET_ALL} 取消")
+
+        mode_choice = input(f"\n{Fore.CYAN}请选择 (1/2/0): {Style.RESET_ALL}").strip()
+        if mode_choice == "0" or not mode_choice:
+            print(f"{Fore.YELLOW}[INFO] 已取消{Style.RESET_ALL}")
+            return
+        elif mode_choice == "1":
+            mode = "full"
+        elif mode_choice == "2":
+            mode = "optimize"
+        else:
+            print(f"{Fore.RED}[ERROR] 无效选项{Style.RESET_ALL}")
+            return
+
+        await revisit_knowledge_video(bvid, title, up, cat_path, fpath, mode)
+
+    except ValueError:
+        print(f"{Fore.RED}[ERROR] 请输入数字{Style.RESET_ALL}")
+    except KeyboardInterrupt:
+        print(f"\n{Fore.YELLOW}[WARN] 用户中断{Style.RESET_ALL}")
+    except Exception as e:
+        print(f"{Fore.RED}[ERROR] 重温异常: {e}{Style.RESET_ALL}")
+        import traceback
+        traceback.print_exc()
+
+
+# ==============================================================================
+# 📂 一键整理知识库：非3层文件 → AI自动归类到3层
+# ==============================================================================
+async def organize_knowledge_base():
+    """扫描并整理知识库：将非3层目录结构的文件AI自动归位。
+    
+    逻辑：
+    1. 扫描所有 .md 文件，找出非3层的（如 科技/xxx.md 或 科技/AI工具/xxx.md）
+    2. 检测同一BVID的重复文件（不同深度目录），保留最深的
+    3. 对每个非3层文件，读取内容 → AI分类 → 移动到3层目录
+    4. 支持4选1确认：本次允许/一直允许/不允许/AI审查
+    """
+    print(f"\n{Fore.LIGHTYELLOW_EX}╔══════════════════════════════════════════════════════════╗{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}║  📂 一键整理知识库 - AI智能归类到3层                      ║{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}╚══════════════════════════════════════════════════════════╝{Style.RESET_ALL}")
+
+    if not os.path.exists(KNOWLEDGE_BASE_DIR):
+        print(f"{Fore.YELLOW}[INFO] 知识库目录不存在，无需整理{Style.RESET_ALL}")
+        return
+
+    # ── 第1步：扫描 ──
+    print(f"\n{Fore.CYAN}[1/4] 扫描知识库文件...{Style.RESET_ALL}")
+    all_files = _scan_knowledge_base_md_files()
+    if not all_files:
+        print(f"{Fore.YELLOW}[INFO] 知识库为空{Style.RESET_ALL}")
+        return
+
+    # 分类：3层 ok / 非3层 / 重复BVID
+    ok_files = []       # 3层，已到位
+    shallow_files = []  # 非3层，需要整理
+    bvid_map = {}       # bvid -> [(depth, bvid, title, path, up, cat), ...]
+
+    for bvid, title, fpath, up, cat in all_files:
+        depth = cat.count('/') + 1 if cat and cat != '未分类' else 1
+        if bvid not in bvid_map:
+            bvid_map[bvid] = []
+        bvid_map[bvid].append((depth, bvid, title, fpath, up, cat))
+
+    for bvid, entries in bvid_map.items():
+        entries.sort(key=lambda x: x[0], reverse=True)  # depth降序
+        for depth, bv, t, fp, u, c in entries:
+            if depth >= 3:
+                ok_files.append((bv, t, fp, u, c, depth))
+            else:
+                shallow_files.append((bv, t, fp, u, c, depth))
+
+    # ── 检测重复BVID ──
+    duplicates = []
+    unique_shallow = []
+    for entry in shallow_files:
+        bv = entry[0]
+        all_entries = bvid_map[bv]
+        has_deep = any(e[0] >= 3 for e in all_entries)
+        if has_deep:
+            duplicates.append(entry)
+        else:
+            unique_shallow.append(entry)
+
+    print(f"\n{Fore.CYAN}扫描结果:{Style.RESET_ALL}")
+    print(f"  {Fore.GREEN}✓ 3层已到位: {len(ok_files)} 个{Style.RESET_ALL}")
+    print(f"  {Fore.YELLOW}⚠ 非3层需整理: {len(unique_shallow)} 个{Style.RESET_ALL}")
+    print(f"  {Fore.RED}🗑 重复文件(可清理): {len(duplicates)} 个{Style.RESET_ALL}")
+
+    if not unique_shallow and not duplicates:
+        print(f"{Fore.GREEN}[OK] 知识库已全部整理完毕！{Style.RESET_ALL}")
+        return
+
+    # ── 显示详情 ──
+    if duplicates:
+        print(f"\n{Fore.RED}【重复文件】(同BVID有更深层版本，建议删除):{Style.RESET_ALL}")
+        for bv, t, fp, u, c, d in duplicates[:20]:
+            rel = os.path.relpath(fp, KNOWLEDGE_BASE_DIR)
+            print(f"  [{bv}] {t[:40]} | {c}")
+
+    if unique_shallow:
+        print(f"\n{Fore.YELLOW}【需要整理】(非3层，将AI归类):{Style.RESET_ALL}")
+        for bv, t, fp, u, c, d in unique_shallow[:20]:
+            rel = os.path.relpath(fp, KNOWLEDGE_BASE_DIR)
+            print(f"  [{bv}] {t[:40]} | 当前: {c} ({d}层)")
+
+    # ── 第2步：确认 ──
+    print(f"\n{Fore.LIGHTYELLOW_EX}╔══════════════════════════════════════════════════════════╗{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}║  [整理确认]                                                ║{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}╠══════════════════════════════════════════════════════════╣{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}║{Style.RESET_ALL}  将整理 {len(unique_shallow)} 个文件 + 清理 {len(duplicates)} 个重复文件")
+    print(f"{Fore.LIGHTYELLOW_EX}╠══════════════════════════════════════════════════════════╣{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}║{Style.RESET_ALL}  {Fore.GREEN}1.{Style.RESET_ALL} 一键整理全部    {Fore.LIGHTGREEN_EX}2.{Style.RESET_ALL} 逐个确认(每文件4选1)")
+    print(f"{Fore.LIGHTYELLOW_EX}║{Style.RESET_ALL}  {Fore.RED}3.{Style.RESET_ALL} 取消")
+    print(f"{Fore.LIGHTYELLOW_EX}╚══════════════════════════════════════════════════════════╝{Style.RESET_ALL}")
+
+    mode_choice = input(f"{Fore.CYAN}[整理] 选择 (1-3, 回车=1): {Style.RESET_ALL}").strip()
+    if mode_choice == "3":
+        print(f"{Fore.YELLOW}已取消{Style.RESET_ALL}")
+        return
+
+    per_file_confirm = (mode_choice == "2")
+
+    # ── 第3步：初始化分类器 ──
+    classifier = KnowledgeBaseClassifier()
+    all_cats = classifier._get_all_categories()
+
+    # ── 第4步：执行整理 ──
+    print(f"\n{Fore.CYAN}[3/4] 开始整理...{Style.RESET_ALL}")
+
+    moved_count = 0
+    deleted_count = 0
+    skipped_count = 0
+    auto_allow_all = False  # 一键模式
+
+    async def confirm_action(action_desc, detail=""):
+        """简化版4选1确认"""
+        nonlocal auto_allow_all
+        if auto_allow_all or not per_file_confirm:
+            return "allow"
+
+        print(f"\n{Fore.YELLOW}  ╔ 操作确认 ╗{Style.RESET_ALL}")
+        print(f"  {Fore.YELLOW}║{Style.RESET_ALL} {action_desc[:60]}")
+        if detail:
+            print(f"  {Fore.YELLOW}║{Style.RESET_ALL} {detail[:100]}")
+        print(f"  {Fore.YELLOW}║{Style.RESET_ALL} {Fore.GREEN}1.{Style.RESET_ALL}本次允许 {Fore.LIGHTGREEN_EX}2.{Style.RESET_ALL}全部允许 {Fore.RED}3.{Style.RESET_ALL}跳过 {Fore.CYAN}4.{Style.RESET_ALL}AI审查")
+        print(f"  {Fore.CYAN}[整理] 选择 (1-4, 回车=1): {Style.RESET_ALL}", end="")
+
+        import sys
+        sys.stdout.flush()
+        ch = input().strip()
+
+        if ch == "2":
+            auto_allow_all = True
+            print(f"  {Fore.GREEN}已设置: 全部自动允许{Style.RESET_ALL}")
+            return "always"
+        elif ch == "3":
+            return "deny"
+        elif ch == "4":
+            return "ai_review"
+        return "allow"
+
+    async def ai_review(action_desc, detail=""):
+        """AI审查"""
+        try:
+            resp = await _call_ai_with_retry_static(
+                model=MODEL_BRAIN,
+                messages=[{"role": "user", "content": f"你是安全审查助手。评估此操作是否合理:{action_desc}。详情:{detail[:300]}。只返回JSON: {{\"safe\":true/false,\"reason\":\"理由\"}}"}],
+                request_timeout=20
+            )
+            raw = resp.choices[0].message.content
+            s = raw.find("{")
+            e = raw.rfind("}")
+            if s >= 0 and e >= s:
+                d = json.loads(raw[s:e+1])
+                if d.get("safe", True):
+                    print(f"  {Fore.GREEN}AI审查通过: {d.get('reason','')}{Style.RESET_ALL}")
+                    return True
+                else:
+                    print(f"  {Fore.RED}AI审查不通过: {d.get('reason','')}{Style.RESET_ALL}")
+                    return False
+            return True
+        except Exception as ex:
+            print(f"  {Fore.YELLOW}AI审查异常，默认通过{Style.RESET_ALL}")
+            return True
+
+    # ── 处理重复文件：直接删除浅层版本 ──
+    if duplicates:
+        print(f"\n{Fore.CYAN}[清理重复] 删除 {len(duplicates)} 个重复文件...{Style.RESET_ALL}")
+        for bv, t, fp, u, c, d in duplicates:
+            rel = os.path.relpath(fp, KNOWLEDGE_BASE_DIR)
+            if per_file_confirm:
+                result = await confirm_action(f"删除重复文件: [{bv}] {t[:30]}", f"已有3层版本，此文件位于 {c}")
+                if result == "deny":
+                    skipped_count += 1
+                    continue
+                if result == "ai_review":
+                    if not await ai_review("删除重复知识库文件", f"[{bv}] {t[:50]}"):
+                        skipped_count += 1
+                        continue
+            try:
+                os.remove(fp)
+                print(f"  {Fore.GREEN}已删除: {rel}{Style.RESET_ALL}")
+                deleted_count += 1
+                # 清理空目录
+                dir_path = os.path.dirname(fp)
+                if not os.listdir(dir_path):
+                    os.rmdir(dir_path)
+            except Exception as e:
+                print(f"  {Fore.RED}删除失败: {e}{Style.RESET_ALL}")
+
+    # ── 处理非3层文件：AI分类 → 移动 ──
+    if unique_shallow:
+        print(f"\n{Fore.CYAN}[归类整理] AI分类 {len(unique_shallow)} 个文件...{Style.RESET_ALL}")
+
+        for idx, (bv, t, fp, u, c, d) in enumerate(unique_shallow, 1):
+            rel = os.path.relpath(fp, KNOWLEDGE_BASE_DIR)
+            print(f"\n  {Fore.CYAN}[{idx}/{len(unique_shallow)}] [{bv}] {t[:40]}{Style.RESET_ALL}")
+            print(f"  当前: {c} ({d}层)")
+
+            if per_file_confirm:
+                result = await confirm_action(f"AI归类: [{bv}] {t[:30]}", f"从 {c} → AI自动分类到3层")
+                if result == "deny":
+                    skipped_count += 1
+                    continue
+                if result == "ai_review":
+                    if not await ai_review("AI归类知识库文件", f"[{bv}] {t[:50]}"):
+                        skipped_count += 1
+                        continue
+
+            # 读取文件内容用于AI分类
+            file_content = ""
+            try:
+                with open(fp, 'r', encoding='utf-8') as fh:
+                    file_content = fh.read(3000)
+            except Exception as e:
+                log(f'非预期异常: {e}', 'WARN')
+
+            # AI分类
+            try:
+                ai_result = classifier._find_best_category(t, file_content, all_cats)
+                new_cat = ai_result.get("selected_category", "未分类")
+                conf = ai_result.get("confidence", 0)
+                is_new = ai_result.get("is_new", False)
+
+                if is_new:
+                    new_cat = classifier._create_category_structure(new_cat)
+
+                # 确保恰好3层
+                parts = [p.strip() for p in new_cat.split('/') if p.strip()]
+                while len(parts) < 3:
+                    parts.append(f"子类{len(parts)+1}")
+                parts = parts[:3]
+                final_cat = '/'.join(parts)
+
+                print(f"  AI分类: {Fore.GREEN}{final_cat}{Style.RESET_ALL} (置信度: {conf:.0%})")
+
+                if conf < 0.3:
+                    print(f"  {Fore.YELLOW}置信度过低，跳过{Style.RESET_ALL}")
+                    skipped_count += 1
+                    continue
+
+                # 移动文件
+                new_folder = classifier.get_or_create_folder(final_cat)
+                fname = os.path.basename(fp)
+                dst = os.path.join(new_folder, fname)
+
+                if os.path.exists(dst):
+                    print(f"  {Fore.YELLOW}目标位置已有同名文件，删除源文件{Style.RESET_ALL}")
+                    os.remove(fp)
+                    deleted_count += 1
+                else:
+                    shutil.move(fp, dst)
+                    print(f"  {Fore.GREEN}已移动: {rel} → {final_cat}/{Style.RESET_ALL}")
+                    moved_count += 1
+
+                # 更新分类器元数据
+                if final_cat not in classifier.metadata.get("file_index", {}):
+                    classifier.metadata.setdefault("file_index", {})[final_cat] = []
+                classifier.metadata["file_index"][final_cat].append({
+                    "bvid": bv,
+                    "title": t,
+                    "added": datetime.now().isoformat()
+                })
+                # 从旧分类移除
+                old_cat = c if c != '未分类' else '未分类'
+                if old_cat in classifier.metadata.get("file_index", {}):
+                    classifier.metadata["file_index"][old_cat] = [
+                        e for e in classifier.metadata["file_index"][old_cat]
+                        if e.get("bvid") != bv
+                    ]
+
+                # 清理旧空目录
+                old_dir = os.path.dirname(fp)
+                if os.path.exists(old_dir) and not os.listdir(old_dir):
+                    try:
+                        os.rmdir(old_dir)
+                    except Exception as e:
+                        log(f'非预期异常: {e}', 'WARN')
+
+                # 添加新分类路径到已知列表供后续分类使用
+                if final_cat not in all_cats:
+                    all_cats.append(final_cat)
+
+            except Exception as e:
+                print(f"  {Fore.RED}AI分类异常: {e}{Style.RESET_ALL}")
+                skipped_count += 1
+
+    # ── 保存分类器元数据 ──
+    try:
+        classifier._sync_categories_from_file_index()
+        classifier._save_metadata()
+        classifier.cleanup_empty_folders()
+    except Exception as e:
+        log(f'非预期异常: {e}', 'WARN')
+
+    # ── 汇总 ──
+    print(f"\n{Fore.LIGHTYELLOW_EX}╔══════════════════════════════════════════════════════════╗{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}║  📂 整理完成！                                            ║{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}╠══════════════════════════════════════════════════════════╣{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}║{Style.RESET_ALL}  {Fore.GREEN}✓ AI归类移动: {moved_count} 个{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}║{Style.RESET_ALL}  {Fore.RED}🗑 重复清理: {deleted_count} 个{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}║{Style.RESET_ALL}  {Fore.YELLOW}⊘ 跳过: {skipped_count} 个{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}║{Style.RESET_ALL}  {Fore.GREEN}✓ 3层文件: {len(ok_files)} 个 (未动){Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}╚══════════════════════════════════════════════════════════╝{Style.RESET_ALL}")
+
+    # 显示新的分类结构
+    try:
+        classifier.show_category_structure()
+    except Exception as e:
+        log(f'非预期异常: {e}', 'WARN')
+
+
+async def _call_ai_with_retry_static(model, messages, request_timeout=30, max_retries=2):
+    """静态AI调用辅助函数（不依赖brain实例），带重试"""
+    for attempt in range(max_retries + 1):
+        try:
+            resp = openai.ChatCompletion.create(
+                model=model,
+                messages=messages,
+                timeout=request_timeout
+            )
+            return resp
+        except Exception as e:
+            if attempt < max_retries:
+                wait = min(3 * (2 ** attempt), 10)
+                print(f"  {Fore.YELLOW}AI重试 ({attempt+1}/{max_retries})，等待{wait}s...{Style.RESET_ALL}")
+                await asyncio.sleep(wait)
+            else:
+                raise
+
+
+# ==============================================================================
+# [START] 主程序入口
+# ==============================================================================
+if False:  # [DISABLED] 重复主入口，已禁用
+    if os.name == 'nt':
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+    # ── 免责声明确认（必须手动输入"我同意"）──
+    _disclaimer_confirm()
+
+    while True:
+        show_main_menu()
+        choice = input(f"{Fore.CYAN}请输入选项 (0-9/D/E/F/G/I/K/M/O/R/V): {Style.RESET_ALL}").strip()
+
+        if choice == "0":
+            print(f"{Fore.YELLOW}👋 再见！{Style.RESET_ALL}")
+            break
+        elif choice == "1":
+            print(f"{Fore.GREEN}[START] 启动机器人...{Style.RESET_ALL}")
+            try:
+                asyncio.run(AgentBrain().run())
+            except KeyboardInterrupt:
+                print(f"\n{Fore.YELLOW}[WARN]  机器人被用户中断{Style.RESET_ALL}")
+            except Exception as e:
+                print(f"{Fore.RED}[ERROR] 机器人运行异常: {e}{Style.RESET_ALL}")
+                import traceback
+                traceback.print_exc()
+            finally:
+                # 🔒 确保锁文件被释放（atexit 只在 Python 退出时触发，
+                # 但主菜单循环会继续运行，所以需要显式释放）
+                _release_bot_lock()
         elif choice == "2":
             show_config_menu()
         elif choice == "3":
