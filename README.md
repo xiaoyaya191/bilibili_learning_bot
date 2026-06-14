@@ -10,42 +10,11 @@
 
 ---
 
-## 🚀 快速开始
-
-> 📖 **项目介绍与部署教程：[bot.bxya.top](https://bot.bxya.top)**
-
-### 安装
-
-```bash
-git clone https://github.com/xiaoyaya191/bilibili_learning_bot.git
-cd bilibili_learning_bot
-pip install -r requirements.txt
-```
-
-### 启动
-
-**方式一：命令行菜单（推荐）**
-```bash
-python new_agent.py
-```
-进入主菜单后按 `2` 配置 AI 参数（API Key、地址、模型），按 `3` 扫码登录 B 站，按 `1` 启动机器人。
-
-**方式二：Web 控制台**
-```bash
-python web_panel.py
-```
-浏览器打开 `http://127.0.0.1:8080`，在网页上配置和启动。
-
-> Windows 用户可直接双击 `启动网页版.bat`。
-> Docker 部署详见 [bot.bxya.top](https://bot.bxya.top)。
-
----
-
-> 💡 更多配置说明（人格设置、双账号、干运行模式等）请往下看完整文档，或访问 [bot.bxya.top](https://bot.bxya.top)。
-
----
-
 ## 📖 项目简介
+
+> 📖 **完整教程：[bot.bxya.top](https://bot.bxya.top)**
+
+`bilibili_learning_bot` 是一个**全自动 B 站 AI 学习互动机器人**。它可以：
 
 `bilibili_learning_bot` 是一个**全自动 B 站 AI 学习互动机器人**。它可以：
 
@@ -62,6 +31,28 @@ python web_panel.py
 - ✏️ **完全可自定义**：通过提示词自由设置机器人名字、人格、回复风格
 
 **核心理念**：让 AI 替你"刷 B 站"，从推荐流中学习知识、积累记忆、自我成长，而非沉溺于低质内容。
+
+### 快速上手
+
+```bash
+git clone https://github.com/xiaoyaya191/bilibili_learning_bot.git
+cd bilibili_learning_bot
+pip install -r requirements.txt
+```
+
+**命令行启动（推荐）**
+```bash
+python new_agent.py
+```
+进入菜单按 `2` 配置 AI 参数 → 按 `3` 扫码登录 B 站 → 按 `1` 启动机器人。
+
+**Web 控制台启动**
+```bash
+python web_panel.py
+```
+浏览器打开 `http://127.0.0.1:8080`，在网页上配置和操作。
+
+> Windows 用户可直接双击 `启动网页版.bat`。Docker 部署等更多方式详见 [bot.bxya.top](https://bot.bxya.top)。
 
 ---
 
