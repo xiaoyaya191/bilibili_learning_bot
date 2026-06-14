@@ -10,9 +10,54 @@
 
 ---
 
-## 🌐 在线入口
+## 🚀 快速开始 — 部署教程
 
-> **[bot.bxya.top](https://bot.bxya.top)** — 直接访问 Web 管理控制台，随时随地管理你的 B 站 AI 学习机器人 🚀
+### 方式一：云部署（推荐，无需 24 小时开机）
+
+> **👉 [bot.bxya.top](https://bot.bxya.top)** — 在线 Web 控制台，开箱即用，无需自己搭建
+
+适合不想折腾环境、没有服务器、手机用户。直接访问即可管理机器人。
+
+---
+
+### 方式二：自部署（用自己的服务器/电脑）
+
+#### 📋 环境要求
+- Python 3.8+
+- Windows / Linux / macOS / Android (Termux)
+
+#### ⚡ 一键部署
+
+```bash
+# 1. 克隆项目
+git clone https://github.com/xiaoyaya191/bilibili_learning_bot.git
+cd bilibili_learning_bot
+
+# 2. 安装依赖
+pip install -r requirements.txt
+
+# 3. 配置 API Key（编辑 Data/config.json）
+#    或使用环境变量：
+export BILI_AI_API_KEY="sk-你的APIKey"
+export BILI_AI_BASE_URL="https://api.openai.com/v1"
+
+# 4. 启动 Web 控制台
+python web_panel.py
+```
+
+启动后浏览器打开 **http://127.0.0.1:8080**，扫码登录 B 站即可开始使用。
+
+#### 📱 Android 手机部署（Termux）
+
+```bash
+pkg install python git
+git clone https://github.com/xiaoyaya191/bilibili_learning_bot.git
+cd bilibili_learning_bot
+pip install -r requirements.txt
+python web_panel.py
+```
+
+> 💡 详细配置说明（人格设置、双账号、干运行模式等）请往下看完整文档。
 
 ---
 
