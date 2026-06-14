@@ -14,80 +14,30 @@
 
 > 📖 **项目介绍与部署教程：[bot.bxya.top](https://bot.bxya.top)**
 
-### 🐧 Linux 部署
+### 安装
 
 ```bash
-# 1. 克隆项目
-git clone https://github.com/xiaoyaya191/bilibili_learning_bot.git
-cd bilibili_learning_bot
-
-# 2. 安装依赖
-pip3 install -r requirements.txt
-
-# 3. 配置 API Key（环境变量方式，更安全）
-export BILI_AI_API_KEY="sk-你的APIKey"
-export BILI_AI_BASE_URL="https://api.openai.com/v1"
-
-# 4. 启动 Web 控制台
-python3 web_panel.py
-```
-
-启动后浏览器打开 **http://127.0.0.1:8080**，扫码登录 B 站即可使用。
-
-> 💡 也可编辑 `Data/config.json` 来配置 API Key，两种方式选其一。
-
-### 🪟 Windows 部署
-
-```powershell
-# 1. 克隆项目
-git clone https://github.com/xiaoyaya191/bilibili_learning_bot.git
-cd bilibili_learning_bot
-
-# 2. 安装依赖
-pip install -r requirements.txt
-
-# 3. 配置 API Key（环境变量方式，更安全）
-$env:BILI_AI_API_KEY="sk-你的APIKey"
-$env:BILI_AI_BASE_URL="https://api.openai.com/v1"
-
-# 4. 启动 Web 控制台
-python web_panel.py
-```
-
-启动后浏览器打开 **http://127.0.0.1:8080**，扫码登录 B 站即可使用。
-
-> 💡 也可编辑 `Data/config.json` 来配置 API Key。Windows 用户可直接双击 `启动网页版.bat` 一键启动。
-
-### 📱 Android 手机部署（Termux）
-
-```bash
-pkg install python git
 git clone https://github.com/xiaoyaya191/bilibili_learning_bot.git
 cd bilibili_learning_bot
 pip install -r requirements.txt
+```
+
+### 启动
+
+**方式一：命令行菜单（推荐）**
+```bash
+python new_agent.py
+```
+进入主菜单后按 `2` 配置 AI 参数（API Key、地址、模型），按 `3` 扫码登录 B 站，按 `1` 启动机器人。
+
+**方式二：Web 控制台**
+```bash
 python web_panel.py
 ```
+浏览器打开 `http://127.0.0.1:8080`，在网页上配置和启动。
 
-### 🐳 Docker 部署
-
-```bash
-# 1. 克隆项目
-git clone https://github.com/xiaoyaya191/bilibili_learning_bot.git
-cd bilibili_learning_bot
-
-# 2. 创建数据目录（挂载用）
-mkdir -p Data KnowledgeBase highlights
-
-# 3. 配置 API Key（编辑 Data/config.json）
-#    或用环境变量方式（更安全）：
-
-# 4. 构建并启动
-docker compose up -d
-```
-
-> ⚠️ **首次启动需扫码登录**：打开 `http://your-server-ip:8080`，在 Web 面板中点击"B站登录"扫码。
->
-> 推荐将 API Key 写入 `docker-compose.yml` 的 `environment` 字段，避免每次重建容器重复配置。
+> Windows 用户可直接双击 `启动网页版.bat`。
+> Docker 部署详见 [bot.bxya.top](https://bot.bxya.top)。
 
 ---
 
