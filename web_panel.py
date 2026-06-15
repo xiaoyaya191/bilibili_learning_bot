@@ -1768,16 +1768,15 @@ def api_action_analyze_video():
         if not bvid:
             return jsonify(dict(ok=False, message='请输入 BV号')), 400
         log_line(f"触发手动视频分析: {bvid}")
-        # 直接在子进程中调用 new_agent.py 的函数
+        # 通过 subprocess 调用 new_agent.py 进行视频分析
         def _run_analysis():
             try:
-                sys.path.insert(0, str(BASE_DIR))
-                import new_agent
-                # 尝试调用手动分析
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                # 简单方式：通过命令行参数
-                log_line(f"[分析] 正在分析 {bvid}...")
+                import subprocess
+                result = subprocess.run(
+                    [sys.executable, str(BASE_DIR / "new_agent.py"), "--analyze-once", bvid],
+                    cwd=str(BASE_DIR), capture_output=True, text=True, timeout=300
+                )
+                log_line(f"[分析] {bvid}: {result.stdout[-200:] if result.stdout else result.stderr[-200:]}")
             except Exception as e:
                 log_line(f"[分析] 失败: {e}")
         threading.Thread(target=_run_analysis, daemon=True).start()
