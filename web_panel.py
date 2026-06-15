@@ -85,15 +85,18 @@ def sanitize_filename(name: str) -> str:
     return re.sub(r'[^\w.\-]', '', name)[:255]
 
 # ── 安全：Web面板登录认证 ──
-__password__ = os.getenv('BILI_WEB_PASSWORD', '').strip()
+WEB_PASSWORD = os.getenv('BILI_WEB_PASSWORD', '').strip()
+if not WEB_PASSWORD:
+    print("[FATAL] 致命错误：环境变量 BILI_WEB_PASSWORD 未设置！")
+    print("[FATAL] 为了安全，Web 面板拒绝在没有密码的情况下启动。")
+    sys.exit(1)
 _LOGIN_NONCES: set[str] = set()
 
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        if WEB_PASSWORD:
-            if not session.get('web_authenticated'):
-                return jsonify(dict(ok=False, message='未登录', need_login=True)), 401
+        if not session.get('web_authenticated'):
+            return jsonify(dict(ok=False, message='未登录', need_login=True)), 401
         return f(*args, **kwargs)
     return decorated
 
@@ -829,7 +832,7 @@ bd+='<tr><td>API状态</td><td><span class="tg '+(d.api_configured?'tg-suc':'tg-
 if(d.mood)bd+='<td>心情 / 精力</td><td>'+(d.mood.mood||'-')+' / '+(d.mood.energy||'?')+'</td>';
 else bd+='<td>心情</td><td>-</td>';
 bd+='</tr>';
-if(d.persona)bd+='<tr><td>当前人格</td><td>'+(d.persona.active||'-')+'</td>';
+if(d.persona)bd+='<tr><td>当前人格</td><td>'+esc(d.persona.active||'-')+'</td>';
 else bd+='<tr><td>当前人格</td><td>-</td>';
 if(d.cost_total!=null)bd+='<td>累计费用</td><td>$'+Number(d.cost_total).toFixed(4)+'</td>';
 else bd+='<td>累计费用</td><td>-</td>';
@@ -878,7 +881,7 @@ userScrolledUp=!atBottom;
 }
 async function upCtrlUI(){
 var d=await api('GET','/api/info');
-document.getElementById('ctrlStatus').innerHTML=d.bot_running?'<span class="tg tg-suc pulse">● 运行中</span> 自 '+d.bot_start_time:'<span class="tg tg-war">○ 已停止</span>';
+document.getElementById('ctrlStatus').innerHTML=d.bot_running?'<span class="tg tg-suc pulse">● 运行中</span> 自 '+esc(d.bot_start_time||''):'<span class="tg tg-war">○ 已停止</span>';
 document.getElementById('btnStart').style.display=d.bot_running?'none':'';
 document.getElementById('btnStop').style.display=d.bot_running?'':'none';
 }
@@ -1098,7 +1101,7 @@ var h="";for(var i=0;i<moodPresets.length;i++){h+="<button class=\"btn btn-out b
 document.getElementById("moodQuickBtns").innerHTML=h;}
 async function fetchMood(){
 try{var r=await api("GET","/api/mood/status");
-document.getElementById("moodStatus").innerHTML="<div style=\"font-size:14px\">当前心情: <strong style=\"color:var(--accent);font-size:18px\">"+(r.current_mood||"-")+"</strong> | 精力: <strong style=\"color:var(--green)\">"+(r.energy||"?")+"</strong></div>";
+document.getElementById("moodStatus").innerHTML="<div style=\"font-size:14px\">当前心情: <strong style=\"color:var(--accent);font-size:18px\">"+esc(r.current_mood||"-")+"</strong> | 精力: <strong style=\"color:var(--green)\">"+esc(r.energy||"?")+"</strong></div>";
 document.getElementById("moodDefault").value=r.default_mood||"";document.getElementById("moodRandom").checked=r.random_enabled;
 document.getElementById("moodRandInt").value=r.random_interval||5;document.getElementById("moodCustom").checked=r.custom_enabled;
 document.getElementById("moodCustomText").value=r.custom_mood||"";}catch(e){}}
@@ -1223,13 +1226,13 @@ c.asr.backend=document.getElementById("asrBackend").value;
 c.asr.language=document.getElementById("asrLang").value;
 c.asr.speaker_separation=document.getElementById("asrSep").value=="1";
 var r=await api("POST","/api/config",c);
-document.getElementById("asrMsg").innerHTML=r.ok?'<span style="color:var(--green)">已保存</span>':'<span style="color:var(--red)">'+r.message+'</span>'}
+document.getElementById("asrMsg").innerHTML=r.ok?'<span style="color:var(--green)">已保存</span>':'<span style="color:var(--red)">'+esc(r.message||'')+'</span>'}
 async function saveDry(){var c=await api("GET","/api/config");if(!c)return;
 c.dry_goods=c.dry_goods||{};c.dry_goods.enabled=document.getElementById("dryEnabled").value=="1";
 c.dry_goods.min_score=parseFloat(document.getElementById("dryMinScore").value)||8.0;
 c.dry_goods.folder_name=document.getElementById("dryFolder").value||"highlights";
 var r=await api("POST","/api/config",c);
-document.getElementById("dryMsg").innerHTML=r.ok?'<span style="color:var(--green)">已保存</span>':'<span style="color:var(--red)">'+r.message+'</span>'}
+document.getElementById("dryMsg").innerHTML=r.ok?'<span style="color:var(--green)">已保存</span>':'<span style="color:var(--red)">'+esc(r.message||'')+'</span>'}
 async function loadAsrHighlight(){var c=await api("GET","/api/config");if(!c)return;
 if(c.asr){document.getElementById("asrEnabled").value=c.asr.enabled?"1":"0";
 document.getElementById("asrBackend").value=c.asr.backend||"funasr";
