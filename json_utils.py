@@ -162,9 +162,16 @@ def is_safe_path(filepath: Path | str, base_dir: Path | str) -> bool:
 
 # ── 平台无关备份目录 ──
 def get_backup_dir() -> Path:
-    """获取平台无关的备份目录。Windows 用 C:\，其他平台用用户 home 目录。"""
+    """获取平台无关的备份目录。
+    Windows → C:\\bilibili_claw_backup
+    Android/Termux → /storage/emulated/0/bilibili_claw_backup (共享存储，文件管理器可见)
+    其他 → ~/bilibili_claw_backup
+    """
     import sys
     if sys.platform == 'win32':
         return Path("C:/bilibili_claw_backup")
-    else:
-        return Path.home() / "bilibili_claw_backup"
+    # Android (Termux) 检测：使用共享存储，方便文件管理器访问/跨实例迁移
+    android_storage = Path("/storage/emulated/0")
+    if android_storage.exists():
+        return android_storage / "bilibili_claw_backup"
+    return Path.home() / "bilibili_claw_backup"

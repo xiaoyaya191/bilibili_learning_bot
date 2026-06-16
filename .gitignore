@@ -35,8 +35,23 @@ _test_*.py
 *_test_output.txt
 *_result.json
 
+# Temp / test files
+_test_*.py
+*_test_output.txt
+*_result.json
+_run_*.py
+_verify*.py
+
+# Runtime data
+learning_log.md
+bot_memory.json
+bot_journal.md
+
 # IDE / OS
 .idea/
 .vscode/
 Thumbs.db
 Desktop.ini
+
+# Reasonix temp
+.reasonix/

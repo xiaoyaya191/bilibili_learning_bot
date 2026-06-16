@@ -1,11 +1,13 @@
-# 安全说明
+# Security Policy
 
-本项目会接触 AI API Key、B 站 Cookie、用户记忆、日记和操作日志。开源或打包前请先检查：
+## Reporting a Vulnerability
 
-- 不要提交 `Data/`、`KnowledgeBase/`、`.env`、`*.zip` 和 `__pycache__/`。
-- 不要把真实 API Key、面板密码、B 站 Cookie、refresh token 写入示例配置。
-- 如果密钥曾经出现在公开仓库、压缩包或截图里，请立即轮换密钥。
-- Web 面板默认监听 `127.0.0.1`。如果改成公网地址，请务必设置面板密码，并优先放在可信反向代理或内网后面。
-- 自动评论、点赞、投币、收藏、发动态、弹幕互动等能力建议长期保持 `dry_run=true`，人工确认后再执行。
+If you find a security issue, please do NOT open a public issue.
+Contact the maintainers via private channels.
 
-报告安全问题时，请不要在公开 issue 中粘贴密钥、Cookie 或私人日志。
+## Data Protection
+
+- API keys are stored in `Data/config.json` (local only)
+- B站 cookies are stored in `Data/bilibili_cookies.json` (local only)
+- Export backups mask sensitive data via `sanitize_config_for_export()`
+- Factory reset (`R` command) clears all local data including cookies/config/logs

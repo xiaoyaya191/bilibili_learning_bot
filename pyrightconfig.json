@@ -1,3 +1,6 @@
 {
-    "typeCheckingMode": "basic"
+    "include": ["new_agent.py", "web_panel.py", "psycho_engine.py"],
+    "typeCheckingMode": "basic",
+    "reportMissingImports": "warning",
+    "reportMissingTypeStubs": "none"
 }
