@@ -1081,7 +1081,7 @@ document.getElementById('aboutBox').innerHTML='<div style="display:grid;grid-tem
 }
 
 // ── UTIL ──
-function esc(s){return(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+function esc(s){return(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
 
 // ── AUTO REFRESH ──
 var autoTmr=null;
@@ -1770,6 +1770,9 @@ def api_action_analyze_video():
         bvid = (body.get('bvid') or '').strip()
         if not bvid:
             return jsonify(dict(ok=False, message='请输入 BV号')), 400
+        import re
+        if not re.match(r"^BV[a-zA-Z0-9]{10}$", bvid):
+            return jsonify(dict(ok=False, message='请输入合法的 BV 号 (例如: BV1GJ411x7h7)')), 400
         log_line(f"触发手动视频分析: {bvid}")
         # 通过 subprocess 调用 new_agent.py 进行视频分析
         def _run_analysis():
