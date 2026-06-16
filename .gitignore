@@ -55,3 +55,4 @@ Desktop.ini
 
 # Reasonix temp
 .reasonix/
+.cipher_key

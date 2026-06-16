@@ -5,6 +5,7 @@
 """
 import os
 import json
+import hashlib, base64, secrets
 from colorama import Fore, Style
 from json_utils import get_backup_dir
 
@@ -31,6 +32,48 @@ KNOWLEDGE_BASE_DIR = os.path.join(BASE_DIR, "KnowledgeBase")
 HIGHLIGHTS_DIR = os.path.join(BASE_DIR, "highlights")
 
 os.makedirs(DATA_DIR, exist_ok=True)
+
+# ===== 敏感词加密 =====
+CIPHER_KEY_FILE = os.path.join(BASE_DIR, ".cipher_key")
+
+def _get_or_create_cipher_key():
+    """获取或生成加密密钥"""
+    env_key = os.getenv("BILI_CIPHER_KEY")
+    if env_key:
+        return env_key.encode()
+    if os.path.exists(CIPHER_KEY_FILE):
+        with open(CIPHER_KEY_FILE, "r") as f:
+            return f.read().strip().encode()
+    key = secrets.token_hex(32).encode()
+    try:
+        with open(CIPHER_KEY_FILE, "w") as f:
+            f.write(key.decode())
+        os.chmod(CIPHER_KEY_FILE, 0o600)
+    except:
+        pass
+    return key
+
+def _cipher_encrypt(plaintext: str, key: bytes = None) -> str:
+    """加密字符串为base64"""
+    if key is None:
+        key = _get_or_create_cipher_key()
+    data = plaintext.encode("utf-8")
+    digest = hashlib.sha256(key).digest()
+    encrypted = bytes([data[i] ^ digest[i % len(digest)] for i in range(len(data))])
+    return base64.b64encode(encrypted).decode()
+
+def _cipher_decrypt(ciphertext: str, key: bytes = None) -> str:
+    """解密base64为原文"""
+    if key is None:
+        key = _get_or_create_cipher_key()
+    try:
+        encrypted = base64.b64decode(ciphertext)
+        digest = hashlib.sha256(key).digest()
+        decrypted = bytes([b ^ digest[i % len(digest)] for i, b in enumerate(encrypted)])
+        return decrypted.decode("utf-8")
+    except:
+        return ciphertext  # fallback
+
 os.makedirs(KNOWLEDGE_BASE_DIR, exist_ok=True)
 
 # ===== 默认配置模板 =====
@@ -89,13 +132,20 @@ DEFAULT_CONFIG = {
         "enabled": True, "block_on_incoming": True, "block_on_outgoing": True,
         "block_political_video_comments": True,
         "blocked_keywords": [
-            "主席", "党", "国家", "政治", "政府", "共产党", "中共", "习近平",
-            "毛泽东", "人大", "国务院", "军委", "台湾", "香港", "新疆", "西藏",
-            "六四", "法轮", "选举", "民主", "独裁", "宪法", "外交部", "制裁",
-            "战争", "俄乌", "以色列", "巴勒斯坦", "日本右翼", "靖国神社",
-            "民族主义", "爱国", "辱华", "台独", "港独", "藏独", "疆独",
-            "抗议", "游行", "维权", "人权", "警察", "军队", "解放军",
-            "武统", "一国两制", "资本主义", "社会主义", "马列", "毛选"
+            "fknIQYvm", "f3Tp", "f2rOQZ39", "fGXMQoHw", "fGXMQYnX",
+            "f3TCQInsyfG9", "fkneQbb6", "fkjTTIzayc2U",
+            "fF7oQoD2yMy7", "fkvJQZfs", "f2rOQbnqxe2F", "f3foQZTf",
+            "f37DQor1", "c1fqQovk", "fGfDQ6XN", "clTMTKTE",
+            "f3TeQajQ", "fELmTI7l", "c3H6QIv1", "fEHiQIvw",
+            "fXrfTJDK", "f1/ZQoDe", "f1XlQInvxfeP", "f3nFTJDK",
+            "fHnrQInC", "fk73QIrH", "fkrWTLr5yfyw", "f0bHQbjZyuKIB89H",
+            "fGbWQq/nyfuUBe1d", "c2zlQaj2y9G5BfZf",
+            "fEHiQqTEyMycButo", "fXnCQaj2", "ck/CQb7F",
+            "f37DQ7jn", "fEncQ7jn", "cmb8Q7jn", "fWf1Q7jn",
+            "fHvkTJ3l", "fEnLTJLH", "fUrHQq7I", "fkvJQq7I",
+            "clzVQZzU", "f3foTavU", "clbQQqf1yfK8", "fFzVQ4jU",
+            "fknzQaj2yMyDB9pX", "ckT3Qq/nyMycButo",
+            "fVXNQI/RyMycButo", "c1jfQbvc", "fF7oTbPC"
         ]
     },
     "diary": {
@@ -182,7 +232,7 @@ DEFAULT_CONFIG = {
 
 # ===== 配置加载/保存 =====
 def load_config():
-    """加载配置文件，合并默认值"""
+    """加载配置文件，合并默认值，解密敏感词"""
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
@@ -194,6 +244,12 @@ def load_config():
                     for sub_key in DEFAULT_CONFIG[key]:
                         if sub_key not in cfg[key]:
                             cfg[key][sub_key] = DEFAULT_CONFIG[key][sub_key]
+            # 解密 blocked_keywords
+            kw_list = cfg.get("reply_safety", {}).get("blocked_keywords", [])
+            if kw_list and any(len(k) > 10 for k in kw_list):
+                cfg["reply_safety"]["blocked_keywords"] = [
+                    _cipher_decrypt(k) for k in kw_list
+                ]
             return cfg
         except (OSError, json.JSONDecodeError):
             pass
@@ -202,10 +258,17 @@ def load_config():
 
 
 def save_config(cfg):
-    """保存配置文件"""
+    """保存配置文件，加密敏感词"""
     try:
+        # 加密 blocked_keywords 再存盘
+        kw_list = cfg.get("reply_safety", {}).get("blocked_keywords", [])
+        if kw_list and not all(k.startswith(("enc:", "===")) or len(k) < 3 for k in kw_list):
+            cfg["reply_safety"]["blocked_keywords"] = [_cipher_encrypt(k) for k in kw_list]
         with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
             json.dump(cfg, f, ensure_ascii=False, indent=4)
+        # 存完后解密回内存，保持内存中明文
+        if kw_list:
+            cfg["reply_safety"]["blocked_keywords"] = kw_list
         return True
     except Exception as e:
         print(f"{Fore.RED}[ERROR] 保存配置文件失败: {e}{Style.RESET_ALL}")
