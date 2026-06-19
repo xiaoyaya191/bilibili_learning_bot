@@ -176,3 +176,6 @@ bash start.sh
 ## ⚠️ 免责声明
 
 本项目仅供学习参考。若因使用本项目产生任何后果，本人概不负责。
+
+---
+*Based on [bilibili_learning_bot](https://github.com/xiaoyaya191/bilibili_learning_bot) · Original author: xiaoyaya191*
