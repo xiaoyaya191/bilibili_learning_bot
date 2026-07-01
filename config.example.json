@@ -1,0 +1,228 @@
+{
+  "api": {
+    "unified_api_key": "",
+    "unified_base_url": "https://api.openai.com/v1",
+    "model_brain": "gpt-4.1-mini",
+    "model_vision": "gpt-4.1-mini"
+  },
+  "models": {
+    "chat": "gpt-4.1-mini",
+    "vision": "gpt-4.1-mini",
+    "image": "gpt-image-1",
+    "fast": "gpt-4.1-nano",
+    "embedding": "text-embedding-3-small"
+  },
+  "fallback_models": {
+    "chat": "gpt-4.1-nano",
+    "vision": "gpt-4.1-mini",
+    "image": "gpt-image-1",
+    "fast": "gpt-4.1-nano",
+    "embedding": "text-embedding-3-small"
+  },
+  "fallback_provider": {
+    "_comment": "跨API服务商降级：主API连续失败3次后切换到此提供商，10分钟后自动尝试恢复",
+    "enabled": false,
+    "name": "chatanywhere",
+    "api_key": "",
+    "base_url": "https://api.chatanywhere.tech/v1",
+    "models": {
+      "chat": "gpt-3.5-turbo",
+      "vision": "gpt-3.5-turbo",
+      "fast": "gpt-3.5-turbo",
+      "embedding": "text-embedding-ada-002"
+    }
+  },
+  "web": {
+    "password": ""
+  },
+  "bilibili": {
+    "owner_mid": "",
+    "refresh_token": ""
+  },
+  "automation": {
+    "dry_run": true,
+    "max_daily_actions": 20,
+    "proactive_video_count": 3,
+    "proactive_comment_count": 2,
+    "proactive_times_count": 2,
+    "sleep_start": "02:00",
+    "sleep_end": "08:00",
+    "allow_comment": false,
+    "allow_like": false,
+    "allow_coin": false,
+    "allow_favorite": false,
+    "allow_dynamic": false,
+    "enable_web_search": true,
+    "enable_proactive": true,
+    "enable_dynamic": true,
+    "enable_personality_evolution": true,
+    "enable_mood": true,
+    "enable_affection": true,
+    "enable_embedding_memory": true,
+    "comment_poll_interval": 300,
+    "max_replies_per_check": 3
+  },
+  "video": {
+    "mode": "smart",
+    "max_duration_seconds": 900,
+    "frame_count": 12,
+    "download_interest_threshold": 7.0,
+    "download_dir": "",
+    "delete_video_after_understand": true
+  },
+  "reply_safety": {
+    "enabled": true,
+    "block_on_incoming": true,
+    "block_on_outgoing": true,
+    "block_political_video_comments": true,
+    "blocked_keywords": [
+      "主席",
+      "党",
+      "国家",
+      "政治",
+      "政府",
+      "共产党",
+      "中共",
+      "习近平",
+      "毛泽东",
+      "人大",
+      "国务院",
+      "军委",
+      "台湾",
+      "香港",
+      "新疆",
+      "西藏",
+      "六四",
+      "法轮",
+      "选举",
+      "民主",
+      "独裁",
+      "宪法",
+      "外交部",
+      "制裁",
+      "战争",
+      "俄乌",
+      "以色列",
+      "巴勒斯坦",
+      "靖国神社",
+      "民族主义",
+      "辱华",
+      "台独",
+      "港独",
+      "藏独",
+      "疆独",
+      "抗议",
+      "游行",
+      "维权",
+      "人权",
+      "警察",
+      "军队",
+      "解放军",
+      "武统",
+      "一国两制"
+    ]
+  },
+  "diary": {
+    "enabled": true,
+    "auto_enabled": true,
+    "auto_interval_minutes": 60,
+    "min_events_for_auto": 3
+  },
+  "self_evolution": {
+    "enabled": true,
+    "auto_enabled": true,
+    "reflect_interval_events": 8,
+    "min_events_for_reflect": 3,
+    "auto_apply": true
+  },
+  "agent": {
+    "enabled": true,
+    "auto_enabled": true,
+    "max_steps_per_plan": 5,
+    "max_search_results": 8,
+    "max_videos_per_plan": 5,
+    "auto_min_score": 7.5,
+    "cooldown_minutes": 60
+  },
+  "behavior": {
+    "ai_marker": "（内容由AI生成并由AI回复）",
+    "private_reply_cooldown_minutes": 3,
+    "comment_user_cooldown_minutes": 60,
+    "max_consecutive_ai_replies": 3,
+    "min_reply_delay_seconds": 4,
+    "max_reply_delay_seconds": 18,
+    "prefer_short_replies": true
+  },
+  "revisit": {
+    "enabled": true,
+    "prob_revisit": 0.25,
+    "revisit_cooldown_minutes": 15,
+    "min_score": 7.5,
+    "max_per_video": 2,
+    "per_video_cooldown_minutes": 240
+  },
+  "knowledge_verify": {
+    "enabled": true,
+    "use_web_search": true,
+    "min_reliability_score": 0.7,
+    "auto_fix": true
+  },
+  "curiosity_search": {
+    "enabled": true,
+    "max_videos_per_dive": 10,
+    "trigger_min_score": 7.5,
+    "prob_trigger": 0.3,
+    "cooldown_minutes": 120
+  },
+  "dry_goods": {
+    "_comment": "Highlights archive: extra copy of high-score videos (disabled by default, enable from settings)",
+    "enabled": false,
+    "min_score": 7.5,
+    "folder_name": "highlights"
+  },
+  "active_chat": {
+    "enabled": true,
+    "prob_initiate": 0.06,
+    "cooldown_minutes": 45,
+    "max_initiate_per_session": 3
+  },
+  "up_follow": {
+    "enabled": true,
+    "auto_follow_prob": 0.08,
+    "max_daily_follows": 3,
+    "unfollow_inactive_days": 0,
+    "browse_up_videos_prob": 0.06,
+    "max_browse_videos": 3,
+    "cooldown_minutes": 90,
+    "favorite_up_browse_prob": 0.25,
+    "favorite_up_uid_list": [],
+    "test_mode": false
+  },
+  "danmaku": {
+    "enabled": true,
+    "read_prob": 0.4,
+    "like_prob": 0.15,
+    "max_daily_danmaku_likes": 10,
+    "send_prob": 0.03,
+    "max_daily_send": 2
+  },
+  "psycho_engine": {
+    "enabled": true,
+    "deep_analyze_interval_videos": 100,
+    "heuristic_update_interval": 15,
+    "cocoon_detect_interval": 15,
+    "cocoon_warning_threshold": 0.35,
+    "recommend_prob_per_round": 0.08,
+    "min_views_before_recommend": 10,
+    "max_surprise_daily": 5,
+    "max_explore_daily": 5,
+    "max_anticocoon_daily": 3,
+    "min_actions_for_deep_analysis": 50,
+    "deep_analysis_cooldown_seconds": 14400,
+    "max_actions_in_log": 2000,
+    "max_recommendation_log": 200,
+    "aversion_auto_blacklist_threshold": 3,
+    "aversion_score_block_threshold": 0.7,
+    "aversion_score_warn_threshold": 0.4
+  }
+}

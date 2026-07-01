@@ -1,0 +1,60 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+*.egg-info/
+
+# 本地运行时数据（挂载卷方式注入）
+Data/
+KnowledgeBase/
+highlights/
+
+# 临时文件
+*.zip
+*.bak
+*.db
+*.tmp
+*.log
+bot_memory.json
+bot_journal.md
+learning_log.md
+knowledge_metadata.json
+bot.pid
+bot_web.log
+
+# IDE / 编辑器
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# 备份和存储
+backups/
+storage/
+html_exports/
+model/
+
+# 运行时密钥和锁
+.cipher_key
+.web_secret_key
+
+# 测试和文档（不需要打包进镜像）
+tests/
+*.md
+!README.md
+*.bat
+*.sh
+*.ps1
+
+# 杂项
+.reasonix/
+.codebuddy/
