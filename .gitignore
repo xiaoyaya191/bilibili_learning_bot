@@ -1,0 +1,68 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+.env
+.env.*
+
+# Local data
+Data/
+!Data/.gitkeep
+config.json
+
+# Runtime files
+bot_memory.json
+bot_journal.md
+upstream-bilibili-ai-bot.zip
+*.zip
+*.db
+*.tmp
+bot.pid
+bot_web.log
+*.log
+
+# Knowledge base
+KnowledgeBase/
+
+# ASR model files (large)
+model/asr/
+model/
+
+# HTML exports (generated files)
+html_exports/
+
+# Backup files
+*.bak
+*.bak.*
+backup_*/
+backups/
+storage/
+
+# Temp / test files
+_test_*.py
+*_test_output.txt
+*_result.json
+_run_*.py
+_verify*.py
+
+# Runtime data
+learning_log.md
+bot_memory.json
+bot_journal.md
+html_ids.txt
+js_ids.txt
+knowledge_metadata.json
+
+# IDE / OS
+.idea/
+.vscode/
+Thumbs.db
+Desktop.ini
+
+# Reasonix temp
+.reasonix/
+.cipher_key
+.web_secret_key

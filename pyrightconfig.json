@@ -1,0 +1,6 @@
+{
+    "include": ["start_cli.py", "web_panel.py", "psycho_engine.py"],
+    "typeCheckingMode": "basic",
+    "reportMissingImports": "warning",
+    "reportMissingTypeStubs": "none"
+}

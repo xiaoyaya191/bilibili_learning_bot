@@ -1,0 +1,38 @@
+version: "3.9"
+
+services:
+  bilibili-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: bilibili_learning_bot:3.0.0
+    container_name: bilibili_learning_bot
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-8080}:8080"
+    volumes:
+      # 持久化数据目录（挂载到宿主机，方便备份和迁移）
+      - ./Data:/app/Data
+      - ./KnowledgeBase:/app/KnowledgeBase
+      - ./highlights:/app/highlights
+      # 可选：挂载自定义配置
+      # - ./config.json:/app/Data/config.json:ro
+    environment:
+      - WEB_PORT=${WEB_PORT:-8080}
+      - WEB_HOST=0.0.0.0
+      - BOT_MODE=${BOT_MODE:-web}
+      # AI API 配置（推荐用 .env 文件，更安全）
+      # - BILI_AI_API_KEY=sk-你的APIKey
+      # - BILI_AI_BASE_URL=https://api.openai.com/v1
+      # - BILI_BOT_NAME=你的机器人名字
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/')"]
+      interval: 30s
+      timeout: 10s
+      start_period: 15s
+      retries: 3

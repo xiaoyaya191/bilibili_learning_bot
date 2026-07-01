@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pricing — Claude Design System</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@100;200;300;400;500;600;700;800&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+<style>
+:root {
+  --bg-primary: #FFFFFF;
+  --bg-secondary: #F5F5F5;
+  --bg-card: #FAFAFA;
+  --text-primary: #0D0D0D;
+  --text-secondary: #666666;
+  --text-tertiary: #999999;
+  --accent: #D97757;
+  --accent-hover: #C56545;
+  --accent-bg: rgba(217,119,87,0.08);
+  --border: #E5E5E5;
+  --border-light: #F0F0F0;
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.06);
+  --shadow-lg: 0 20px 60px rgba(0,0,0,0.08);
+}
+
+[data-theme="dark"] {
+  --bg-primary: #0D0D0D;
+  --bg-secondary: #1A1A1A;
+  --bg-card: #141414;
+  --text-primary: #F5F5F5;
+  --text-secondary: #999999;
+  --text-tertiary: #666666;
+  --accent: #E8916A;
+  --accent-hover: #F0A585;
+  --accent-bg: rgba(232,145,106,0.1);
+  --border: #2A2A2A;
+  --border-light: #1F1F1F;
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.3);
+  --shadow-lg: 0 20px 60px rgba(0,0,0,0.5);
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-weight: 400;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  transition: background 0.4s ease, color 0.4s ease;
+  -webkit-font-smoothing: antialiased;
+}
+
+.container { max-width: 1200px; margin: 0 auto; padding: 0 48px; }
+
+/* ---- Theme Toggle ---- */
+.theme-toggle {
+  position: fixed;
+  top: 20px;
+  right: 24px;
+  z-index: 1001;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-primary);
+  padding: 0;
+  transition: all 0.2s;
+}
+.theme-toggle svg { width: 18px; height: 18px; }
+.theme-toggle:hover { background: var(--border); }
+
+/* ---- Nav ---- */
+.nav {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  z-index: 999;
+  background: var(--bg-primary);
+  border-bottom: 1px solid var(--border);
+  padding: 14px 0;
+  transition: background 0.4s ease;
+}
+.nav .container {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.nav-logo { font-size: 15px; font-weight: 500; letter-spacing: 1px; }
+.nav-links { display: flex; gap: 32px; list-style: none; }
+.nav-links a {
+  font-size: 14px; font-weight: 400; color: var(--text-secondary);
+  text-decoration: none; transition: color 0.2s;
+}
+.nav-links a:hover { color: var(--text-primary); }
+
+/* ---- Buttons ---- */
+.btn-primary {
+  background: var(--text-primary);
+  color: var(--bg-primary);
+  border: none;
+  border-radius: 8px;
+  padding: 12px 28px;
+  font-size: 14px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  transition: opacity 0.2s;
+}
+.btn-primary:hover { opacity: 0.85; }
+.btn-primary svg { width: 16px; height: 16px; }
+
+.btn-ghost {
+  background: transparent;
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 28px;
+  font-size: 14px;
+  font-weight: 400;
+  font-family: inherit;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  transition: all 0.2s;
+}
+.btn-ghost:hover { border-color: var(--text-primary); }
+.btn-ghost svg { width: 16px; height: 16px; }
+
+/* ---- Page Header ---- */
+.page-header { padding: 140px 0 60px; text-align: center; }
+.tag {
+  display: inline-block;
+  font-size: 11px; font-weight: 500; padding: 5px 14px;
+  border-radius: 20px; background: var(--accent-bg);
+  color: var(--accent); letter-spacing: 1px; text-transform: uppercase;
+  margin-bottom: 16px;
+}
+.page-header h1 {
+  font-size: 52px; font-weight: 200; letter-spacing: -1.5px; margin-bottom: 16px;
+}
+.page-header p {
+  font-size: 18px; font-weight: 300; color: var(--text-secondary); max-width: 520px;
+  margin: 0 auto 32px;
+}
+
+/* ---- Billing Toggle ---- */
+.billing-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 30px;
+  padding: 4px;
+}
+.billing-toggle button {
+  background: none;
+  border: none;
+  font-size: 14px;
+  font-weight: 400;
+  font-family: inherit;
+  color: var(--text-secondary);
+  padding: 8px 18px;
+  border-radius: 26px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.billing-toggle button.active {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-weight: 500;
+  box-shadow: var(--shadow-sm);
+  border: 1px solid var(--border-light);
+}
+.save-badge {
+  font-size: 10px; font-weight: 500; padding: 2px 8px;
+  border-radius: 10px; background: var(--accent-bg); color: var(--accent);
+}
+
+/* ---- Pricing Cards ---- */
+.pricing-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 24px;
+  padding-bottom: 80px;
+}
+.pricing-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 40px 36px;
+  transition: all 0.3s;
+  position: relative;
+}
+.pricing-card.featured {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-lg);
+  transform: scale(1.02);
+}
+.popular-badge {
+  position: absolute;
+  top: -12px; left: 50%; transform: translateX(-50%);
+  font-size: 11px; font-weight: 500; padding: 4px 16px;
+  border-radius: 12px; background: var(--accent); color: #FFF;
+  letter-spacing: 0.5px; white-space: nowrap;
+}
+.plan-name { font-size: 20px; font-weight: 500; margin-bottom: 4px; }
+.plan-desc { font-size: 14px; color: var(--text-secondary); margin-bottom: 28px; line-height: 1.5; }
+.plan-price {
+  font-size: 48px; font-weight: 200; letter-spacing: -1.5px; margin-bottom: 4px;
+}
+.plan-price .currency { font-size: 22px; font-weight: 300; vertical-align: super; }
+.plan-price .period { font-size: 16px; font-weight: 300; color: var(--text-secondary); }
+.plan-cta { width: 100%; margin: 28px 0; justify-content: center; }
+.plan-features { list-style: none; border-top: 1px solid var(--border-light); padding-top: 24px; }
+.plan-features li {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 14px; color: var(--text-secondary); padding: 8px 0;
+}
+.plan-features li svg { width: 16px; height: 16px; color: var(--accent); flex-shrink: 0; }
+
+/* ---- Compare Table ---- */
+.compare-section { padding: 80px 0; background: var(--bg-secondary); }
+.compare-section h2 {
+  font-size: 36px; font-weight: 200; text-align: center; margin-bottom: 48px; letter-spacing: -1px;
+}
+.compare-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  overflow: hidden;
+}
+.compare-table th {
+  font-size: 11px; font-weight: 500; color: var(--text-tertiary);
+  text-align: left; padding: 16px 24px;
+  text-transform: uppercase; letter-spacing: 1px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-secondary);
+}
+.compare-table th:first-child { padding-left: 32px; }
+.compare-table td {
+  padding: 16px 24px; font-size: 14px; color: var(--text-primary);
+  border-bottom: 1px solid var(--border-light);
+}
+.compare-table td:first-child { padding-left: 32px; }
+.compare-table tr:last-child td { border-bottom: none; }
+.compare-table .check { color: var(--accent); font-weight: 500; }
+.compare-table .dash { color: var(--text-tertiary); }
+
+@media (max-width: 768px) {
+  .container { padding: 0 24px; }
+  .page-header h1 { font-size: 32px; }
+  .pricing-grid { grid-template-columns: 1fr; }
+  .pricing-card.featured { transform: none; }
+  .page-header { padding-top: 100px; }
+  .compare-table th, .compare-table td { padding: 12px 14px; font-size: 12px; }
+}
+</style>
+</head>
+<body>
+
+<button class="theme-toggle" id="themeToggle" onclick="toggleTheme()" title="切换暗色模式">
+  <i data-lucide="moon" id="themeIcon"></i>
+</button>
+
+<nav class="nav">
+  <div class="container">
+    <div class="nav-logo">NOVA</div>
+    <ul class="nav-links">
+      <li><a href="#">产品</a></li>
+      <li><a href="#">方案</a></li>
+      <li><a href="#">定价</a></li>
+      <li><a href="#">文档</a></li>
+    </ul>
+    <a href="#" class="btn-ghost">登录</a>
+  </div>
+</nav>
+
+<main>
+  <div class="container">
+    <header class="page-header">
+      <span class="tag">Pricing</span>
+      <h1>简单透明的<span style="color:var(--accent);">定价</span></h1>
+      <p>选择适合你团队规模的方案，随时随地升级或降级。所有方案均含 14 天免费试用。</p>
+
+      <div class="billing-toggle">
+        <button class="active" onclick="switchBilling('monthly')">按月付费</button>
+        <button onclick="switchBilling('yearly')">按年付费 <span class="save-badge">省 20%</span></button>
+      </div>
+    </header>
+
+    <div class="pricing-grid">
+      <!-- Starter -->
+      <div class="pricing-card">
+        <div class="plan-name">Starter</div>
+        <div class="plan-desc">适合个人开发者和小型项目</div>
+        <div class="plan-price">
+          <span class="currency">&yen;</span><span id="price1">299</span><span class="period">/月</span>
+        </div>
+        <a href="#" class="btn-ghost plan-cta">开始试用</a>
+        <ul class="plan-features">
+          <li><i data-lucide="check"></i> 最多 5 个项目</li>
+          <li><i data-lucide="check"></i> 基础分析面板</li>
+          <li><i data-lucide="check"></i> 社区支持</li>
+          <li><i data-lucide="check"></i> 1 GB 存储空间</li>
+        </ul>
+      </div>
+
+      <!-- Pro -->
+      <div class="pricing-card featured">
+        <div class="popular-badge">最受欢迎</div>
+        <div class="plan-name">Pro</div>
+        <div class="plan-desc">适合专业团队和商业产品</div>
+        <div class="plan-price">
+          <span class="currency">&yen;</span><span id="price2">899</span><span class="period">/月</span>
+        </div>
+        <a href="#" class="btn-primary plan-cta" style="justify-content:center;">开始试用 <i data-lucide="arrow-right"></i></a>
+        <ul class="plan-features">
+          <li><i data-lucide="check"></i> 无限项目</li>
+          <li><i data-lucide="check"></i> 高级分析 & 报表</li>
+          <li><i data-lucide="check"></i> 优先技术支持</li>
+          <li><i data-lucide="check"></i> 50 GB 存储空间</li>
+          <li><i data-lucide="check"></i> 自定义域名</li>
+          <li><i data-lucide="check"></i> 团队协作</li>
+        </ul>
+      </div>
+
+      <!-- Enterprise -->
+      <div class="pricing-card">
+        <div class="plan-name">Enterprise</div>
+        <div class="plan-desc">适合大型企业和定制需求</div>
+        <div class="plan-price">
+          <span class="currency">&yen;</span><span id="price3">3,999</span><span class="period">/月</span>
+        </div>
+        <a href="#" class="btn-ghost plan-cta">联系销售</a>
+        <ul class="plan-features">
+          <li><i data-lucide="check"></i> 无限项目 & 用户</li>
+          <li><i data-lucide="check"></i> 全套分析工具</li>
+          <li><i data-lucide="check"></i> 专属客户经理</li>
+          <li><i data-lucide="check"></i> 500 GB 存储空间</li>
+          <li><i data-lucide="check"></i> SSO & SAML</li>
+          <li><i data-lucide="check"></i> 私有化部署</li>
+          <li><i data-lucide="check"></i> SLA 99.99%</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- Compare Table -->
+  <section class="compare-section">
+    <div class="container">
+      <h2>功能详细对比</h2>
+      <table class="compare-table">
+        <thead>
+          <tr>
+            <th style="width:35%;">功能</th>
+            <th>Starter</th>
+            <th>Pro</th>
+            <th>Enterprise</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>项目数量</td>
+            <td>5 个</td>
+            <td class="check">无限</td>
+            <td class="check">无限</td>
+          </tr>
+          <tr>
+            <td>团队成员</td>
+            <td>1 人</td>
+            <td class="check">最多 20 人</td>
+            <td class="check">无限</td>
+          </tr>
+          <tr>
+            <td>数据分析</td>
+            <td>基础</td>
+            <td class="check">高级</td>
+            <td class="check">全套 + 自定义</td>
+          </tr>
+          <tr>
+            <td>API 接入</td>
+            <td class="dash">&mdash;</td>
+            <td class="check">1,000 req/hr</td>
+            <td class="check">100,000 req/hr</td>
+          </tr>
+          <tr>
+            <td>自定义域名</td>
+            <td class="dash">&mdash;</td>
+            <td class="check">&check;</td>
+            <td class="check">&check;</td>
+          </tr>
+          <tr>
+            <td>私有化部署</td>
+            <td class="dash">&mdash;</td>
+            <td class="dash">&mdash;</td>
+            <td class="check">&check;</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<script>
+let billing = 'monthly';
+
+function switchBilling(mode) {
+  billing = mode;
+  document.querySelectorAll('.billing-toggle button').forEach(b => b.classList.remove('active'));
+  document.querySelector(`.billing-toggle button${mode === 'yearly' ? ':last-child' : ':first-child'}`).classList.add('active');
+  const prices = { monthly: [299, 899, 3999], yearly: [239, 719, 3199] };
+  const periods = { monthly: '/月', yearly: '/月' };
+  document.getElementById('price1').textContent = prices[mode][0];
+  document.getElementById('price2').textContent = prices[mode][1];
+  document.getElementById('price3').textContent = prices[mode][2];
+  document.querySelectorAll('.period').forEach(p => p.textContent = '/月');
+}
+
+let isDark = false;
+function toggleTheme() {
+  isDark = !isDark;
+  document.documentElement.setAttribute('data-theme', isDark ? 'dark' : '');
+  document.getElementById('themeIcon').setAttribute('data-lucide', isDark ? 'sun' : 'moon');
+  lucide.createIcons({ icons: { sun: lucide.icons.Sun, moon: lucide.icons.Moon }, attrs: { 'stroke-width': 1.5 } });
+  try { localStorage.setItem('theme-price', isDark ? 'dark' : 'light'); } catch(e) {}
+}
+(function() {
+  try {
+    if (localStorage.getItem('theme-price') === 'dark') {
+      isDark = true;
+      document.documentElement.setAttribute('data-theme', 'dark');
+      document.getElementById('themeIcon').setAttribute('data-lucide', 'sun');
+    }
+  } catch(e) {}
+  lucide.createIcons({ attrs: { 'stroke-width': 1.5 } });
+})();
+</script>
+</body>
+</html>

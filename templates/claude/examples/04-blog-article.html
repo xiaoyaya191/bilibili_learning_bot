@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Blog Article — Claude Design System</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@100;200;300;400;500;600;700;800&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+<style>
+:root {
+  --bg-primary: #FFFFFF;
+  --bg-secondary: #F5F5F5;
+  --bg-card: #FAFAFA;
+  --text-primary: #0D0D0D;
+  --text-secondary: #666666;
+  --text-tertiary: #999999;
+  --accent: #D97757;
+  --accent-hover: #C56545;
+  --accent-bg: rgba(217,119,87,0.08);
+  --border: #E5E5E5;
+  --border-light: #F0F0F0;
+  --code-bg: #F5F5F5;
+  --code-text: #0D0D0D;
+}
+
+[data-theme="dark"] {
+  --bg-primary: #0D0D0D;
+  --bg-secondary: #1A1A1A;
+  --bg-card: #141414;
+  --text-primary: #F5F5F5;
+  --text-secondary: #999999;
+  --text-tertiary: #666666;
+  --accent: #E8916A;
+  --accent-hover: #F0A585;
+  --accent-bg: rgba(232,145,106,0.1);
+  --border: #2A2A2A;
+  --border-light: #1F1F1F;
+  --code-bg: #1A1A1A;
+  --code-text: #E5E5E5;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-weight: 400;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  transition: background 0.4s ease, color 0.4s ease;
+  line-height: 1.75;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---- Theme Toggle ---- */
+.theme-toggle {
+  position: fixed;
+  top: 20px; right: 24px;
+  z-index: 1001;
+  width: 40px; height: 40px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--text-primary);
+  padding: 0;
+  transition: all 0.2s;
+}
+.theme-toggle svg { width: 18px; height: 18px; }
+.theme-toggle:hover { background: var(--border); }
+
+/* ---- Layout ---- */
+.article-container {
+  max-width: 780px;
+  margin: 0 auto;
+  padding: 0 24px;
+}
+
+/* ---- Back Nav ---- */
+.back-nav {
+  padding: 32px 0;
+}
+.back-nav a {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--text-secondary);
+  text-decoration: none;
+  transition: color 0.2s;
+}
+.back-nav a:hover { color: var(--text-primary); }
+.back-nav a svg { width: 16px; height: 16px; }
+
+/* ---- Article Meta ---- */
+.article-meta {
+  margin-bottom: 32px;
+}
+.tag {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 5px 14px;
+  border-radius: 20px;
+  background: var(--accent-bg);
+  color: var(--accent);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  margin-bottom: 24px;
+}
+.article-title {
+  font-size: 48px;
+  font-weight: 200;
+  line-height: 1.15;
+  letter-spacing: -1.5px;
+  margin-bottom: 16px;
+}
+.article-excerpt {
+  font-size: 20px;
+  font-weight: 300;
+  color: var(--text-secondary);
+  line-height: 1.55;
+  margin-bottom: 28px;
+}
+.article-byline {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  font-size: 14px;
+  color: var(--text-tertiary);
+  padding-bottom: 32px;
+  border-bottom: 1px solid var(--border);
+}
+.article-byline .author {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+.article-byline .dot {
+  color: var(--text-tertiary);
+}
+
+/* ---- Article Body ---- */
+.article-body { padding: 48px 0 80px; }
+.article-body h2 {
+  font-size: 28px;
+  font-weight: 300;
+  line-height: 1.3;
+  margin: 56px 0 16px;
+  letter-spacing: -0.5px;
+}
+.article-body h2:first-child { margin-top: 0; }
+.article-body h3 {
+  font-size: 20px;
+  font-weight: 500;
+  margin: 36px 0 12px;
+  letter-spacing: -0.3px;
+}
+.article-body p {
+  font-size: 17px;
+  font-weight: 400;
+  line-height: 1.75;
+  color: var(--text-primary);
+  margin-bottom: 20px;
+}
+.article-body strong {
+  font-weight: 500;
+}
+.article-body a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.article-body a:hover { text-decoration: underline; }
+
+/* ---- Code Block ---- */
+.article-body pre {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 24px;
+  overflow-x: auto;
+  margin: 24px 0;
+  font-size: 14px;
+  line-height: 1.65;
+}
+.article-body code {
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: 13px;
+  color: var(--code-text);
+}
+.article-body p code {
+  background: var(--code-bg);
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 13px;
+  border: 1px solid var(--border-light);
+}
+
+/* ---- Blockquote ---- */
+.article-body blockquote {
+  border-left: 2px solid var(--accent);
+  padding-left: 24px;
+  margin: 28px 0;
+  font-size: 17px;
+  font-weight: 300;
+  font-style: italic;
+  color: var(--text-secondary);
+  line-height: 1.65;
+}
+
+/* ---- List ---- */
+.article-body ul, .article-body ol {
+  margin: 16px 0 24px 24px;
+}
+.article-body li {
+  font-size: 17px;
+  line-height: 1.75;
+  margin-bottom: 8px;
+  color: var(--text-primary);
+}
+
+/* ---- Divider ---- */
+.article-divider {
+  width: 40px;
+  height: 2px;
+  background: var(--accent);
+  border-radius: 1px;
+  margin: 48px 0;
+}
+
+/* ---- Related Posts ---- */
+.related-section {
+  padding: 64px 0;
+  border-top: 1px solid var(--border);
+  max-width: 780px;
+  margin: 0 auto;
+  padding-left: 24px;
+  padding-right: 24px;
+}
+.related-section h2 {
+  font-size: 28px;
+  font-weight: 300;
+  letter-spacing: -0.5px;
+  margin-bottom: 32px;
+}
+.related-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 24px;
+}
+.related-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 28px;
+  cursor: pointer;
+  transition: all 0.25s;
+  text-decoration: none;
+  display: block;
+}
+.related-card:hover { border-color: var(--accent); }
+.related-card .rel-tag {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin-bottom: 12px;
+}
+.related-card h3 {
+  font-size: 18px;
+  font-weight: 500;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+  letter-spacing: -0.3px;
+}
+.related-card p {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+@media (max-width: 768px) {
+  .article-title { font-size: 32px; }
+  .article-body h2 { font-size: 22px; }
+  .article-body p, .article-body li { font-size: 15px; }
+  .related-grid { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+
+<button class="theme-toggle" id="themeToggle" onclick="toggleTheme()" title="切换暗色模式">
+  <i data-lucide="moon" id="themeIcon"></i>
+</button>
+
+<article class="article-container">
+  <nav class="back-nav">
+    <a href="#"><i data-lucide="arrow-left"></i> 返回博客</a>
+  </nav>
+
+  <header class="article-meta">
+    <span class="tag">Engineering</span>
+    <h1 class="article-title">构建高性能Web应用的<br><span style="color:var(--accent);">设计原则与实践</span></h1>
+    <p class="article-excerpt">从架构设计到性能优化，探索现代 Web 应用开发中的关键决策与最佳实践。本文基于数十个大型项目的经验总结。</p>
+    <div class="article-byline">
+      <span class="author">陈思远</span>
+      <span class="dot">&middot;</span>
+      <span>2026 年 6 月 28 日</span>
+      <span class="dot">&middot;</span>
+      <span>12 分钟阅读</span>
+    </div>
+  </header>
+
+  <div class="article-body">
+    <h2>引言</h2>
+    <p>
+      在过去的五年中，Web 应用的复杂性经历了指数级的增长。从简单的服务端渲染到复杂的单页应用（SPA），再到如今的混合渲染架构——<strong>性能优化已经从「可选」变为「必需」</strong>。
+      本文将从实战角度出发，探讨构建高性能 Web 应用的核心设计原则。
+    </p>
+
+    <h2>1. 架构选型：从需求出发</h2>
+    <p>
+      没有一种架构适用于所有场景。选择技术栈时，我们需要考虑的不仅仅是流行趋势，更重要的是<strong>业务需求、团队能力和长期维护成本</strong>。
+    </p>
+
+    <h3>1.1 静态生成 vs 服务端渲染</h3>
+    <p>
+      对于内容密集型网站（如文档、博客、电商产品页），<code>SSG (Static Site Generation)</code> 是最优选择。构建时生成静态 HTML，配合 CDN 分发，实现近乎即时的首屏加载。
+    </p>
+    <pre><code>// Next.js 示例：getStaticProps
+export async function getStaticProps() {
+  const posts = await fetchPosts();
+  return {
+    props: { posts },
+    revalidate: 3600,  // ISR: 每小时重新生成
+  };
+}</code></pre>
+
+    <blockquote>
+      "过早优化是万恶之源，但「零优化」同样不可取。在项目初期就建立性能基线，是避免后期重构的关键。"
+    </blockquote>
+
+    <h2>2. 渲染性能优化</h2>
+    <p>
+      现代前端框架（React、Vue、Svelte）提供了丰富的优化手段，但开发者需要理解其底层原理才能有效运用。
+    </p>
+
+    <h3>2.1 组件粒度的状态管理</h3>
+    <p>
+      状态提升（Lifting State Up）是 React 中最常见的模式，但也最容易导致不必要的重渲染。通过将状态向子组件下沉，或使用 <code>useMemo</code> / <code>useCallback</code> 精确控制依赖，可以有效减少渲染范围。
+    </p>
+
+    <h3>2.2 虚拟列表与懒加载</h3>
+    <p>
+      当列表数据量较大时，虚拟列表（Virtualization）是必须的优化手段。结合 <code>Intersection Observer API</code> 实现组件的懒加载，可以显著降低首屏 JavaScript 体积。
+    </p>
+
+    <div class="article-divider"></div>
+
+    <h2>3. 数据加载策略</h2>
+    <p>
+      数据加载方式直接影响用户的感知性能。以下是三种核心策略的对比：
+    </p>
+    <ul>
+      <li><strong>Eager Loading（急切加载）</strong> — 页面加载时立即获取所有数据，适合数据量小的场景</li>
+      <li><strong>Lazy Loading（延迟加载）</strong> — 仅在需要时加载数据，适合大数据量、低频访问的数据</li>
+      <li><strong>Prefetching（预加载）</strong> — 在用户可能需要之前预先加载，适合用户行为可预测的场景</li>
+    </ul>
+
+    <h2>结语</h2>
+    <p>
+      构建高性能 Web 应用是一个持续优化的过程。关键在于：<strong>测量、优化、验证</strong>——而非凭空猜测。建立完善的性能监控体系，让数据指引你的优化方向。
+    </p>
+  </div>
+</article>
+
+<section class="related-section">
+  <h2>相关文章</h2>
+  <div class="related-grid">
+    <a class="related-card" href="#">
+      <div class="rel-tag">Design</div>
+      <h3>极简设计系统中的色彩管理</h3>
+      <p>如何在保持视觉一致性的同时实现暗色模式适配</p>
+    </a>
+    <a class="related-card" href="#">
+      <div class="rel-tag">Performance</div>
+      <h3>Core Web Vitals 深度解析</h3>
+      <p>LCP、FID、CLS 的测量方法与优化策略</p>
+    </a>
+    <a class="related-card" href="#">
+      <div class="rel-tag">DevOps</div>
+      <h3>CI/CD 管线中的性能回归检测</h3>
+      <p>自动化性能测试的最佳实践</p>
+    </a>
+  </div>
+</section>
+
+<script>
+let isDark = false;
+function toggleTheme() {
+  isDark = !isDark;
+  document.documentElement.setAttribute('data-theme', isDark ? 'dark' : '');
+  document.getElementById('themeIcon').setAttribute('data-lucide', isDark ? 'sun' : 'moon');
+  lucide.createIcons({ icons: { sun: lucide.icons.Sun, moon: lucide.icons.Moon }, attrs: { 'stroke-width': 1.5 } });
+  try { localStorage.setItem('theme-blog', isDark ? 'dark' : 'light'); } catch(e) {}
+}
+(function() {
+  try {
+    if (localStorage.getItem('theme-blog') === 'dark') {
+      isDark = true;
+      document.documentElement.setAttribute('data-theme', 'dark');
+      document.getElementById('themeIcon').setAttribute('data-lucide', 'sun');
+    }
+  } catch(e) {}
+  lucide.createIcons({ attrs: { 'stroke-width': 1.5 } });
+})();
+</script>
+</body>
+</html>
