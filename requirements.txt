@@ -1,4 +1,4 @@
-bilibili-api==16.0.0
+bilibili-api==9.1.0
 openai==0.28.0
 httpx[http2]
 colorama
