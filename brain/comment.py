@@ -1,11 +1,46 @@
-"""services/interaction_service.py — 评论互动+私信服务"""
-import asyncio, json, os, random, re, time
-from datetime import datetime
-from colorama import Fore, Style
-from core.config import config as _global_config, COMMENT_LOG_FILE, COMMENT_MODE, BEHAVIOR_COMMENT_USER_COOLDOWN_MINUTES, MODEL_BRAIN, MAX_REPLIES_PER_CHECK, PROB_COMMENT_OTHERS, log
-from services.managers import PersonaManager, MoodManager, UserProfileManager
-from services.reply_safety import ReplySafetyGuard
+"""brain/comment.py — 评论互动管理器"""
+import asyncio
+import json
+import os
+import random
+import re
+import time
 
+from colorama import Fore, Style
+
+from core.config import (
+    config, COMMENT_LOG_FILE, COMMENT_MODE, BEHAVIOR_COMMENT_USER_COOLDOWN_MINUTES,
+    MAX_REPLIES_PER_CHECK, PROB_COMMENT_OTHERS,
+)
+# 从 config 实时读取，避免 import * 缓存问题
+def _get_model_brain():
+    return config.get("api", {}).get("model_brain", "")
+from persona.managers import PersonaManager, MoodManager, UserProfileManager
+from security.guard import ReplySafetyGuard
+from utils.display import log
+from datetime import datetime
+from openai import OpenAI
+from utils.helpers import _mask_urls, parse_iso_datetime, ensure_ai_marker
+from api.throttle import _bili_throttle, _bili_trigger_cooldown
+
+# bilibili_api imports (used by the class)
+from bilibili_api import comment, user
+from bilibili_api.comment import CommentResourceType
+
+# Optional xingye_bot imports
+try:
+    from xingye_bot.llm import ModelClient
+    from xingye_bot.settings import load_settings as load_modular_settings
+    from xingye_bot.state import BotState
+    from xingye_bot.video_modes import VideoUnderstanding, normalize_mode
+    from xingye_bot.kb_search import KBSearchEngine
+except ImportError:
+    ModelClient = None
+    load_modular_settings = None
+    BotState = None
+    VideoUnderstanding = None
+    normalize_mode = None
+    KBSearchEngine = None
 
 class CommentInteractionManager:
     """评论互动管理器 - 管理评论回复和点赞"""
@@ -58,8 +93,10 @@ class CommentInteractionManager:
         """保存评论日志"""
         try:
             self.comment_log["processed_comments"] = list(self.processed_comments)
-            with open(COMMENT_LOG_FILE, 'w', encoding='utf-8') as f:
+            tmp = COMMENT_LOG_FILE + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as f:
                 json.dump(self.comment_log, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, COMMENT_LOG_FILE)
         except OSError as e:
             log(f'文件操作失败: {e}', 'DEBUG')
     
@@ -370,8 +407,13 @@ class CommentInteractionManager:
                     只返回回复内容，不要有其他文字。
                     """
                     
-                    resp = openai.ChatCompletion.create(
-                        model=MODEL_BRAIN,
+                    client = OpenAI(
+                        api_key=config.get("api", {}).get("unified_api_key", ""),
+                        base_url=config.get("api", {}).get("unified_base_url", ""),
+                        timeout=120
+                    )
+                    resp = client.chat.completions.create(
+                        model=_get_model_brain(),
                         messages=[
                             {"role": "system", "content": "你是一个友好的B站用户，正在回复别人的评论。"},
                             {"role": "user", "content": prompt}

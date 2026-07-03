@@ -23,13 +23,22 @@ def _get_ai_marker() -> str:
     return _AI_MARKER_CACHE
 
 
-POLITICAL_KEYWORDS = [
-    "主席", "党", "国家", "政治", "政府", "共产党", "中共", "习近平", "毛泽东",
-    "人大", "国务院", "军委", "台湾", "香港", "新疆", "西藏", "六四", "法轮",
-    "选举", "民主", "独裁", "宪法", "外交部", "制裁", "战争", "俄乌", "以色列",
-    "巴勒斯坦", "靖国神社", "民族主义", "辱华", "台独", "港独", "藏独", "疆独",
-    "抗议", "游行", "维权", "人权", "警察", "军队", "解放军", "武统", "一国两制"
+# 高风险关键词：明确政治指向的组合词，单次命中即拦截
+POLITICAL_HIGH_RISK = [
+    "六四", "法轮", "辱华", "台独", "港独", "藏独", "疆独",
+    "靖国神社", "武统", "一国两制", "独裁", "民族主义",
 ]
+
+# 高频通用词：日常常见词，需 2+ 命中才拦截（单命中不拦，避免误杀）
+POLITICAL_COMMON = [
+    "主席", "党", "国家", "政治", "政府", "共产党", "中共", "习近平", "毛泽东",
+    "人大", "国务院", "军委", "台湾", "香港", "新疆", "西藏",
+    "选举", "民主", "宪法", "外交部", "制裁", "战争", "俄乌", "以色列",
+    "巴勒斯坦", "抗议", "游行", "维权", "人权", "警察", "军队", "解放军",
+]
+
+# 合并列表（向后兼容）
+POLITICAL_KEYWORDS = POLITICAL_HIGH_RISK + POLITICAL_COMMON
 
 
 def _with_ai_marker(text: str) -> str:
@@ -43,8 +52,19 @@ def _with_ai_marker(text: str) -> str:
 
 
 def _political_hits(text: str) -> list[str]:
+    """分级检测敏感词：
+    - 高风险词：单次命中即计入
+    - 通用词：需 2+ 命中才计入（单通用词不拦截）
+    """
     compact = "".join(str(text or "").lower().split())
-    return sorted({word for word in POLITICAL_KEYWORDS if word.lower() in compact})
+    hits = []
+    for word in POLITICAL_HIGH_RISK:
+        if word.lower() in compact:
+            hits.append(word)
+    common_hits = [word for word in POLITICAL_COMMON if word.lower() in compact]
+    if len(common_hits) >= 2:
+        hits.extend(common_hits)
+    return sorted(set(hits))
 
 
 def _load_cookies() -> dict[str, str]:

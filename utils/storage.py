@@ -6,7 +6,7 @@ json_utils.py — 线程安全的 JSON 文件读写工具
 同时提供 API Key 脱敏工具函数。
 
 用法:
-    from json_utils import JsonStore
+    from utils.storage import JsonStore
     store = JsonStore("/path/to/file.json")
     data = store.read()
     store.write(data)

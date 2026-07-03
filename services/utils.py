@@ -6,7 +6,7 @@ import re
 from bilibili_api import user, homepage, search as bili_search
 from core.config import INTERESTS_FILE
 
-# Log function for standalone use (mirrors new_agent.log)
+# Log function for standalone use (mirrors start_cli.log)
 def _log(msg, level="INFO"):
     print(f"[{level}] {msg}")
 
@@ -29,10 +29,13 @@ class InterestManager:
         return []
 
     def _save_interests(self):
+        """原子写入 JSON 文件（tmp+replace 防止断电损坏）"""
         try:
-            with open(self.interests_file, 'w', encoding='utf-8') as f:
+            tmp = self.interests_file + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as f:
                 json.dump({"interests": self.interests, "updated_at": datetime.now().isoformat()},
                           f, ensure_ascii=False, indent=2)
+            os.replace(tmp, self.interests_file)
             return True
         except OSError:
             return False

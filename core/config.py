@@ -1,13 +1,14 @@
 """core/config.py — 配置加载与路径常量
 
-从 new_agent.py 提取，避免循环依赖。
-所有全局配置变量仍然在 new_agent.py 中定义，使用时 from core.config import 路径常量。
+从 start_cli.py 提取，避免循环依赖。
+所有全局配置变量仍然在 start_cli.py 中定义，使用时 from core.config import 路径常量。
 """
 import os
+import sys
 import json
 import hashlib, base64, secrets
 from colorama import Fore, Style
-from json_utils import get_backup_dir
+from utils.storage import get_backup_dir
 
 # ===== 路径常量 =====
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -49,7 +50,7 @@ def _get_or_create_cipher_key():
         with open(CIPHER_KEY_FILE, "w") as f:
             f.write(key.decode())
         os.chmod(CIPHER_KEY_FILE, 0o600)
-    except:
+    except OSError:
         pass
     return key
 
@@ -71,7 +72,7 @@ def _cipher_decrypt(ciphertext: str, key: bytes = None) -> str:
         digest = hashlib.sha256(key).digest()
         decrypted = bytes([b ^ digest[i % len(digest)] for i, b in enumerate(encrypted)])
         return decrypted.decode("utf-8")
-    except:
+    except (ValueError, UnicodeDecodeError, Exception):
         return ciphertext  # fallback
 
 os.makedirs(KNOWLEDGE_BASE_DIR, exist_ok=True)
@@ -83,6 +84,7 @@ DEFAULT_CONFIG = {
         "unified_base_url": "",
         "model_brain": "",
         "model_vision": "",
+        "model_html": "",
         "vision_api_key": "",
         "vision_base_url": ""
     },
@@ -93,13 +95,14 @@ DEFAULT_CONFIG = {
         "prob_reply_trigger": 0.15, "prob_coin": 0.25, "prob_fav": 0.8,
         "prob_like_solo": 0.5, "prob_comment_others": 0.3,
         "comment_check_interval": 300, "max_replies_per_check": 3,
-        "random_enabled": True
+        "random_enabled": True,
+        "coin_cooldown_minutes": 0, "coin_max_per_hour": 0
     },
     "energy": {
         "energy_recovery_min": 5, "energy_recovery_max": 10,
         "rounds_min": 3, "rounds_max": 10,
         "round_interval_min": 60, "round_interval_max": 180,
-        "video_interval_min": 20, "video_interval_max": 50
+        "video_interval_min": 1, "video_interval_max": 5
     },
     "persona": {"active_persona": "默认人格", "prompt_name": "AI小助手"},
     "mood": {
@@ -113,7 +116,7 @@ DEFAULT_CONFIG = {
         "delete_video_after_understand": True, "filter_mode": "cover_and_title"
     },
     "vision": {
-        "frames_enabled": True, "comment_images_enabled": True,
+        "cover_enabled": True, "frames_enabled": True, "comment_images_enabled": True,
         "max_comment_images": 5, "frame_count": 8
     },
     "asr": {
@@ -258,14 +261,16 @@ def load_config():
 
 
 def save_config(cfg):
-    """保存配置文件，加密敏感词"""
+    """保存配置文件，加密敏感词（原子写入防崩溃损坏）"""
     try:
         # 加密 blocked_keywords 再存盘
         kw_list = cfg.get("reply_safety", {}).get("blocked_keywords", [])
         if kw_list and not all(k.startswith(("enc:", "===")) or len(k) < 3 for k in kw_list):
             cfg["reply_safety"]["blocked_keywords"] = [_cipher_encrypt(k) for k in kw_list]
-        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+        tmp = CONFIG_FILE + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
             json.dump(cfg, f, ensure_ascii=False, indent=4)
+        os.replace(tmp, CONFIG_FILE)
         # 存完后解密回内存，保持内存中明文
         if kw_list:
             cfg["reply_safety"]["blocked_keywords"] = kw_list
@@ -280,7 +285,11 @@ def get_bot_name():
 
 
 def get_config_or_env(section, key, env_name):
-    return os.getenv(env_name) or config.get(section, {}).get(key, "")
+    # 🔧 优先环境变量，其次配置文件，兜底空字符串
+    val = os.getenv(env_name)
+    if val is not None:
+        return val
+    return config.get(section, {}).get(key, "")
 
 
 def mask_secret(value):
@@ -303,9 +312,12 @@ def load_json_file(path, default):
 
 
 def save_json_file(path, data):
+    """原子写入 JSON 文件（tmp+replace 防止断电损坏）"""
     try:
-        with open(path, 'w', encoding='utf-8') as f:
+        tmp = path + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
         return True
     except Exception:
         return False
@@ -315,48 +327,121 @@ def save_json_file(path, data):
 config = load_config()
 
 # ===== 派生配置变量（供其他模块导入） =====
-UNIFIED_API_KEY = get_config_or_env("api", "unified_api_key", "BILI_AI_API_KEY")
-UNIFIED_BASE_URL = get_config_or_env("api", "unified_base_url", "BILI_AI_BASE_URL")
-MODEL_BRAIN = get_config_or_env("api", "model_brain", "BILI_AI_MODEL_BRAIN")
-MODEL_VISION = get_config_or_env("api", "model_vision", "BILI_AI_MODEL_VISION")
-VISION_API_KEY = config["api"].get("vision_api_key") or UNIFIED_API_KEY
-VISION_BASE_URL = config["api"].get("vision_base_url") or UNIFIED_BASE_URL
-COIN_THRESHOLD = config["interaction"]["coin_threshold"]
-FAV_THRESHOLD = config["interaction"]["fav_threshold"]
-INTEREST_THRESHOLD = config["interaction"]["interest_threshold"]
-MAX_ENERGY = config["interaction"]["max_energy"]
-COMMENT_MODE = config.get("behavior", {}).get("comment_mode", "real")
-MAX_COINS_DAILY = config["interaction"]["max_coins_daily"]
-PROB_COIN = config["interaction"]["prob_coin"]
-PROB_FAV = config["interaction"]["prob_fav"]
-PROB_REPLY_TRIGGER = config["interaction"]["prob_reply_trigger"]
-LEARN_MIN_SCORE = config["interaction"].get("learn_min_score", 6.0)
-LEARN_MIN_DURATION_SECONDS = config["interaction"].get("learn_min_duration_seconds", 60)
-AI_MARKER = config.get("behavior", {}).get("ai_marker", "（内容由AI生成并由AI回复）")
-COMMENT_CHECK_INTERVAL = config["interaction"]["comment_check_interval"]
-MAX_REPLIES_PER_CHECK = config["interaction"]["max_replies_per_check"]
-PRIVATE_MESSAGE_ENABLED = config.get("private_message", {}).get("enabled", True)
-PRIVATE_MESSAGE_CHECK_INTERVAL = config.get("private_message", {}).get("check_interval", 120)
-DIARY_ENABLED = config.get("diary", {}).get("enabled", True)
-EVOLUTION_ENABLED = config.get("self_evolution", {}).get("enabled", True)
-AGENT_ENABLED = config.get("agent", {}).get("enabled", True)
-UP_FOLLOW_ENABLED = config.get("up_follow", {}).get("enabled", True)
-DANMAKU_ENABLED = config.get("danmaku", {}).get("enabled", True)
-FALLBACK_MODELS = config.get("fallback_models", {})
-FALLBACK_PROVIDER_ENABLED = config.get("fallback_provider", {}).get("enabled", False)
-FALLBACK_PROVIDER_NAME = config.get("fallback_provider", {}).get("name", "chatanywhere")
-DIARY_AUTO_ENABLED = config.get("diary", {}).get("auto_enabled", True)
-PSYCHO_ENGINE_ENABLED = config.get("psycho_engine", {}).get("enabled", True)
-SESSION_MAX_VIDEOS = config.get("session", {}).get("max_videos", 0)
-SESSION_MAX_DURATION_MINUTES = config.get("session", {}).get("max_duration_minutes", 0)
-BEHAVIOR_COMMENT_USER_COOLDOWN_MINUTES = config.get("behavior", {}).get("comment_user_cooldown_minutes", 60)
-BEHAVIOR_PRIVATE_REPLY_COOLDOWN_MINUTES = config.get("behavior", {}).get("private_reply_cooldown_minutes", 3)
-PROB_COMMENT_OTHERS = config["interaction"]["prob_comment_others"]
-AGENT_SKILL_LOG_FILE = os.path.join(DATA_DIR, "agent_skill_log.json")
-AGENT_DIVE_MAX_VIDEOS = config.get("agent", {}).get("dive_max_videos", 10)
-AGENT_MAX_SEARCH_RESULTS = config.get("agent", {}).get("max_search_results", 8)
-AGENT_MAX_STEPS_PER_PLAN = config.get("agent", {}).get("max_steps_per_plan", 5)
-AGENT_MAX_VIDEOS_PER_PLAN = config.get("agent", {}).get("max_videos_per_plan", 3)
+# [FIX] 改为 __getattr__ 动态属性，确保用户通过菜单修改配置后实时生效。
+# 旧静态赋值已删除。所有变量每次访问时实时从 config 字典读取。
+
+_CONFIG_PATHS = {
+    "UNIFIED_API_KEY":       (("api", "unified_api_key"), None, "BILI_AI_API_KEY"),
+    "UNIFIED_BASE_URL":      (("api", "unified_base_url"), None, "BILI_AI_BASE_URL"),
+    "MODEL_BRAIN":           (("api", "model_brain"), None, "BILI_AI_MODEL_BRAIN"),
+    "MODEL_VISION":          (("api", "model_vision"), None, "BILI_AI_MODEL_VISION"),
+    "MODEL_HTML":            (("api", "model_html"), None, "BILI_AI_MODEL_HTML"),
+    "VISION_API_KEY":        (("api", "vision_api_key"), None),  # 特殊：回退到 UNIFIED_API_KEY
+    "VISION_BASE_URL":       (("api", "vision_base_url"), None),  # 特殊：回退到 UNIFIED_BASE_URL
+    "COIN_THRESHOLD":        (("interaction", "coin_threshold"), 8.0),
+    "FAV_THRESHOLD":         (("interaction", "fav_threshold"), 8.5),
+    "INTEREST_THRESHOLD":    (("interaction", "interest_threshold"), 6.5),
+    "MAX_ENERGY":            (("interaction", "max_energy"), 100),
+    "COMMENT_MODE":          (("behavior", "comment_mode"), "real"),
+    "MAX_COINS_DAILY":       (("interaction", "max_coins_daily"), 2),
+    "COIN_COOLDOWN_MINUTES": (("interaction", "coin_cooldown_minutes"), 0),
+    "COIN_MAX_PER_HOUR":     (("interaction", "coin_max_per_hour"), 0),
+    "PROB_COIN":             (("interaction", "prob_coin"), 0.25),
+    "PROB_FAV":              (("interaction", "prob_fav"), 0.8),
+    "PROB_REPLY_TRIGGER":    (("interaction", "prob_reply_trigger"), 0.15),
+    "LEARN_MIN_SCORE":       (("interaction", "learn_min_score"), 6.0),
+    "LEARN_MIN_DURATION_SECONDS": (("interaction", "learn_min_duration_seconds"), 60),
+    "AI_MARKER":             (("behavior", "ai_marker"), "（内容由AI生成并由AI回复）"),
+    "COMMENT_CHECK_INTERVAL":(("interaction", "comment_check_interval"), 300),
+    "MAX_REPLIES_PER_CHECK": (("interaction", "max_replies_per_check"), 3),
+    "PROB_COMMENT_OTHERS":   (("interaction", "prob_comment_others"), 0.3),
+    "PRIVATE_MESSAGE_ENABLED": (("private_message", "enabled"), True),
+    "PRIVATE_MESSAGE_CHECK_INTERVAL": (("private_message", "check_interval"), 120),
+    "DIARY_ENABLED":         (("diary", "enabled"), True),
+    "DIARY_AUTO_ENABLED":    (("diary", "auto_enabled"), True),
+    "EVOLUTION_ENABLED":     (("self_evolution", "enabled"), True),
+    "AGENT_ENABLED":         (("agent", "enabled"), True),
+    "AGENT_DIVE_MAX_VIDEOS": (("agent", "dive_max_videos"), 10),
+    "AGENT_MAX_SEARCH_RESULTS":(("agent", "max_search_results"), 8),
+    "AGENT_MAX_STEPS_PER_PLAN":(("agent", "max_steps_per_plan"), 5),
+    "AGENT_MAX_VIDEOS_PER_PLAN":(("agent", "max_videos_per_plan"), 3),
+    "UP_FOLLOW_ENABLED":     (("up_follow", "enabled"), True),
+    "DANMAKU_ENABLED":       (("danmaku", "enabled"), True),
+    "FALLBACK_MODELS":       (("fallback_models",), {}),
+    "FALLBACK_PROVIDER_ENABLED": (("fallback_provider", "enabled"), False),
+    "FALLBACK_PROVIDER_NAME":(("fallback_provider", "name"), "chatanywhere"),
+    "PSYCHO_ENGINE_ENABLED": (("psycho_engine", "enabled"), True),
+    "SESSION_MAX_VIDEOS":    (("session", "max_videos"), 0),
+    "SESSION_MAX_DURATION_MINUTES": (("session", "max_duration_minutes"), 0),
+    "BEHAVIOR_COMMENT_USER_COOLDOWN_MINUTES": (("behavior", "comment_user_cooldown_minutes"), 60),
+    "BEHAVIOR_PRIVATE_REPLY_COOLDOWN_MINUTES": (("behavior", "private_reply_cooldown_minutes"), 3),
+}
+
+_SPECIAL_GETTERS = {}
+
+def _get_vision_api_key():
+    val = config.get("api", {}).get("vision_api_key")
+    if val:
+        return val
+    return get_config_or_env("api", "unified_api_key", "BILI_AI_API_KEY")
+
+def _get_vision_base_url():
+    val = config.get("api", {}).get("vision_base_url")
+    if val:
+        return val
+    return get_config_or_env("api", "unified_base_url", "BILI_AI_BASE_URL")
+
+def _get_fallback_models():
+    return config.get("fallback_models", {})
+
+_SPECIAL_GETTERS = {
+    "VISION_API_KEY": _get_vision_api_key,
+    "VISION_BASE_URL": _get_vision_base_url,
+    "FALLBACK_MODELS": _get_fallback_models,
+}
+
+# __all__ 让 from module import * 能够触发 __getattr__ 获取动态属性
+__all__ = (list(_CONFIG_PATHS.keys()) +
+           list(_SPECIAL_GETTERS.keys()) +
+           ["BASE_DIR", "DATA_DIR", "CONFIG_FILE", "BOT_LOCK_FILE",
+            "BACKUP_DIR", "BACKUP_FILE", "COOKIE_FILE", "INTERESTS_FILE",
+            "COMMENT_LOG_FILE", "PRIVATE_MESSAGE_LOG_FILE", "PRIVATE_CONTEXT_FILE",
+            "USER_PROFILES_FILE", "PERSONAS_FILE", "MOOD_STATE_FILE",
+            "BOT_DIARY_FILE", "SELF_EVOLUTION_FILE", "AGENT_SKILL_LOG_FILE",
+            "RUNTIME_STATE_FILE", "KNOWLEDGE_BASE_DIR", "HIGHLIGHTS_DIR",
+            "CIPHER_KEY_FILE", "DEFAULT_CONFIG", "config",
+            "load_config", "save_config", "get_bot_name",
+            "get_config_or_env", "mask_secret", "load_json_file",
+            "save_json_file", "log"])
+
+# 删除静态变量，让 __getattr__ 接管
+for _name in list(_CONFIG_PATHS.keys()):
+    try:
+        del sys.modules[__name__].__dict__[_name]
+    except (KeyError, AttributeError):
+        pass
+
+def __getattr__(name):
+    """Python 3.7+ 模块级动态属性：每次访问时实时从 config 读取。"""
+    getter = _SPECIAL_GETTERS.get(name)
+    if getter is not None:
+        return getter()
+    path_info = _CONFIG_PATHS.get(name)
+    if path_info is not None:
+        keys = path_info[0]
+        default = path_info[1]
+        env_var = path_info[2] if len(path_info) > 2 else None
+        if env_var is not None:
+            return get_config_or_env(keys[0], keys[1], env_var)
+        d = config
+        for k in keys:
+            if isinstance(d, dict):
+                d = d.get(k, default)
+            else:
+                return default
+        return d if d is not None else default
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
+
 
 
 # ===== 日志系统（供所有模块共用） =====

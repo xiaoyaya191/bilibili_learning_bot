@@ -17,6 +17,13 @@ import httpx
 from .llm import ModelClient
 from .settings import BotSettings, DATA_DIR
 
+# imageio-ffmpeg 回退检测
+try:
+    from utils.helpers import find_ffmpeg, find_ffprobe
+except ImportError:
+    find_ffmpeg = None
+    find_ffprobe = None
+
 
 CACHE_DIR = DATA_DIR / "video_cache"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
@@ -205,10 +212,17 @@ class VideoUnderstanding:
         wbi_keys = await self._get_wbi_keys(cookies=cookies)
         params = self._wbi_sign_params({"cid": asset.cid, "aid": asset.aid}, wbi_keys)
         async with httpx.AsyncClient(http2=True, headers=headers, cookies=cookies, timeout=20) as client:
-            resp = await client.get("https://api.bilibili.com/x/player/v2", params=params)
+            # [FIX] 使用 player/wbi/v2 避免旧接口返回过期缓存
+            resp = await client.get("https://api.bilibili.com/x/player/wbi/v2", params=params)
             resp.raise_for_status()
             data = resp.json()
             subs = data.get("data", {}).get("subtitle", {}).get("subtitles", [])
+            if not subs:
+                # fallback: player/v2
+                resp2 = await client.get("https://api.bilibili.com/x/player/v2", params=params)
+                resp2.raise_for_status()
+                data2 = resp2.json()
+                subs = data2.get("data", {}).get("subtitle", {}).get("subtitles", [])
             if not subs:
                 asset.subtitles = "[该视频没有可用 CC 字幕]"
                 return
@@ -222,8 +236,11 @@ class VideoUnderstanding:
                 return 50
             best_sub = min(subs, key=_sub_priority)
             sub_url = best_sub.get("subtitle_url", '')
+            # [FIX] player/wbi/v2 返回的 URL 可能为空但 subtitle_url_v2 有效
+            if not sub_url or sub_url in ('/', ''):
+                sub_url = best_sub.get("subtitle_url_v2", '')
             if not sub_url:
-                sub_url = next((s.get("subtitle_url") for s in subs if "zh" in s.get("lan", "")), subs[0].get("subtitle_url"))
+                sub_url = next((s.get("subtitle_url") or s.get("subtitle_url_v2", '') for s in subs if "zh" in s.get("lan", "")), subs[0].get("subtitle_url") or subs[0].get("subtitle_url_v2", ''))
             if not sub_url:
                 asset.subtitles = "[字幕地址为空]"
                 return
@@ -327,7 +344,7 @@ class VideoUnderstanding:
     # 🎞️ extract_frames — ffmpeg 抽帧（主方案）
     # ═══════════════════════════════════════════════════════════════
     def extract_frames(self, video_path: Path, frame_count: int) -> list[Path]:
-        ffmpeg = shutil.which("ffmpeg")
+        ffmpeg = (find_ffmpeg() if find_ffmpeg else None) or shutil.which("ffmpeg")
         out_dir = video_path.parent / "frames"
         out_dir.mkdir(exist_ok=True)
         for old in out_dir.glob("frame_*.jpg"):
@@ -388,7 +405,7 @@ class VideoUnderstanding:
     # ⏱️ probe_duration — ffprobe 获取时长
     # ═══════════════════════════════════════════════════════════════
     def probe_duration(self, video_path: Path) -> int:
-        ffprobe = shutil.which("ffprobe")
+        ffprobe = (find_ffprobe() if find_ffprobe else None) or shutil.which("ffprobe")
         if not ffprobe:
             return 0
         command = [

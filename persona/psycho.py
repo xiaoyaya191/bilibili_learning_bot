@@ -53,9 +53,13 @@ def _load_json(path, default=None):
 
 
 def _save_json(path, data):
+    """原子写入 JSON 文件（tmp+replace 防止断电损坏）"""
     try:
-        with open(path, "w", encoding="utf-8") as f:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + '.tmp'
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
         return True
     except Exception as e:
         print(f"[psycho] JSON保存失败 {path}: {e}")

@@ -55,7 +55,7 @@ class ModelClient:
             "Content-Type": "application/json",
         }
 
-        async with httpx.AsyncClient(timeout=90) as client:
+        async with httpx.AsyncClient(timeout=getattr(self, "_html_timeout", 300) if purpose=="html_gen" else 90) as client:
             resp = await client.post(url, headers=headers, json=payload)
         if resp.status_code >= 400:
             raise ModelError(f"模型请求失败：HTTP {resp.status_code} {resp.text[:300]}")
@@ -92,7 +92,7 @@ class ModelClient:
         url = self.settings.base_url.rstrip("/") + "/images/generations"
         headers = {"Authorization": f"Bearer {self.settings.api_key}", "Content-Type": "application/json"}
         payload = {"model": model, "prompt": prompt, "size": size, "n": 1}
-        async with httpx.AsyncClient(timeout=180) as client:
+        async with httpx.AsyncClient(timeout=getattr(self, "_html_timeout", 300) if purpose=="html_gen" else 90) as client:
             resp = await client.post(url, headers=headers, json=payload)
         if resp.status_code >= 400:
             raise ModelError(f"图片生成失败：HTTP {resp.status_code} {resp.text[:300]}")

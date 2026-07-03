@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# pyright: reportImplicitRelativeImport=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnknownArgumentType=false, reportUnknownParameterType=false, reportMissingParameterType=false, reportPrivateUsage=false, reportPrivateLocalImportUsage=false, reportUnusedCallResult=false, reportDeprecated=false, reportMissingTypeStubs=false, reportMissingImports=false, reportAny=false
 """
 bilibili_learning_bot · Web 管理面板 
 功能：仪表盘 | 机器人启停 | B站扫码登录 | 配置编辑 | 实时日志
      人格管理 | 评论日志 | 用户画像 | 记忆知识库 | 日记进化 | 操作日志
 """
-import os, sys, json, time, io, base64, threading, asyncio, subprocess, signal, queue, hashlib, uuid as _uuid_module
+import os, sys, json, time, io, base64, threading, asyncio, subprocess, signal, queue, hashlib, uuid as _uuid_module, collections
 from datetime import datetime
 from pathlib import Path
 
 # ── 线程安全 JSON 工具 ──
-from json_utils import JsonStore, sanitize_config_for_export, is_safe_path, get_backup_dir
+from utils.storage import JsonStore, sanitize_config_for_export, is_safe_path, get_backup_dir
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -66,7 +67,31 @@ COOKIE_FILE = DATA_DIR / "bilibili_cookies.json"
 ACCOUNT_NAME = os.getenv('BILI_ACCOUNT_NAME', '').strip() or '默认'
 
 app = Flask(__name__, static_folder=None)
-app.secret_key = os.urandom(24).hex()
+
+# ── 🔐 密码哈希（SHA-256 + salt，不引入额外依赖） ──
+def _hash_password(password: str) -> str:
+    """对密码做 salted hash，格式: $sha256$<salt>$<hash_hex>"""
+    salt = os.urandom(16).hex()
+    h = hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), 100_000)
+    return f'$sha256${salt}${h.hex()}'
+
+def _verify_password(password: str, stored: str) -> bool:
+    """验证密码是否匹配存储的哈希"""
+    if not stored or not stored.startswith('$sha256$'):
+        # 兼容旧版明文密码：直接比较
+        return password == stored
+    _, _, salt, hash_hex = stored.split('$', 3)
+    h = hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), 100_000)
+    return h.hex() == hash_hex
+
+# ── 🔑 Session 密钥持久化（避免重启后所有用户被踢出） ──
+SECRET_KEY_FILE = DATA_DIR / ".web_secret_key"
+if SECRET_KEY_FILE.exists():
+    app.secret_key = SECRET_KEY_FILE.read_text().strip()
+else:
+    app.secret_key = os.urandom(24).hex()
+    SECRET_KEY_FILE.write_text(app.secret_key)
+
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # ── 全局状态 ──
@@ -246,7 +271,7 @@ def start_bot_process():
     if bot_running:
         return False, "机器人已在运行"
 
-    agent_path = BASE_DIR / "new_agent.py"
+    agent_path = BASE_DIR / "main.py"
     if not agent_path.exists():
         return False, f"找不到 {agent_path}"
 
@@ -255,6 +280,8 @@ def start_bot_process():
         env = os.environ.copy()
         env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONUNBUFFERED"] = "1"
+        # 设置环境变量跳过子进程的免责声明交互
+        env["BILI_DISCLAIMER_SKIP"] = "1"
 
         bot_process = subprocess.Popen(
             [sys.executable, str(agent_path)],
@@ -270,6 +297,13 @@ def start_bot_process():
         )
         bot_running = True
         bot_start_time = datetime.now()
+
+        # 自动输入"1"启动机器人模式（子进程在 _disclaimer_confirm 跳过后会进入主菜单）
+        try:
+            bot_process.stdin.write("1\n")
+            bot_process.stdin.flush()
+        except (BrokenPipeError, OSError):
+            pass
 
         threading.Thread(target=_bot_reader, args=(bot_process.stdout, ""), daemon=True).start()
         log_line("✅ 机器人进程已启动")
@@ -332,141 +366,303 @@ _DEFAULT_HTML = r'''<!DOCTYPE html>
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
 <title>{{ACCOUNT_TITLE}}</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script>if(typeof Chart==='undefined'){document.write('<script src="https://cdn.bootcdn.net/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"><\/script>')}</script>
+<script>if(typeof Chart==='undefined'){document.write('<script src="https://unpkg.com/chart.js@4.4.0/dist/chart.umd.min.js"><\/script>')}</script>
 <style>
-:root{
---bg:#0a0e14;--bg2:#131a24;--bg3:#1c2535;--border:#263040;
---text:#dde4f0;--text2:#7888a0;--accent:#5b8def;--accent2:#36d7b7;
---green:#4caf7c;--orange:#f0a040;--red:#e05560;--pink:#e06090;--purple:#9b6dff;
---r:10px;--rs:6px;
+/* ===== 多主题系统 (inspired by xiongdaa-card) ===== */
+:root,[data-theme="aurora"]{
+--bg:#0b0f19;--bg2:rgba(17,24,39,.55);--bg3:rgba(30,41,59,.5);--bg4:rgba(40,53,72,.5);
+--border:rgba(42,58,80,.5);--border2:rgba(55,72,96,.6);
+--text:#e8f0ff;--text2:rgba(200,215,240,.75);--text3:rgba(100,120,150,.7);
+--accent:#6ee7b7;--accent2:#60a5fa;
+--accent-g:linear-gradient(135deg,#6ee7b7 0%,#60a5fa 100%);
+--green:#34d399;--green-g:linear-gradient(135deg,#34d399 0%,#06b6d4 100%);
+--orange:#fbbf24;--red:#f87171;--pink:#f472b6;--purple:#a78bfa;
+--glow:rgba(110,231,183,.25);--glow2:rgba(96,165,250,.2);
+--r:16px;--rs:10px;--rs2:14px;
+--shadow:0 4px 24px rgba(0,0,0,.35);--shadow-lg:0 12px 48px rgba(0,0,0,.5);
+--glass:rgba(15,20,40,.45);--glass-border:rgba(110,200,255,.12);
+--glass-blur:blur(24px) saturate(160%);
+--sidebar-bg:rgba(12,16,30,.65);--overlay:radial-gradient(ellipse at 30% 20%,rgba(110,231,183,.06) 0%,transparent 50%),radial-gradient(ellipse at 70% 80%,rgba(96,165,250,.05) 0%,transparent 50%);
+}
+[data-theme="cyberpunk"]{
+--bg:#0a0014;--bg2:rgba(20,0,40,.55);--bg3:rgba(40,10,60,.5);--bg4:rgba(60,20,80,.5);
+--border:rgba(255,0,128,.15);--border2:rgba(255,0,128,.25);
+--text:#fff0f5;--text2:rgba(255,200,220,.65);--text3:rgba(180,100,130,.6);
+--accent:#ff2d7b;--accent2:#00f0ff;
+--accent-g:linear-gradient(135deg,#ff2d7b 0%,#00f0ff 100%);
+--green:#00f0ff;--green-g:linear-gradient(135deg,#00f0ff 0%,#ff2d7b 100%);
+--glow:rgba(255,45,123,.3);--glow2:rgba(0,240,255,.2);
+--r:8px;--rs:6px;--rs2:10px;
+--shadow:0 4px 24px rgba(255,0,128,.15);--shadow-lg:0 12px 48px rgba(0,0,0,.5);
+--glass:rgba(10,0,25,.55);--glass-border:rgba(255,0,128,.2);
+--glass-blur:blur(20px) saturate(200%);
+--sidebar-bg:rgba(10,0,20,.7);--overlay:radial-gradient(ellipse at 50% 0%,rgba(255,0,128,.08) 0%,transparent 60%);
+}
+[data-theme="sakura"]{
+--bg:#1a0a10;--bg2:rgba(40,15,25,.55);--bg3:rgba(60,25,40,.5);--bg4:rgba(80,35,55,.5);
+--border:rgba(255,182,193,.18);--border2:rgba(255,182,193,.28);
+--text:#fff0f3;--text2:rgba(255,200,210,.7);--text3:rgba(200,120,140,.6);
+--accent:#ff9eb5;--accent2:#ffd1dc;
+--accent-g:linear-gradient(135deg,#ff9eb5 0%,#ffd1dc 100%);
+--green:#ffd1dc;--green-g:linear-gradient(135deg,#ffd1dc 0%,#ff9eb5 100%);
+--glow:rgba(255,158,181,.25);--glow2:rgba(255,209,220,.2);
+--r:20px;--rs:12px;--rs2:16px;
+--shadow:0 4px 24px rgba(200,100,130,.15);--shadow-lg:0 12px 48px rgba(0,0,0,.4);
+--glass:rgba(30,10,20,.5);--glass-border:rgba(255,182,193,.2);
+--glass-blur:blur(22px) saturate(140%);
+--sidebar-bg:rgba(25,8,15,.7);--overlay:radial-gradient(ellipse at 40% 30%,rgba(255,158,181,.06) 0%,transparent 50%);
+}
+[data-theme="galaxy"]{
+--bg:#050010;--bg2:rgba(15,5,40,.55);--bg3:rgba(25,15,60,.5);--bg4:rgba(40,25,80,.5);
+--border:rgba(147,130,255,.15);--border2:rgba(147,130,255,.25);
+--text:#e8e0ff;--text2:rgba(180,170,220,.7);--text3:rgba(130,120,180,.6);
+--accent:#b388ff;--accent2:#ff80ab;
+--accent-g:linear-gradient(135deg,#b388ff 0%,#ff80ab 100%);
+--green:#b388ff;--green-g:linear-gradient(135deg,#b388ff 0%,#ff80ab 100%);
+--glow:rgba(179,136,255,.25);--glow2:rgba(255,128,171,.2);
+--r:18px;--rs:10px;--rs2:14px;
+--shadow:0 4px 24px rgba(100,50,200,.15);--shadow-lg:0 12px 48px rgba(0,0,0,.5);
+--glass:rgba(10,5,30,.5);--glass-border:rgba(147,130,255,.15);
+--glass-blur:blur(28px) saturate(140%);
+--sidebar-bg:rgba(8,3,25,.7);--overlay:radial-gradient(ellipse at 60% 20%,rgba(179,136,255,.06) 0%,transparent 50%);
 }
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--text);display:flex;min-height:100vh}
-a{color:var(--accent)}
+html{scroll-behavior:smooth}
+body{font-family:'Noto Sans SC',system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--text);display:flex;min-height:100vh;line-height:1.5;-webkit-font-smoothing:antialiased;transition:background .6s cubic-bezier(.4,0,.2,1)}
 
-/* SIDEBAR */
-.sidebar{width:230px;min-width:230px;background:var(--bg2);border-right:1px solid var(--border);display:flex;flex-direction:column;position:fixed;top:0;left:0;bottom:0;z-index:100;transition:transform .25s}
+/* ── BACKGROUND LAYERS ── */
+.bg-layer{position:fixed;inset:0;z-index:0;overflow:hidden;pointer-events:none}
+.bg-layer img,.bg-layer video{width:100%;height:100%;object-fit:cover;opacity:.35;transition:opacity .8s}
+.bg-layer .bg-default{width:100%;height:100%;background:linear-gradient(135deg,#0a0e1a 0%,#0d1b2a 40%,#1b2838 100%);transition:opacity .6s}
+.overlay{position:fixed;inset:0;z-index:1;pointer-events:none;background:var(--overlay);transition:background .6s}
+#ambientCanvas{position:fixed;inset:0;z-index:2;pointer-events:none;opacity:.4}
+a{color:var(--accent);text-decoration:none;transition:color .2s}
+a:hover{color:var(--purple)}
+
+/* SCROLLBAR */
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--bg4);border-radius:4px}
+::-webkit-scrollbar-thumb:hover{background:var(--border2)}
+
+/* ── SIDEBAR ── */
+.sidebar{width:240px;min-width:240px;background:var(--sidebar-bg);backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);border-right:1px solid var(--glass-border);display:flex;flex-direction:column;position:fixed;top:0;left:0;bottom:0;z-index:100;transition:transform .3s cubic-bezier(.4,0,.2,1)}
 .sidebar.hide{transform:translateX(-100%)}
-.sb-hd{padding:16px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px}
-.sb-av{width:38px;height:38px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--purple));display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:700;color:#fff;flex-shrink:0}
-.sb-tt{font-size:15px;font-weight:700;line-height:1.2}
-.sb-sub{font-size:10px;color:var(--text2)}
-.sb-nav{flex:1;overflow-y:auto;padding:8px 6px}
-.ns{font-size:9px;color:var(--text2);text-transform:uppercase;letter-spacing:1.5px;padding:14px 10px 4px}
-.ni{display:flex;align-items:center;gap:8px;padding:9px 10px;border-radius:var(--rs);cursor:pointer;color:var(--text2);font-size:13px;border:none;background:none;width:100%;transition:all .15s}
-.ni:hover{background:var(--bg3);color:var(--text)}
-.ni.ac{background:var(--accent);color:#fff;font-weight:600}
-.ni .ic{font-size:16px;width:22px;text-align:center;flex-shrink:0}
-.ni .bd{margin-left:auto;background:var(--red);color:#fff;font-size:10px;padding:1px 6px;border-radius:10px;font-weight:600;display:none}
-.sb-ft{padding:10px;border-top:1px solid var(--border);font-size:10px;color:var(--text2);text-align:center}
+.sb-hd{padding:20px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px}
+.sb-av{width:40px;height:40px;border-radius:12px;background:var(--accent-g);display:flex;align-items:center;justify-content:center;font-size:20px;box-shadow:0 4px 15px rgba(108,159,255,.3)}
+.sb-tt{font-size:15px;font-weight:700;line-height:1.2;background:var(--accent-g);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.sb-sub{font-size:10px;color:var(--text3);margin-top:2px}
+.sb-nav{flex:1;overflow-y:auto;padding:10px 8px}
+.ns{font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1.5px;padding:16px 12px 6px;font-weight:600}
+.ni{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:var(--rs);cursor:pointer;color:var(--text2);font-size:13px;border:none;background:none;width:100%;transition:all .2s;position:relative;font-weight:500}
+.ni:hover{background:var(--bg3);color:var(--text);transform:translateX(3px)}
+.ni.ac{background:linear-gradient(135deg,rgba(108,159,255,.15),rgba(167,139,250,.1));color:var(--accent);font-weight:600;box-shadow:inset 3px 0 0 var(--accent)}
+.ni .ic{font-size:17px;width:24px;text-align:center;flex-shrink:0}
+.ni .bd{margin-left:auto;background:var(--red);color:#fff;font-size:9px;padding:2px 7px;border-radius:10px;font-weight:700;display:none;animation:badgePop .3s}
+.sb-ft{padding:12px;border-top:1px solid var(--border);font-size:10px;color:var(--text3);text-align:center;line-height:1.5}
+@keyframes badgePop{0%{transform:scale(0)}50%{transform:scale(1.2)}100%{transform:scale(1)}}
 
-/* MAIN */
-.main{margin-left:230px;flex:1;padding:24px 28px;max-width:calc(100vw - 230px);min-width:0}
+/* ── MAIN ── */
+.main{margin-left:240px;flex:1;padding:28px 32px;max-width:calc(100vw - 240px);min-width:0;position:relative;z-index:10;animation:fadeIn .3s ease}
+@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
 .page{display:none}
 .page.on{display:block}
-.ph{margin-bottom:20px}
-.ph h1{font-size:22px;font-weight:700}
-.ph p{color:var(--text2);font-size:12px;margin-top:2px}
+.ph{margin-bottom:24px}
+.ph h1{font-size:24px;font-weight:800;letter-spacing:-.3px}
+.ph p{color:var(--text2);font-size:12px;margin-top:4px}
 
-/* CARDS */
-.sr{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;margin-bottom:20px}
-.sc{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:16px;display:flex;align-items:center;gap:12px}
-.si{width:42px;height:42px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0}
-.si.bl{background:rgba(91,141,239,.15);color:var(--accent)}
-.si.gn{background:rgba(76,175,124,.15);color:var(--green)}
-.si.or{background:rgba(240,160,64,.15);color:var(--orange)}
-.si.pk{background:rgba(224,96,144,.15);color:var(--pink)}
-.sv{font-size:20px;font-weight:700}
-.sl{font-size:11px;color:var(--text2)}
+/* ── STAT CARDS ── */
+.sr{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:14px;margin-bottom:24px}
+.sc{background:var(--glass);backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);border:1px solid var(--glass-border);border-radius:var(--r);padding:18px;display:flex;align-items:center;gap:14px;transition:all .3s cubic-bezier(.4,0,.2,1);cursor:default;position:relative;overflow:hidden}
+.sc:hover{transform:translateY(-2px);box-shadow:var(--shadow-lg);border-color:var(--border2)}
+.si{width:44px;height:44px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0;transition:transform .2s}
+.sc:hover .si{transform:scale(1.1)}
+.si.bl{background:linear-gradient(135deg,rgba(108,159,255,.2),rgba(108,159,255,.05));color:var(--accent)}
+.si.gn{background:linear-gradient(135deg,rgba(52,211,153,.2),rgba(52,211,153,.05));color:var(--green)}
+.si.or{background:linear-gradient(135deg,rgba(251,191,36,.2),rgba(251,191,36,.05));color:var(--orange)}
+.si.pk{background:linear-gradient(135deg,rgba(244,114,182,.2),rgba(244,114,182,.05));color:var(--pink)}
+.si.rd{background:linear-gradient(135deg,rgba(248,113,113,.2),rgba(248,113,113,.05));color:var(--red)}
+.si.pp{background:linear-gradient(135deg,rgba(167,139,250,.2),rgba(167,139,250,.05));color:var(--purple)}
+.sv{font-size:22px;font-weight:800;letter-spacing:-.5px;line-height:1}
+.sl{font-size:11px;color:var(--text3);margin-top:2px;font-weight:500}
 
-.pc{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:18px;margin-bottom:16px}
-.pc h3{font-size:14px;margin-bottom:12px;display:flex;align-items:center;gap:8px}
-.dot{width:8px;height:8px;border-radius:50%;display:inline-block}
-.dot.on{background:var(--green)}
-.dot.off{background:var(--text2)}
+/* ── PANEL CARDS ── */
+.pc{background:var(--glass);backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);border:1px solid var(--glass-border);border-radius:var(--r);padding:20px;margin-bottom:16px;transition:all .3s cubic-bezier(.4,0,.2,1);position:relative;overflow:hidden}
+.pc:hover{border-color:var(--border2)}
+.pc h3{font-size:14px;margin-bottom:14px;display:flex;align-items:center;gap:8px;font-weight:700}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block;transition:background .3s}
+.dot.on{background:var(--green);box-shadow:0 0 8px rgba(52,211,153,.5)}
+.dot.off{background:var(--text3)}
 
-/* TABLE */
+/* ── TABLE ── */
 .tb{width:100%;border-collapse:collapse;font-size:12px}
-.tb th{text-align:left;padding:8px 10px;color:var(--text2);font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid var(--border)}
-.tb td{padding:8px 10px;border-bottom:1px solid rgba(38,48,64,.5);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.tb tr:hover td{background:rgba(91,141,239,.04)}
-.tb .mono{font-family:"SF Mono","Fira Code",monospace;font-size:11px}
+.tb th{text-align:left;padding:10px 12px;color:var(--text3);font-weight:700;font-size:10px;text-transform:uppercase;letter-spacing:.8px;border-bottom:2px solid var(--border);background:rgba(30,41,59,.5)}
+.tb td{padding:10px 12px;border-bottom:1px solid rgba(42,58,80,.3);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;transition:background .15s}
+.tb tr:hover td{background:rgba(108,159,255,.05)}
+.tb .mono{font-family:"SF Mono","Fira Code","JetBrains Mono",monospace;font-size:11px;color:var(--text2)}
 
-/* BUTTONS */
-.btn{display:inline-flex;align-items:center;gap:5px;padding:7px 14px;border-radius:var(--rs);font-size:12px;font-weight:600;cursor:pointer;border:none;transition:all .15s;white-space:nowrap}
-.btn-pr{background:var(--accent);color:#fff}
-.btn-pr:hover{opacity:.85}
-.btn-suc{background:var(--green);color:#fff}
-.btn-dan{background:var(--red);color:#fff}
-.btn-out{background:transparent;border:1px solid var(--border);color:var(--text)}
-.btn-out:hover{border-color:var(--accent);color:var(--accent)}
-.btn-sm{padding:4px 10px;font-size:11px}
-.btn-lg{padding:10px 20px;font-size:14px}
-.btn-grp{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
-.btn:disabled{opacity:.5;cursor:not-allowed}
+/* ── BUTTONS ── */
+.btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border-radius:var(--rs);font-size:12px;font-weight:600;cursor:pointer;border:none;transition:all .2s cubic-bezier(.4,0,.2,1);white-space:nowrap;position:relative;overflow:hidden}
+.btn::after{content:'';position:absolute;inset:0;background:rgba(255,255,255,0);transition:background .2s}
+.btn:hover::after{background:rgba(255,255,255,.1)}
+.btn:active{transform:scale(.97)}
+.btn-pr{background:var(--accent-g);color:#fff;box-shadow:0 2px 10px rgba(108,159,255,.3)}
+.btn-pr:hover{box-shadow:0 4px 20px rgba(108,159,255,.4);transform:translateY(-1px)}
+.btn-suc{background:var(--green-g);color:#fff;box-shadow:0 2px 10px rgba(52,211,153,.3)}
+.btn-suc:hover{box-shadow:0 4px 20px rgba(52,211,153,.4);transform:translateY(-1px)}
+.btn-dan{background:linear-gradient(135deg,#f87171,#e05560);color:#fff;box-shadow:0 2px 10px rgba(248,113,113,.3)}
+.btn-dan:hover{box-shadow:0 4px 20px rgba(248,113,113,.4);transform:translateY(-1px)}
+.btn-out{background:transparent;border:1px solid var(--border);color:var(--text2)}
+.btn-out:hover{border-color:var(--accent);color:var(--accent);background:rgba(108,159,255,.05)}
+.btn-sm{padding:5px 12px;font-size:11px;border-radius:6px}
+.btn-lg{padding:11px 24px;font-size:14px;border-radius:var(--rs2)}
+.btn-grp{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.btn:disabled{opacity:.4;cursor:not-allowed;transform:none!important;box-shadow:none!important}
 
-/* FORMS */
-.fg{margin-bottom:12px}
-.fg label{display:block;font-size:11px;font-weight:600;color:var(--text2);margin-bottom:3px;text-transform:uppercase;letter-spacing:.3px}
-.fg input,.fg textarea,.fg select{width:100%;padding:8px 10px;background:var(--bg3);border:1px solid var(--border);border-radius:var(--rs);color:var(--text);font-size:12px;font-family:inherit;outline:none}
-.fg input:focus,.fg textarea:focus,.fg select:focus{border-color:var(--accent)}
-.fg textarea{resize:vertical;min-height:70px;font-family:"SF Mono","Fira Code",monospace;font-size:11px}
-.fr{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+/* ── FORMS ── */
+.fg{margin-bottom:14px}
+.fg label{display:block;font-size:11px;font-weight:700;color:var(--text3);margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px}
+.fg input,.fg textarea,.fg select{width:100%;padding:9px 12px;background:var(--bg3);border:1px solid var(--border);border-radius:var(--rs);color:var(--text);font-size:13px;font-family:inherit;outline:none;transition:all .2s}
+.fg input:focus,.fg textarea:focus,.fg select:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(108,159,255,.15);background:var(--bg4)}
+.fg input:hover,.fg textarea:hover,.fg select:hover{border-color:var(--border2)}
+.fg textarea{resize:vertical;min-height:80px;font-family:"SF Mono","Fira Code","JetBrains Mono",monospace;font-size:12px;line-height:1.5}
+.fg select{cursor:pointer;appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238899b0' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 10px center}
+.fr{display:grid;grid-template-columns:1fr 1fr;gap:14px}
 @media(max-width:600px){.fr{grid-template-columns:1fr}}
 
-/* TAGS */
-.tg{display:inline-block;padding:2px 7px;border-radius:10px;font-size:10px;font-weight:600}
-.tg-suc{background:rgba(76,175,124,.15);color:var(--green)}
-.tg-war{background:rgba(240,160,64,.15);color:var(--orange)}
-.tg-dan{background:rgba(224,85,96,.15);color:var(--red)}
-.tg-inf{background:rgba(91,141,239,.15);color:var(--accent)}
+/* ── TOGGLE SWITCH ── */
+.toggle-sw{display:flex;align-items:center;gap:10px;cursor:pointer;user-select:none}
+.toggle-sw input{display:none}
+.toggle-track{width:40px;height:22px;background:var(--bg4);border-radius:11px;position:relative;transition:all .25s cubic-bezier(.4,0,.2,1);border:1px solid var(--border);flex-shrink:0}
+.toggle-track::after{content:'';position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:var(--text3);transition:all .25s cubic-bezier(.68,-.55,.265,1.55);box-shadow:0 1px 3px rgba(0,0,0,.3)}
+.toggle-sw input:checked+.toggle-track{background:linear-gradient(135deg,var(--accent),var(--accent2));border-color:transparent;box-shadow:0 0 16px rgba(108,159,255,.35)}
+.toggle-sw input:checked+.toggle-track::after{left:20px;background:#fff;transform:scale(1.1)}
+.toggle-sw .toggle-label{font-size:13px;color:var(--text2);font-weight:500}
 
-/* LOG VIEWER */
-.log-box{background:#060a10;border:1px solid var(--border);border-radius:var(--rs);padding:12px;max-height:350px;overflow-y:auto;font-family:"SF Mono","Fira Code",monospace;font-size:11px;line-height:1.55;white-space:pre-wrap;word-break:break-all;color:#b0c0d8}
+/* ── TAGS ── */
+.tg{display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:20px;font-size:10px;font-weight:700;letter-spacing:.3px}
+.tg-suc{background:rgba(52,211,153,.12);color:var(--green)}
+.tg-war{background:rgba(251,191,36,.12);color:var(--orange)}
+.tg-dan{background:rgba(248,113,113,.12);color:var(--red)}
+.tg-inf{background:rgba(108,159,255,.12);color:var(--accent)}
 
-/* JSON EDITOR */
-.je{width:100%;min-height:380px;background:var(--bg3);border:1px solid var(--border);border-radius:var(--rs);color:var(--text);font-family:"SF Mono","Fira Code",monospace;font-size:12px;padding:12px;resize:vertical;outline:none}
-.je:focus{border-color:var(--accent)}
+/* ── LOG VIEWER ── */
+.log-box{background:#060a12;border:1px solid var(--border);border-radius:var(--rs);padding:14px;max-height:360px;overflow-y:auto;font-family:"SF Mono","Fira Code","JetBrains Mono",monospace;font-size:11px;line-height:1.6;white-space:pre-wrap;word-break:break-all;color:#8fa8c8}
+.log-box::-webkit-scrollbar-thumb{background:#1a2535}
 
-/* QR */
-.qr-wrap{text-align:center;padding:20px}
-.qr-wrap img{max-width:220px;border-radius:8px;border:3px solid #fff;background:#fff}
-.qr-wrap .qr-status{margin-top:10px;font-size:13px;font-weight:600}
+/* ── JSON EDITOR ── */
+.je{width:100%;min-height:400px;background:#060a12;border:1px solid var(--border);border-radius:var(--rs);color:var(--green);font-family:"SF Mono","Fira Code","JetBrains Mono",monospace;font-size:12px;padding:14px;resize:vertical;outline:none;line-height:1.6;transition:border-color .2s}
+.je:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(108,159,255,.1)}
 
-/* TOAST */
-.toast{position:fixed;top:16px;right:16px;z-index:9999;padding:10px 16px;border-radius:var(--rs);font-size:12px;font-weight:600;opacity:0;transform:translateY(-16px);transition:all .25s;pointer-events:none;max-width:300px}
-.toast.show{opacity:1;transform:translateY(0)}
-.toast.ok{background:var(--green);color:#fff}
-.toast.err{background:var(--red);color:#fff}
-.toast.inf{background:var(--accent);color:#fff}
+/* ── CONFIG QUICK EDIT ── */
+.fs{border:1px solid var(--border);border-radius:var(--rs);padding:16px;margin-bottom:14px}
+.fs legend{font-size:14px;font-weight:700;padding:0 8px;color:var(--accent)}
 
-/* EMPTY */
-.emp{text-align:center;padding:30px;color:var(--text2)}
-.emp .ic{font-size:36px;margin-bottom:8px}
+/* ── QR ── */
+.qr-wrap{text-align:center;padding:24px}
+.qr-wrap img{max-width:220px;border-radius:12px;border:4px solid #fff;box-shadow:var(--shadow-lg)}
+.qr-wrap .qr-status{margin-top:12px;font-size:14px;font-weight:700}
 
-/* MOBILE */
-.mob-toggle{display:none;position:fixed;top:10px;left:10px;z-index:200;background:var(--bg2);border:1px solid var(--border);color:var(--text);width:38px;height:38px;border-radius:var(--rs);align-items:center;justify-content:center;cursor:pointer;font-size:18px}
-.mob-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:99}
+/* ── TOAST ── */
+.toast{position:fixed;top:20px;right:20px;z-index:9999;padding:12px 20px;border-radius:var(--rs2);font-size:13px;font-weight:600;opacity:0;transform:translateY(-16px) scale(.95);transition:all .3s cubic-bezier(.4,0,.2,1);pointer-events:none;max-width:320px;box-shadow:var(--shadow-lg);backdrop-filter:blur(12px)}
+.toast.show{opacity:1;transform:translateY(0) scale(1)}
+.toast.ok{background:rgba(52,211,153,.9);color:#fff}
+.toast.err{background:rgba(248,113,113,.9);color:#fff}
+.toast.inf{background:rgba(108,159,255,.9);color:#fff}
+
+/* ── EMPTY STATE ── */
+.emp{text-align:center;padding:40px 20px;color:var(--text3)}
+.emp .ic{font-size:40px;margin-bottom:10px;display:block}
+.emp p{font-size:13px}
+
+/* ── MOBILE ── */
+.mob-toggle{display:none;position:fixed;top:12px;left:12px;z-index:200;background:var(--glass);backdrop-filter:blur(12px);border:1px solid var(--glass-border);color:var(--text);width:40px;height:40px;border-radius:var(--rs);align-items:center;justify-content:center;cursor:pointer;font-size:18px;transition:all .2s}
+.mob-toggle:hover{background:var(--bg3)}
+.mob-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);backdrop-filter:blur(4px);z-index:99}
 @media(max-width:768px){
 .sidebar{transform:translateX(-100%)}
 .sidebar.show{transform:translateX(0)}
-.main{margin-left:0;max-width:100%;padding:14px 12px}
-.sr{grid-template-columns:repeat(2,1fr);gap:8px}
-.sc{padding:12px;gap:8px}
+.main{margin-left:0;max-width:100%;padding:16px 14px;padding-top:56px;padding-bottom:max(16px,env(safe-area-inset-bottom));position:relative;z-index:10}
+.sr{grid-template-columns:repeat(2,1fr);gap:10px}
+.sc{padding:14px;gap:10px;min-height:50px}
+.si{width:36px;height:36px;font-size:17px}
+.sv{font-size:17px}
 .mob-toggle{display:flex}
 .mob-overlay.show{display:block}
-.ph h1{font-size:19px}
+.ph h1{font-size:20px}
 .tb{font-size:11px}
-.tb td{max-width:140px}
-.log-box{max-height:250px}
-.je{min-height:250px}
+.tb td{max-width:120px;padding:7px 8px}
+.pc{padding:14px}
+.btn{padding:9px 18px;font-size:13px}
+.btn-sm{padding:6px 12px}
+.fg input,.fg textarea,.fg select{padding:10px 12px;font-size:13px}
+.ni{padding:12px 14px;font-size:14px}
+.log-box{max-height:220px;font-size:10px}
+.je{min-height:260px}
+.toast{left:14px;right:14px;max-width:none;top:auto;bottom:16px;transform:translateY(16px) scale(.95)}
+.toast.show{transform:translateY(0) scale(1)}
+}
+@media(max-width:400px){
+.sr{grid-template-columns:1fr}
+.sc{padding:12px}
+.main{padding:12px 10px;padding-top:56px;position:relative;z-index:10}
+.ph h1{font-size:18px}
 }
 
-/* PULSE */
+/* ── ANIMATIONS ── */
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
-.pulse{animation:pulse 1.5s infinite}
+.pulse{animation:pulse 1.5s ease-in-out infinite}
+@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+
+/* ── MONITOR GRID ── */
+.mon-grid{display:grid;grid-template-columns:320px 1fr;gap:20px;align-items:start}
+@media(max-width:768px){.mon-grid{grid-template-columns:1fr}}
+
+/* ── TOGGLE SWITCH ── */
+.toggle-sw{display:inline-flex;align-items:center;cursor:pointer;user-select:none;gap:6px}
+.toggle-sw input{display:none}
+.toggle-track{position:relative;width:40px;height:22px;border-radius:11px;background:var(--bg3);border:1px solid var(--glass-border);transition:all .3s ease;flex-shrink:0}
+.toggle-track::after{content:'';position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:var(--text3);transition:all .3s cubic-bezier(.68,-.55,.265,1.55)}
+.toggle-sw input:checked+.toggle-track{background:linear-gradient(135deg,var(--accent),var(--accent2));border-color:transparent;box-shadow:0 0 12px rgba(91,141,239,.4)}
+.toggle-sw input:checked+.toggle-track::after{left:20px;background:#fff;transform:scale(1.1)}
+
+/* ── PAGE ANIMATIONS ── */
+@keyframes slideUp{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}
+
+/* ── SCROLLBAR ── */
+::-webkit-scrollbar{width:6px;height:6px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--glass-border);border-radius:3px}
+::-webkit-scrollbar-thumb:hover{background:var(--text3)}
+.log-box::-webkit-scrollbar{width:4px}
+.log-box::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+
+/* ── SELECTION ── */
+::selection{background:rgba(91,141,239,.3);color:#fff}
+
+/* ── EXTRA REFINEMENTS ── */
+.ph h1{color:var(--accent)}
+.sc{transition:all .25s ease}
+.sc:hover{transform:translateY(-2px);box-shadow:0 8px 24px rgba(0,0,0,.3)}
+.pc{transition:border-color .3s ease,box-shadow .3s ease}
+.pc:hover{border-color:rgba(91,141,239,.2)}
+.log-box{background:rgba(6,10,16,.8);backdrop-filter:blur(4px)}
+
+/* ── CHART GRID ── */
+.chart-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px}
+.chart-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:18px;transition:all .2s;overflow:hidden;position:relative}
+.chart-card:hover{border-color:var(--accent);box-shadow:0 0 20px rgba(91,141,239,.08)}
+.chart-card h4{font-size:13px;margin:0 0 12px;color:var(--text);font-weight:500}
+.chart-card canvas{max-height:220px;width:100%!important;height:200px!important}
+@media(max-width:768px){.chart-grid{grid-template-columns:1fr;gap:12px}}
+@media(max-width:400px){.chart-card{padding:12px}.chart-card canvas{max-height:180px;height:160px!important}}
 </style>
 </head>
 <body>
+<div class="bg-layer" id="bgLayer"><div class="bg-default"></div></div>
+<div class="overlay" id="overlay"></div>
+<canvas id="ambientCanvas"></canvas>
 
 <button class="mob-toggle" onclick="toggleSidebar()">☰</button>
 <div class="mob-overlay" id="mobOverlay" onclick="toggleSidebar()"></div>
@@ -480,6 +676,7 @@ a{color:var(--accent)}
 <div class="ns">总览</div>
 <button class="ni ac" data-pg="dash" onclick="nav('dash',this)"><span class="ic">📊</span>仪表盘</button>
 <button class="ni" data-pg="ctrl" onclick="nav('ctrl',this)"><span class="ic">🎮</span>机器人控制<span class="bd" id="botBadge">●</span></button>
+<button class="ni" data-pg="monitor" onclick="nav('monitor',this)"><span class="ic">📡</span>实时监听<span class="bd" id="monitorBadge">●</span></button>
 <button class="ni" data-pg="login" onclick="nav('login',this)"><span class="ic">🔑</span>B站登录<span class="bd" id="loginBadge">●</span></button>
 <div class="ns">系统配置</div>
 <button class="ni" data-pg="conf" onclick="nav('conf',this)"><span class="ic">⚙️</span>配置编辑</button>
@@ -510,15 +707,73 @@ a{color:var(--accent)}
 <div class="page on" id="pg-dash">
 <div class="ph"><h1>📊 系统仪表盘</h1><p>实时监控 · 数据可视化 · 运行状态</p></div>
 <div class="sr" id="dashStats"></div>
-<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px">
-<div style="background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:18px"><h4 style="font-size:13px;margin-bottom:12px;color:var(--text)">📈 评论活跃度趋势</h4><canvas id="chartComments" style="max-height:220px"></canvas></div>
-<div style="background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:18px"><h4 style="font-size:13px;margin-bottom:12px;color:var(--text)">💡 心情/精力指数</h4><canvas id="chartMood" style="max-height:220px"></canvas></div>
-<div style="background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:18px"><h4 style="font-size:13px;margin-bottom:12px;color:var(--text)">📅 每日操作统计</h4><canvas id="chartActions" style="max-height:220px"></canvas></div>
-<div style="background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:18px"><h4 style="font-size:13px;margin-bottom:12px;color:var(--text)">🔍 视频处理速率</h4><canvas id="chartVideos" style="max-height:220px"></canvas></div>
+<div class="chart-grid">
+<div class="chart-card"><h4>📈 评论活跃度趋势</h4><canvas id="chartComments"></canvas></div>
+<div class="chart-card"><h4>💡 心情/精力指数</h4><canvas id="chartMood"></canvas></div>
+<div class="chart-card"><h4>📅 每日操作统计</h4><canvas id="chartActions"></canvas></div>
+<div class="chart-card"><h4>🔍 视频处理速率</h4><canvas id="chartVideos"></canvas></div>
 </div>
 <div class="pc"><h3><span class="dot" id="botDot"></span>系统详情</h3><div id="botDetail"></div></div>
-<div class="pc"><h3>📁 数据文件状态</h3><div id="fileGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;font-size:12px"></div></div>
-<div style="background:rgba(248,81,73,.08);border:1px solid rgba(248,81,73,.25);border-radius:var(--r);padding:10px 16px;margin-top:20px;font-size:11px;color:var(--red);text-align:center;line-height:1.6">⚠ 免责声明：本项目仅供学习参考，若因使用本项目产生的任何后果，本人一律概不负责。</div>
+<div class="pc"><h3>📁 数据文件状态</h3><div id="fileGrid" class="file-grid"></div></div>
+<div class="disclaimer">⚠ 免责声明：本项目仅供学习参考，若因使用本项目产生的任何后果，本人一律概不负责。</div>
+</div>
+
+<!-- MONITOR -->
+<div class="page" id="pg-monitor">
+<div class="ph"><h1>📡 实时监听</h1><p>不刷视频 · 专盯私信+评论 · 实时AI回复</p></div>
+
+<!-- 状态卡片 -->
+<div class="sr" id="monitorStats"></div>
+
+<!-- 控制栏 -->
+<div class="pc" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
+<div style="display:flex;align-items:center;gap:12px">
+<div id="monitorStatus"></div>
+<div id="monitorUptime" class="msg-inline"></div>
+</div>
+<div class="btn-grp" style="margin:0">
+<button class="btn btn-suc btn-lg" id="btnMonitorStart" onclick="startMonitor()">▶ 启动监听</button>
+<button class="btn btn-dan btn-lg" id="btnMonitorStop" style="display:none" onclick="stopMonitor()">⏹ 停止</button>
+<button class="btn btn-out" onclick="refreshMonitor()">🔄 刷新</button>
+</div>
+</div>
+
+<!-- 配置 + 日志 双栏 -->
+<div class="mon-grid">
+<!-- 左：配置 -->
+<div>
+<div class="pc">
+<h3>⚙️ 监听配置</h3>
+<div class="fg"><label>评论检查间隔 (秒)</label><input id="monCmtInterval" type="number" min="30" value="120"></div>
+<div class="fg"><label>私信检查间隔 (秒)</label><input id="monMsgInterval" type="number" min="10" value="60"></div>
+<div class="fg"><label>每次最大回复数</label><input id="monMaxReplies" type="number" min="1" max="20" value="5"></div>
+<div class="fg"><label>自动回复</label>
+<select id="monAutoReply"><option value="true">✅ 开启 — AI拟好直接发送</option><option value="false">📝 关闭 — 仅拟回复不发送</option></select>
+</div>
+<div style="display:flex;align-items:center;gap:10px;margin-top:14px">
+<button class="btn btn-pr" onclick="saveMonitorConfig()">💾 保存配置</button>
+<span id="monCfgMsg" class="msg-inline"></span>
+</div>
+</div>
+<div class="pc">
+<h3>💡 说明</h3>
+<p class="form-hint" style="line-height:1.7">
+独立于视频刷取的监听模式。<br>
+启动后只盯私信和评论，有新消息立刻AI回复。<br>
+不会刷视频、不消耗精力。<br>
+<span style="color:var(--orange)">⚠ 与机器人主进程互斥，不能同时运行。</span>
+</p>
+</div>
+</div>
+<!-- 右：日志 -->
+<div class="pc" style="min-height:420px;display:flex;flex-direction:column">
+<h3 style="display:flex;align-items:center;justify-content:space-between">
+<span>📡 实时日志</span>
+<span id="monitorLogCount" class="msg-inline" style="font-weight:400"></span>
+</h3>
+<div class="log-box" id="monitorLog" style="flex:1;min-height:340px">等待启动...</div>
+</div>
+</div>
 </div>
 
 <!-- CONTROL -->
@@ -534,7 +789,7 @@ a{color:var(--accent)}
 </div>
 </div>
 <div class="pc"><h3>📡 实时输出</h3><div class="log-box" id="botLog">等待输出...</div></div>
-<div style="background:rgba(248,81,73,.08);border:1px solid rgba(248,81,73,.25);border-radius:var(--r);padding:10px 16px;margin-top:16px;font-size:11px;color:var(--red);text-align:center;line-height:1.6">⚠ 免责声明：本项目仅供学习参考，若因使用本项目产生的任何后果，本人一律概不负责。</div>
+<div class="disclaimer">⚠ 免责声明：本项目仅供学习参考，若因使用本项目产生的任何后果，本人一律概不负责。</div>
 </div>
 
 <!-- LOGIN -->
@@ -558,7 +813,19 @@ a{color:var(--accent)}
 <!-- CONFIG -->
 <div class="page" id="pg-conf">
 <div class="ph"><h1>⚙️ 配置编辑</h1><p>Data/config.json</p></div>
-<div class="pc">
+<!-- 可视化快捷配置 -->
+<div class="pc" id="confQuickBox">
+<h3>📋 快捷配置 <span style="font-size:11px;font-weight:400;color:var(--text2);margin-left:10px">
+<button class="btn btn-sm btn-out" onclick="toggleConfMode()" style="font-size:10px;padding:2px 8px">📝 切换到 JSON 编辑器</button>
+</span></h3>
+<div id="confQuickContent"></div>
+<div class="btn-grp"><button class="btn btn-pr" onclick="saveConfQuick()">💾 保存快捷配置</button><span id="confQuickMsg" class="msg-inline"></span></div>
+</div>
+<!-- 原始 JSON 编辑器（默认隐藏） -->
+<div class="pc" id="confJsonBox" style="display:none">
+<h3>📄 原始 JSON <span style="font-size:11px;font-weight:400;color:var(--text2);margin-left:10px">
+<button class="btn btn-sm btn-out" onclick="toggleConfMode()" style="font-size:10px;padding:2px 8px">🔙 切换到快捷配置</button>
+</span></h3>
 <textarea class="je" id="confEd"></textarea>
 <div class="btn-grp"><button class="btn btn-pr" onclick="saveConf()">💾 保存</button><button class="btn btn-out" onclick="loadConf()">🔄 重新加载</button></div>
 </div>
@@ -625,16 +892,16 @@ a{color:var(--accent)}
 <div class="page" id="pg-behavior">
 <div class="ph"><h1>⚡ 行为设置</h1><p>AI免责声明 · 精力管理 · 评论模式</p></div>
 <div class="pc"><h3>🤖 AI免责声明</h3>
-<p style="font-size:11px;color:var(--text2);margin-bottom:10px">所有评论/私信回复末尾会追加免责声明标签。关闭后不再添加，但建议保持开启以遵守平台规定。</p>
+<p class="form-hint">所有评论/私信回复末尾会追加免责声明标签。关闭后不再添加，但建议保持开启以遵守平台规定。</p>
 <div class="fr" style="align-items:center;margin-bottom:8px">
 <label class="toggle-sw"><input type="checkbox" id="aiMarkerOn" onchange="toggleAiMarker()"><span class="toggle-track"></span><span style="margin-left:10px;font-size:13px">启用免责声明</span></label>
 </div>
 <div class="fg"><label>免责声明文字</label><input id="aiMarkerText" placeholder="（内容由AI生成并由AI回复）" maxlength="50" style="max-width:300px"></div>
-<div class="btn-grp"><button class="btn btn-pr" id="btnSaveMarker" onclick="saveAiMarker()">💾 保存</button><span id="aiMarkerMsg" style="font-size:11px;margin-left:8px"></span></div>
+<div class="btn-grp"><button class="btn btn-pr" id="btnSaveMarker" onclick="saveAiMarker()">💾 保存</button><span id="aiMarkerMsg" class="msg-inline"></span></div>
 </div>
 <div class="pc"><h3>⚡ 精力设置</h3>
-<p style="font-size:11px;color:var(--text2);margin-bottom:10px">控制AI机器人精力恢复速度和行为间隔。</p>
-<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+<p class="form-hint">控制AI机器人精力恢复速度和行为间隔。</p>
+<div class="energy-grid">
 <div class="fg"><label>最大精力值</label><input id="engMaxEnergy" type="number" min="50" max="500" style="max-width:100px"></div>
 <div class="fg"><label>每轮恢复(最小)</label><input id="engRecoverMin" type="number" min="1" max="50" style="max-width:100px"></div>
 <div class="fg"><label>每轮恢复(最大)</label><input id="engRecoverMax" type="number" min="1" max="50" style="max-width:100px"></div>
@@ -645,25 +912,24 @@ a{color:var(--accent)}
 <div class="fg"><label>视频间隔(秒,最小)</label><input id="engVideoIntMin" type="number" min="5" max="300" style="max-width:100px"></div>
 <div class="fg"><label>视频间隔(秒,最大)</label><input id="engVideoIntMax" type="number" min="5" max="300" style="max-width:100px"></div>
 </div>
-<div class="btn-grp"><button class="btn btn-pr" onclick="saveEnergy()">💾 保存精力设置</button><span id="engMsg" style="font-size:11px;margin-left:8px"></span></div>
+<div class="btn-grp"><button class="btn btn-pr" onclick="saveEnergy()">💾 保存精力设置</button><span id="engMsg" class="msg-inline"></span></div>
 </div>
 <div class="pc"><h3>💬 评论模式</h3>
-<div class="fr" style="align-items:center;gap:12px">
-<label style="cursor:pointer"><input type="radio" name="cmtMode" value="real" onchange="saveCommentMode()"> 真实模式 (发送到B站)</label>
-<label style="cursor:pointer"><input type="radio" name="cmtMode" value="simulate" onchange="saveCommentMode()"> 模拟模式 (仅记录日志)</label>
+<div class="radio-group">
+<label><input type="radio" name="cmtMode" value="real" onchange="saveCommentMode()"> 真实模式 (发送到B站)</label>
+<label><input type="radio" name="cmtMode" value="simulate" onchange="saveCommentMode()"> 模拟模式 (仅记录日志)</label>
 </div>
-<span id="cmtModeMsg" style="font-size:11px;margin-left:8px"></span>
-</div>
+<span id="cmtModeMsg" class="msg-inline"></span>
 </div>
 
 	<div class="pc"><h3>🛡️ 关键词安全校验</h3>
-	<p style="font-size:11px;color:var(--text2);margin-bottom:10px">开启后AI会过滤涉及敏感关键词的评论和回复。关闭后不再进行关键词检查（风险自负）。</p>
+	<p class="form-hint">开启后AI会过滤涉及敏感关键词的评论和回复。关闭后不再进行关键词检查（风险自负）。</p>
 	<div class="fr" style="align-items:center;margin-bottom:10px">
 	<label class="toggle-sw"><input type="checkbox" id="safetyEnabled" onchange="toggleSafety()"><span class="toggle-track"></span><span style="margin-left:10px;font-size:13px">启用关键词校验</span></label>
 	</div>
 	<div id="safetyKwSection" style="display:none">
-	<p style="font-size:11px;color:var(--text2);margin-bottom:6px">当前屏蔽关键词（一行一个）：</p>
-	<textarea id="safetyKeywords" style="width:100%;height:120px;background:var(--bg3);border:1px solid var(--border);border-radius:var(--rs);color:var(--text);font-size:12px;padding:8px;font-family:monospace;resize:vertical"></textarea>
+	<p class="form-hint" style="margin-bottom:6px">当前屏蔽关键词（一行一个）：</p>
+	<textarea id="safetyKeywords" class="kw-textarea"></textarea>
 	<div class="btn-grp" style="margin-top:8px">
 	<button class="btn btn-pr" onclick="saveSafetyKeywords()">💾 保存关键词</button>
 	<button class="btn btn-out btn-sm" onclick="addSafetyKeyword()">+ 添加关键词</button>
@@ -671,10 +937,10 @@ a{color:var(--accent)}
 	<div class="fg" style="margin-top:8px"><label>快速添加关键词</label>
 	<div style="display:flex;gap:6px"><input id="newSafetyKw" placeholder="输入新关键词" style="flex:1"><button class="btn btn-out btn-sm" onclick="addSafetyKeyword()">添加</button></div>
 	</div>
-	<span id="safetyMsg" style="font-size:11px"></span>
+	<span id="safetyMsg" class="msg-inline"></span>
 	</div>
 	</div>
-	</div>
+</div>
 
 <!-- UPFOLLOW -->
 <div class="page" id="pg-upfu">
@@ -705,26 +971,26 @@ a{color:var(--accent)}
 </div>
 <div id="kbStatBox" style="margin-top:12px;font-size:12px"></div>
 </div>
-</div>
 
 <div class="pc"><h3>🎙️ ASR 语音识别设置</h3>
-<p style="font-size:11px;color:var(--text2);margin-bottom:10px">语音识别引擎配置（FunASR / Whisper）。</p>
+<p class="form-hint">语音识别引擎配置（FunASR / Whisper）。</p>
 <div class="fr">
 <div class="fg"><label>启用ASR</label><select id="asrEnabled"><option value="1">开启</option><option value="0">关闭</option></select></div>
 <div class="fg"><label>识别引擎</label><select id="asrBackend"><option value="funasr">FunASR（推荐）</option><option value="whisper">Whisper</option></select></div>
 <div class="fg"><label>语言</label><input id="asrLang" placeholder="zh" style="max-width:80px"></div>
 <div class="fg"><label>说话人分离</label><select id="asrSep"><option value="1">开启</option><option value="0">关闭</option></select></div>
 </div>
-<div class="btn-grp"><button class="btn btn-pr" onclick="saveAsr()">💾 保存ASR设置</button><span id="asrMsg" style="font-size:11px;margin-left:8px"></span></div>
+<div class="btn-grp"><button class="btn btn-pr" onclick="saveAsr()">💾 保存ASR设置</button><span id="asrMsg" class="msg-inline"></span></div>
 </div>
 <div class="pc"><h3>⭐ Highlights 归档设置</h3>
-<p style="font-size:11px;color:var(--text2);margin-bottom:10px">高分视频自动备份到 highlights/ 目录。</p>
+<p class="form-hint">高分视频自动备份到 highlights/ 目录。</p>
 <div class="fr">
 <div class="fg"><label>启用归档</label><select id="dryEnabled"><option value="1">开启</option><option value="0">关闭</option></select></div>
 <div class="fg"><label>最低评分门槛</label><input id="dryMinScore" type="number" min="5" max="10" step="0.5" value="8.0" style="max-width:100px"></div>
 <div class="fg"><label>归档文件夹名</label><input id="dryFolder" placeholder="highlights" style="max-width:200px"></div>
 </div>
-<div class="btn-grp"><button class="btn btn-pr" onclick="saveDry()">💾 保存归档设置</button><span id="dryMsg" style="font-size:11px;margin-left:8px"></span></div>
+<div class="btn-grp"><button class="btn btn-pr" onclick="saveDry()">💾 保存归档设置</button><span id="dryMsg" class="msg-inline"></span></div>
+</div>
 </div>
 
 <!-- TUTOR (v2.0.3) -->
@@ -733,7 +999,7 @@ a{color:var(--accent)}
 
 <div class="pc"><h3>📂 选择知识文件</h3>
 <div style="display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap">
-<select id="tutorFileSelect" multiple size="8" style="flex:1;min-width:250px;max-width:550px;padding:6px 8px;background:var(--bg3);border:1px solid var(--border);border-radius:var(--rs);color:var(--text);font-size:12px">
+<select id="tutorFileSelect" multiple size="8" class="tutor-select">
 </select>
 <div style="display:flex;flex-direction:column;gap:5px">
 <button class="btn btn-pr btn-sm" onclick="tutorLoadFile()">📖 加载选中</button>
@@ -750,18 +1016,18 @@ a{color:var(--accent)}
 </div>
 
 <div class="pc" id="tutorContentBox" style="display:none">
-<h3>📄 文件内容预览 <span style="font-size:10px;color:var(--text2);cursor:pointer" onclick="var p=document.getElementById('tutorContentPre');p.style.display=p.style.display==='none'?'block':'none'">[展开/折叠]</span></h3>
-<pre id="tutorContentPre" style="background:var(--bg3);border:1px solid var(--border);border-radius:var(--rs);padding:12px;max-height:250px;overflow-y:auto;font-size:11px;color:var(--text2);white-space:pre-wrap;word-break:break-all;display:none"></pre>
+<h3>📄 文件内容预览 <span class="expand-toggle" onclick="var p=document.getElementById('tutorContentPre');p.style.display=p.style.display==='none'?'block':'none'">[展开/折叠]</span></h3>
+<pre id="tutorContentPre" class="preview-pre" style="display:none"></pre>
 </div>
 
 <div class="pc" id="tutorChatBox" style="display:none">
 <h3>💬 AI 辅导对话</h3>
-<div id="tutorChatLog" style="background:var(--bg3);border:1px solid var(--border);border-radius:var(--rs);padding:12px;max-height:350px;overflow-y:auto;font-size:12px;margin-bottom:10px;min-height:100px">
+<div id="tutorChatLog" class="chat-log">
 <div style="color:var(--text2);text-align:center;padding:20px">AI导师已就绪，开始提问吧！</div>
 </div>
-<div style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap">
-<textarea id="tutorInput" placeholder="输入你的问题..." style="flex:1;min-width:180px;background:var(--bg3);border:1px solid var(--border);border-radius:var(--rs);color:var(--text);font-size:12px;padding:8px;resize:none;height:50px;font-family:inherit" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();tutorSend('chat')}"></textarea>
-<div style="display:flex;flex-direction:column;gap:4px">
+<div class="tutor-input-wrap">
+<textarea id="tutorInput" class="tutor-textarea" placeholder="输入你的问题..." onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();tutorSend('chat')}"></textarea>
+<div class="tutor-btn-col">
 <button class="btn btn-pr btn-sm" onclick="tutorSend('chat')">📤 提问</button>
 <button class="btn btn-out btn-sm" onclick="tutorSend('rewrite')">✍️ 改写</button>
 <button class="btn btn-out btn-sm" onclick="tutorSend('html')">🎨 HTML</button>
@@ -769,12 +1035,12 @@ a{color:var(--accent)}
 </div>
 <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
 <span style="font-size:11px;color:var(--text2)">HTML风格:</span>
-<select id="tutorHtmlStyle" style="padding:4px 8px;background:var(--bg3);border:1px solid var(--border);border-radius:var(--rs);color:var(--text);font-size:11px">
+<select id="tutorHtmlStyle" class="tutor-select" style="padding:4px 8px;font-size:11px">
 <option value="dark">暗色科技风</option>
 <option value="light">清新白底风</option>
 <option value="modern">现代极简风</option>
 </select>
-<span id="tutorStatus" style="font-size:11px;color:var(--text2);margin-left:10px"></span>
+<span id="tutorStatus" class="msg-inline"></span>
 </div>
 </div>
 
@@ -789,18 +1055,52 @@ a{color:var(--accent)}
 
 <div class="page" id="pg-sys">
 <div class="ph"><h1>💾 系统管理</h1><p>备份 · 恢复 · 重置</p></div>
-<div class="pc"><h3>📤 导出配置</h3><p style="font-size:11px;color:var(--text2)">一键导出全部配置到 C:\bilibili_claw_backup</p>
+<div class="pc"><h3>📤 导出配置</h3><p class="form-hint" style="margin-bottom:10px">一键导出全部配置到 C:\bilibili_claw_backup</p>
 <button class="btn btn-pr" onclick="exportConfig()">📤 导出全部配置</button>
 <div id="exportMsg" style="margin-top:8px;font-size:12px"></div>
 </div>
-<div class="pc"><h3>📥 导入配置</h3><p style="font-size:11px;color:var(--text2)">从备份文件恢复</p>
+<div class="pc"><h3>📥 导入配置</h3><p class="form-hint" style="margin-bottom:10px">从备份文件恢复</p>
 <button class="btn btn-out" onclick="listBackups()">🔍 刷新备份列表</button>
 <div id="backupList" style="margin:10px 0;font-size:12px"></div>
 </div>
-<div class="pc" style="border-color:rgba(224,85,96,.3)">
+
+<!-- THEME & BACKGROUND SETTINGS -->
+<div class="pc" id="themeSettings">
+<h3>🎨 主题 & 背景设置</h3>
+<p class="form-hint">选择面板主题风格和自定义背景</p>
+<div class="fg"><label>主题风格</label>
+<select id="themeSelect" onchange="switchTheme(this.value)">
+<option value="aurora">🌌 极光 (默认)</option>
+<option value="cyberpunk">🤖 赛博朋克</option>
+<option value="sakura">🌸 樱花</option>
+<option value="galaxy">🌌 星空</option>
+</select>
+</div>
+<div class="fg"><label>背景图片 URL</label>
+<input id="bgImage" placeholder="https://example.com/bg.jpg 或留空使用默认渐变">
+<p class="form-hint" style="margin-top:4px;margin-bottom:0">支持 JPG/PNG/GIF，建议分辨率 1920×1080+</p>
+</div>
+<div class="fg"><label>背景视频 URL</label>
+<input id="bgVideo" placeholder="https://example.com/bg.mp4 (优先于图片)">
+<p class="form-hint" style="margin-top:4px;margin-bottom:0">支持 MP4/WebM，优先级高于背景图片</p>
+</div>
+<div class="fg"><label>背景透明度</label>
+<input id="bgOpacity" type="range" min="0" max="100" value="35" oninput="document.getElementById('bgOpacityVal').textContent=this.value+'%'">
+<span id="bgOpacityVal" style="font-size:11px;color:var(--text2);margin-left:8px">35%</span>
+</div>
+<div class="btn-grp">
+<button class="btn btn-pr" onclick="saveThemeSettings()">💾 保存设置</button>
+<button class="btn btn-out" onclick="resetThemeSettings()">🔄 恢复默认</button>
+<span id="themeMsg" class="msg-inline"></span>
+</div>
+</div>
+
+<div class="pc danger-zone">
 <h3 style="color:var(--red)">⚠ 恢复出厂设置</h3>
 <p style="font-size:11px;color:var(--text2)">清除所有配置、登录信息、数据文件。此操作不可逆！</p>
 <div class="fg"><label><input type="checkbox" id="resetKB"> 同时删除知识库目录</label></div>
+<div class="fg"><label><input type="checkbox" id="resetWeb"> 同时删除web/导出目录</label></div>
+<div class="fg"><label><input type="checkbox" id="resetBackup"> 同时删除导出备份目录</label></div>
 <button class="btn btn-dan" onclick="factoryReset()">🔥 恢复出厂设置</button>
 </div>
 </div>
@@ -809,7 +1109,7 @@ a{color:var(--accent)}
 <div class="page" id="pg-about">
 <div class="ph"><h1>ℹ️ 关于系统</h1><p>版本信息 · 技术栈 · 联系方式</p></div>
 <div class="pc" id="aboutBox"></div>
-<div style="background:rgba(248,81,73,.08);border:1px solid rgba(248,81,73,.25);border-radius:var(--r);padding:10px 16px;margin-top:16px;font-size:11px;color:var(--red);text-align:center;line-height:1.6">⚠ 免责声明：本项目仅供学习参考，若因使用本项目产生的任何后果，本人一律概不负责。</div>
+<div class="disclaimer">⚠ 免责声明：本项目仅供学习参考，若因使用本项目产生的任何后果，本人一律概不负责。</div>
 </div>
 
 </main>
@@ -843,6 +1143,7 @@ async function api(m,u,b){var o={method:m,headers:{'Content-Type':'application/j
 var _charts={};
 function _destroyC(k){if(_charts[k]){_charts[k].destroy();_charts[k]=null}}
 function _makeLine(canvasId,labels,datasets){
+if(typeof Chart==='undefined'){var el=document.getElementById(canvasId);if(el)el.parentElement.querySelector('h4').textContent+=' ⚠(CDN加载失败)';return}
 _destroyC(canvasId);
 var ctx=document.getElementById(canvasId);if(!ctx)return;
 _charts[canvasId]=new Chart(ctx,{
@@ -860,10 +1161,12 @@ var d=await api('GET','/api/info');
 var h='';
 h+='<div class="sc"><div class="si bl">🤖</div><div><div class="sv">'+(d.bot_running?'运行中':'已停止')+'</div><div class="sl">机器人状态</div></div></div>';
 h+='<div class="sc"><div class="si gn">🔑</div><div><div class="sv">'+(d.bili_logged_in?'已登录':'未登录')+'</div><div class="sl">B站认证</div></div></div>';
-h+='<div class="sc"><div class="si or">⚙️</div><div><div class="sv">'+(d.config_sections||0)+'</div><div class="sl">配置项</div></div></div>';
+h+='<div class="sc"><div class="si or">🛡</div><div><div class="sv">'+(d.safety_enabled?'已开启':'已关闭')+'</div><div class="sl">安全校验</div></div></div>';
 h+='<div class="sc"><div class="si pk">⏱</div><div><div class="sv" id="puptime">--</div><div class="sl">运行时长</div></div></div>';
 h+='<div class="sc"><div class="si pp">📦</div><div><div class="sv">'+(d.data_files||0)+'</div><div class="sl">数据文件</div></div></div>';
+h+='<div class="sc"><div class="si '+(d.comment_mode=='real'?'gn':'or')+'">💬</div><div><div class="sv">'+(d.comment_mode=='real'?'真实模式':'模拟模式')+'</div><div class="sl">评论模式</div></div></div>';
 h+='<div class="sc" id="asrDashCard"><div class="si '+(d.asr_enabled?'gn':'rd')+'">🎙️</div><div><div class="sv">'+(d.asr_enabled?'开启':'关闭')+'</div><div class="sl">ASR语音识别</div></div></div>';
+h+='<div class="sc"><div class="si '+(d.pm_enabled?'gn':'rd')+'">📩</div><div><div class="sv">'+(d.pm_enabled?'开启':'关闭')+'</div><div class="sl">私信功能</div></div></div>';
 document.getElementById('dashStats').innerHTML=h;
 document.getElementById('puptime').textContent=d.uptime;
 
@@ -878,6 +1181,12 @@ if(d.persona)bd+='<tr><td>当前人格</td><td>'+(d.persona.active||'-')+'</td>'
 else bd+='<tr><td>当前人格</td><td>-</td>';
 if(d.cost_total!=null)bd+='<td>累计费用</td><td>$'+Number(d.cost_total).toFixed(4)+'</td>';
 else bd+='<td>累计费用</td><td>-</td>';
+bd+='</tr>';
+bd+='<tr><td>评论模式</td><td><span class="tg '+(d.comment_mode=='real'?'tg-suc':'tg-war')+'">'+(d.comment_mode=='real'?'真实模式':'模拟模式')+'</span></td>';
+bd+='<td>安全校验</td><td><span class="tg '+(d.safety_enabled?'tg-suc':'tg-dan')+'">'+(d.safety_enabled?'● 已开启':'○ 已关闭')+'</span></td>';
+bd+='</tr>';
+bd+='<tr><td>AI模型</td><td>'+(d.model_brain||'-')+'</td>';
+bd+='<td>私信功能</td><td><span class="tg '+(d.pm_enabled?'tg-suc':'tg-war')+'">'+(d.pm_enabled?'开启':'关闭')+'</span></td>';
 bd+='</tr>';
 bd+='</table>';
 document.getElementById('botDetail').innerHTML=bd;
@@ -953,6 +1262,92 @@ logPoll=setInterval(tick,2000);
 }
 function stopPoll(){if(logPoll){clearInterval(logPoll);logPoll=null}}
 
+// ── MONITOR ──
+var monitorLogPoll=null;
+var monitorUserScrolledUp=false;
+function rf_monitor(){
+refreshMonitor();
+pollMonitorLog();
+var lb=document.getElementById('monitorLog');
+if(lb){
+lb.addEventListener('scroll',function(){
+var el=lb;
+var atBottom=el.scrollHeight - el.scrollTop - el.clientHeight < 30;
+monitorUserScrolledUp=!atBottom;
+});
+}
+}
+async function refreshMonitor(){
+try{
+var r=await api('GET','/api/monitor/status');
+document.getElementById('monitorStatus').innerHTML=r.running?'<span class="tg tg-suc pulse" style="font-size:13px;padding:5px 12px">● 监听中</span>':'<span class="tg tg-war" style="font-size:13px;padding:5px 12px">○ 已停止</span>';
+document.getElementById('monitorUptime').textContent=r.running&&r.uptime?'已运行 '+r.uptime:'';
+document.getElementById('btnMonitorStart').style.display=r.running?'none':'';
+document.getElementById('btnMonitorStop').style.display=r.running?'':'none';
+document.getElementById('monitorBadge').style.display=r.running?'':'none';
+document.getElementById('monitorBadge').style.background=r.running?'var(--green)':'';
+// 配置
+if(r.config){
+document.getElementById('monCmtInterval').value=r.config.comment_check_interval||120;
+document.getElementById('monMsgInterval').value=r.config.private_msg_check_interval||60;
+document.getElementById('monMaxReplies').value=r.config.max_replies_per_check||5;
+document.getElementById('monAutoReply').value=r.config.auto_reply!==false?'true':'false';
+}
+// 统计卡片
+var s=r.stats||{};
+var h='';
+h+='<div class="sc"><div class="si bl">💬</div><div><div class="sv">'+(s.comments_processed||0)+'</div><div class="sl">评论处理</div></div></div>';
+h+='<div class="sc"><div class="si gn">📩</div><div><div class="sv">'+(s.messages_processed||0)+'</div><div class="sl">私信处理</div></div></div>';
+h+='<div class="sc"><div class="si or">🔄</div><div><div class="sv">'+(s.total_replies||0)+'</div><div class="sl">总回复数</div></div></div>';
+h+='<div class="sc"><div class="si pk">⏱</div><div><div class="sv">'+(r.uptime||'-')+'</div><div class="sl">运行时长</div></div></div>';
+h+='<div class="sc"><div class="si '+(s.errors>0?'or':'gn')+'">⚡</div><div><div class="sv">'+(s.errors||0)+'</div><div class="sl">错误次数</div></div></div>';
+document.getElementById('monitorStats').innerHTML=h;
+// badges
+document.getElementById('botBadge').style.display=!r.running?'none':'';
+document.getElementById('loginBadge').style.display=r.running?'none':'';
+}catch(e){}
+}
+async function startMonitor(){
+var r=await api('POST','/api/monitor/start');
+toast(r.message,r.ok?'ok':'err');
+refreshMonitor();
+if(r.ok){monitorUserScrolledUp=false;pollMonitorLog()}
+}
+async function stopMonitor(){
+var r=await api('POST','/api/monitor/stop');
+toast(r.message,r.ok?'ok':'err');
+refreshMonitor();
+}
+async function saveMonitorConfig(){
+var cfg={
+comment_check_interval:parseInt(document.getElementById('monCmtInterval').value)||120,
+private_msg_check_interval:parseInt(document.getElementById('monMsgInterval').value)||60,
+max_replies_per_check:parseInt(document.getElementById('monMaxReplies').value)||5,
+auto_reply:document.getElementById('monAutoReply').value==='true'
+};
+var r=await api('POST','/api/monitor/config',cfg);
+document.getElementById('monCfgMsg').innerHTML=r.ok?'<span style="color:var(--green)">✓ 已保存</span>':'<span style="color:var(--red)">'+r.message+'</span>';
+toast(r.message,r.ok?'ok':'err');
+}
+async function pollMonitorLog(){
+if(monitorLogPoll)clearInterval(monitorLogPoll);
+var tick=async function(){
+try{
+var r=await api('GET','/api/monitor/output');
+var el=document.getElementById('monitorLog');
+var wasAtBottom=el&&(el.scrollHeight-el.scrollTop-el.clientHeight<30);
+if(el){
+el.textContent=r.output||'等待启动...';
+if(!monitorUserScrolledUp||wasAtBottom)el.scrollTop=el.scrollHeight;
+var lines=(r.output||'').split('\n').filter(function(l){return l.trim()});
+document.getElementById('monitorLogCount').textContent=lines.length+' 行';
+}
+}catch(e){}
+};
+tick();
+monitorLogPoll=setInterval(tick,2000);
+}
+
 // ── LOGIN ──
 var qrTimer=null;
 function rf_login(){
@@ -1009,9 +1404,133 @@ var r=await api('POST','/api/bili/logout');toast(r.message,r.ok?'ok':'err');chec
 }
 
 // ── CONFIG ──
+var _confMode='quick',_confData=null;
 function rf_conf(){loadConf()}
-async function loadConf(){try{var r=await api('GET','/api/config');document.getElementById('confEd').value=JSON.stringify(r,null,2)}catch(e){toast('加载失败','err')}}
-async function saveConf(){try{var v=JSON.parse(document.getElementById('confEd').value);var r=await api('POST','/api/config',v);toast(r.message,r.ok?'ok':'err')}catch(e){toast('JSON格式错误: '+e.message,'err')}}
+function toggleConfMode(){
+_confMode=_confMode==='quick'?'json':'quick';
+document.getElementById('confQuickBox').style.display=_confMode==='quick'?'':'none';
+document.getElementById('confJsonBox').style.display=_confMode==='json'?'':'none';
+if(_confMode==='json')loadConf();
+else loadConfQuick();
+}
+async function loadConf(){try{var r=await api('GET','/api/config');_confData=r;document.getElementById('confEd').value=JSON.stringify(r,null,2)}catch(e){toast('加载失败','err')}}
+async function saveConf(){try{var v=JSON.parse(document.getElementById('confEd').value);var r=await api('POST','/api/config',v);toast(r.message,r.ok?'ok':'err');_confData=v;if(_confMode=='quick')loadConfQuick()}catch(e){toast('JSON格式错误: '+e.message,'err')}}
+async function loadConfQuick(){
+if(!_confData){var r=await api('GET','/api/config');_confData=r}
+var c=_confData;
+var h='';
+// API
+h+='<fieldset class="fs"><legend>🔑 API 设置</legend>';
+h+='<div class="fg"><label>API Key</label><input id="cqApiKey" value="'+(c.api?c.api.unified_api_key||'':'')+'" placeholder="sk-..."></div>';
+h+='<div class="fg"><label>Base URL</label><input id="cqBaseUrl" value="'+(c.api?c.api.unified_base_url||'':'')+'" placeholder="https://api.openai.com/v1"></div>';
+h+='<div class="fg"><label>模型(对话)</label><input id="cqModelBrain" value="'+(c.api?c.api.model_brain||'':'')+'" placeholder="gpt-4o"></div>';
+h+='<div class="fg"><label>模型(视觉)</label><input id="cqModelVision" value="'+(c.api?c.api.model_vision||'':'')+'" placeholder="gpt-4o"></div>';
+h+='</fieldset>';
+// 交互
+h+='<fieldset class="fs"><legend>🤝 交互设置</legend>';
+h+='<div class="fg"><label>最大精力值</label><input id="cqMaxEnergy" type="number" value="'+((c.interaction?c.interaction.max_energy:0)||100)+'"></div>';
+h+='<div class="fg"><label>评论检查间隔(秒)</label><input id="cqCmtInterval" type="number" value="'+((c.interaction?c.interaction.comment_check_interval:0)||300)+'"></div>';
+h+='<div class="fg"><label>每次最大回复数</label><input id="cqMaxReplies" type="number" value="'+((c.interaction?c.interaction.max_replies_per_check:0)||3)+'"></div>';
+h+='</fieldset>';
+// 人格
+h+='<fieldset class="fs"><legend>🎭 人格设置</legend>';
+h+='<div class="fg"><label>活跃人格</label><input id="cqPersona" value="'+(c.persona?c.persona.active_persona||c.persona.prompt_name||'':'')+'" placeholder="默认人格"></div>';
+h+='<div class="fg"><label>提示词名称</label><input id="cqPromptName" value="'+(c.persona?c.persona.prompt_name||'':'')+'" placeholder="AI小助手"></div>';
+h+='</fieldset>';
+// 视频
+h+='<fieldset class="fs"><legend>🎬 视频设置</legend>';
+h+='<div class="fg"><label>视频模式</label><select id="cqVideoMode"><option value="smart"'+(c.video&&c.video.mode=='smart'?' selected':'')+'>智能</option><option value="random"'+(c.video&&c.video.mode=='random'?' selected':'')+'>随机</option><option value="hot"'+(c.video&&c.video.mode=='hot'?' selected':'')+'>热门</option></select></div>';
+h+='<div class="fg"><label>最大时长(秒)</label><input id="cqMaxDuration" type="number" value="'+((c.video?c.video.max_duration_seconds:0)||900)+'"></div>';
+h+='</fieldset>';
+// 行为
+h+='<fieldset class="fs"><legend>⚡ 行为设置</legend>';
+h+='<div class="fg"><label>评论模式</label><select id="cqCommentMode"><option value="real"'+(c.behavior&&c.behavior.comment_mode=='real'?' selected':'')+'>真实模式</option><option value="simulate"'+(c.behavior&&c.behavior.comment_mode=='simulate'?' selected':'')+'>模拟模式</option></select></div>';
+h+='<div class="fg"><label>AI免责声明</label><input id="cqAiMarker" value="'+(c.behavior?c.behavior.ai_marker||'':'')+'" placeholder="（内容由AI生成并由AI回复）"></div>';
+h+='</fieldset>';
+// 安全
+h+='<fieldset class="fs"><legend>🛡 安全设置</legend>';
+h+='<div class="fg"><label>安全校验</label><select id="cqSafety"><option value="1"'+(c.reply_safety&&c.reply_safety.enabled!==false?' selected':'')+'>启用</option><option value="0"'+(c.reply_safety&&c.reply_safety.enabled===false?' selected':'')+'>禁用</option></select></div>';
+h+='<div class="fg"><label>屏蔽关键词(逗号分隔)</label><textarea id="cqBlockedKw" style="width:100%;min-height:60px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:12px;padding:8px;font-family:inherit;resize:vertical">'+((c.reply_safety&&c.reply_safety.blocked_keywords?c.reply_safety.blocked_keywords.join(', '):''))+'</textarea></div>';
+h+='</fieldset>';
+// 私信
+h+='<fieldset class="fs"><legend>📩 私信设置</legend>';
+h+='<div class="fg"><label>私信功能</label><select id="cqPmEnabled"><option value="1"'+(c.private_message&&c.private_message.enabled!==false?' selected':'')+'>启用</option><option value="0"'+(c.private_message&&c.private_message.enabled===false?' selected':'')+'>禁用</option></select></div>';
+h+='<div class="fg"><label>自动回复</label><select id="cqPmAuto"><option value="1"'+(c.private_message&&c.private_message.auto_reply!==false?' selected':'')+'>启用</option><option value="0"'+(c.private_message&&c.private_message.auto_reply===false?' selected':'')+'>禁用</option></select></div>';
+h+='</fieldset>';
+// 日记 & 进化
+h+='<fieldset class="fs"><legend>📖 日记 & 进化</legend>';
+h+='<div class="fg"><label>日记</label><select id="cqDiary"><option value="1"'+(c.diary&&c.diary.enabled!==false?' selected':'')+'>启用</option><option value="0"'+(c.diary&&c.diary.enabled===false?' selected':'')+'>禁用</option></select></div>';
+h+='<div class="fg"><label>自我进化</label><select id="cqEvolution"><option value="1"'+(c.self_evolution&&c.self_evolution.enabled!==false?' selected':'')+'>启用</option><option value="0"'+(c.self_evolution&&c.self_evolution.enabled===false?' selected':'')+'>禁用</option></select></div>';
+h+='</fieldset>';
+// Agent
+h+='<fieldset class="fs"><legend>🤖 Agent 设置</legend>';
+h+='<div class="fg"><label>Agent</label><select id="cqAgent"><option value="1"'+(c.agent&&c.agent.enabled!==false?' selected':'')+'>启用</option><option value="0"'+(c.agent&&c.agent.enabled===false?' selected':'')+'>禁用</option></select></div>';
+h+='<div class="fg"><label>自动Agent</label><select id="cqAgentAuto"><option value="1"'+(c.agent&&c.agent.auto_enabled!==false?' selected':'')+'>启用</option><option value="0"'+(c.agent&&c.agent.auto_enabled===false?' selected':'')+'>禁用</option></select></div>';
+h+='</fieldset>';
+// 视觉/ASR
+h+='<fieldset class="fs"><legend>👁 视觉 & ASR</legend>';
+h+='<div class="fg"><label>ASR语音识别</label><select id="cqAsr"><option value="1"'+(c.asr&&c.asr.enabled?' selected':'')+'>启用</option><option value="0"'+(c.asr&&!c.asr||!c.asr.enabled?' selected':'')+'>禁用</option></select></div>';
+h+='<div class="fg"><label>视觉理解</label><select id="cqVision"><option value="1"'+(c.vision&&c.vision.cover_enabled!==false?' selected':'')+'>启用</option><option value="0"'+(c.vision&&c.vision.cover_enabled===false?' selected':'')+'>禁用</option></select></div>';
+h+='</fieldset>';
+document.getElementById('confQuickContent').innerHTML=h;
+}
+async function saveConfQuick(){
+try{
+if(!_confData)_confData=await api('GET','/api/config');
+var c=JSON.parse(JSON.stringify(_confData));
+// API
+c.api=c.api||{};
+c.api.unified_api_key=document.getElementById('cqApiKey').value.trim();
+c.api.unified_base_url=document.getElementById('cqBaseUrl').value.trim();
+c.api.model_brain=document.getElementById('cqModelBrain').value.trim();
+c.api.model_vision=document.getElementById('cqModelVision').value.trim();
+// Interaction
+c.interaction=c.interaction||{};
+c.interaction.max_energy=parseInt(document.getElementById('cqMaxEnergy').value)||100;
+c.interaction.comment_check_interval=parseInt(document.getElementById('cqCmtInterval').value)||300;
+c.interaction.max_replies_per_check=parseInt(document.getElementById('cqMaxReplies').value)||3;
+// Persona
+c.persona=c.persona||{};
+c.persona.active_persona=document.getElementById('cqPersona').value.trim()||'默认人格';
+c.persona.prompt_name=document.getElementById('cqPromptName').value.trim()||'AI小助手';
+// Video
+c.video=c.video||{};
+c.video.mode=document.getElementById('cqVideoMode').value;
+c.video.max_duration_seconds=parseInt(document.getElementById('cqMaxDuration').value)||900;
+// Behavior
+c.behavior=c.behavior||{};
+c.behavior.comment_mode=document.getElementById('cqCommentMode').value;
+c.behavior.ai_marker=document.getElementById('cqAiMarker').value.trim();
+// Safety
+c.reply_safety=c.reply_safety||{};
+c.reply_safety.enabled=document.getElementById('cqSafety').value==='1';
+var kwRaw=document.getElementById('cqBlockedKw').value;
+c.reply_safety.blocked_keywords=kwRaw.split(/[,，\n]/).map(function(s){return s.trim()}).filter(function(s){return s.length>0});
+// Private message
+c.private_message=c.private_message||{};
+c.private_message.enabled=document.getElementById('cqPmEnabled').value==='1';
+c.private_message.auto_reply=document.getElementById('cqPmAuto').value==='1';
+// Diary & evolution
+c.diary=c.diary||{};
+c.diary.enabled=document.getElementById('cqDiary').value==='1';
+c.self_evolution=c.self_evolution||{};
+c.self_evolution.enabled=document.getElementById('cqEvolution').value==='1';
+// Agent
+c.agent=c.agent||{};
+c.agent.enabled=document.getElementById('cqAgent').value==='1';
+c.agent.auto_enabled=document.getElementById('cqAgentAuto').value==='1';
+// ASR
+c.asr=c.asr||{};
+c.asr.enabled=document.getElementById('cqAsr').value==='1';
+// Vision
+c.vision=c.vision||{};
+c.vision.cover_enabled=document.getElementById('cqVision').value==='1';
+var r=await api('POST','/api/config',c);
+_confData=c;
+document.getElementById('confQuickMsg').innerHTML=r.ok?'<span style="color:var(--green)">✅ '+r.message+'</span>':'<span style="color:var(--red)">❌ '+r.message+'</span>';
+toast(r.message,r.ok?'ok':'err');
+}catch(e){toast('保存失败: '+e.message,'err')}
+}
 
 // ── PERSONA ──
 async function rf_psna(){
@@ -1019,10 +1538,16 @@ try{
 var r=await api('GET','/api/personas');var h='',items=r.items||{},act=r.active||'';
 for(var n in items){
 var p=items[n],isA=n===act;
-h+=`<div class="pc"><h3>${isA?'<span class="tg tg-suc">● 活跃</span> ':''}${n}</h3><div style="font-size:11px;color:var(--text2)">风格：${p.style||'-'} | 规则：${(p.rules||[]).length}条</div><div class="btn-grp">${isA?'':'<button class="btn btn-sm btn-pr" onclick="actPsna(\''+n+'\')">启用</button>'}<button class="btn btn-sm btn-out" onclick="delPsna(\''+n+'\')" ${Object.keys(items).length<2?'disabled':''}>删除</button></div></div>`;
+h+=`<div class="pc" data-persona="${esc(n)}"><h3>${isA?'<span class="tg tg-suc">● 活跃</span> ':''}${esc(n)}</h3><div style="font-size:11px;color:var(--text2)">风格：${esc(p.style||'-')} | 规则：${(p.rules||[]).length}条</div><div class="btn-grp">${isA?'':'<button class="btn btn-sm btn-pr" data-act-psna="${esc(n)}">启用</button>'}<button class="btn btn-sm btn-out" data-del-psna="${esc(n)}" ${Object.keys(items).length<2?'disabled':''}>删除</button></div></div>`;
 }
 h+=`<div class="pc"><h3>➕ 新建人设</h3><div class="fg"><label>名称</label><input id="npName" placeholder="如: 毒舌模式"></div><div class="fg"><label>系统Prompt</label><textarea id="npPrompt" placeholder="你是..."></textarea></div><div class="fg"><label>风格</label><input id="npStyle" placeholder="幽默、犀利"></div><button class="btn btn-pr" onclick="addPsna()">创建</button></div>`;
 document.getElementById('psnaList').innerHTML=h;
+// Event delegation for persona buttons
+document.getElementById('psnaList').onclick=function(e){
+var t=e.target;
+if(t.dataset.actPsna){actPsna(t.dataset.actPsna);return}
+if(t.dataset.delPsna){delPsna(t.dataset.delPsna);return}
+};
 }catch(e){}
 }
 async function addPsna(){
@@ -1108,28 +1633,32 @@ h+='</table>';document.getElementById('actTab').innerHTML=h;
 async function rf_about(){
 try{
 var d=await api('GET','/api/info');
-document.getElementById('aboutBox').innerHTML='<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">'+
-'<div style="background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:14px 16px"><div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">系统版本</div><div style="font-size:15px;color:var(--text);font-weight:500">v1.0</div></div>'+
-'<div style="background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:14px 16px"><div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">面板运行时长</div><div style="font-size:15px;color:var(--text);font-weight:500">'+d.uptime+'</div></div>'+
-'<div style="background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:14px 16px"><div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Python 版本</div><div style="font-size:15px;color:var(--text);font-weight:500">'+(d.python_version||'-')+'</div></div>'+
-'<div style="background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:14px 16px"><div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">运行平台</div><div style="font-size:15px;color:var(--text);font-weight:500">'+(d.platform||'-')+'</div></div>'+
-'<div style="background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:14px 16px"><div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">工作目录</div><div style="font-size:11px;color:var(--text);font-weight:500;font-family:monospace">'+(d.cwd||'-')+'</div></div>'+
-'<div style="background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:14px 16px"><div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">机器人状态</div><div style="font-size:15px;color:var(--text);font-weight:500">'+(d.bot_running?'● 运行中':'○ 已停止')+'</div></div>'+
+function aboutCard(label,value,mono){
+return '<div class="info-card"><div class="il">'+label+'</div><div class="iv'+(mono?' style=\"font-family:monospace;font-size:12px\'"':'')+'">'+value+'</div></div>';
+}
+document.getElementById('aboutBox').innerHTML='<div class="info-grid">'+
+aboutCard('系统版本','v1.0')+
+aboutCard('面板运行时长',d.uptime)+
+aboutCard('Python 版本',d.python_version||'-')+
+aboutCard('运行平台',d.platform||'-')+
+aboutCard('工作目录',d.cwd||'-',true)+
+aboutCard('机器人状态',d.bot_running?'● 运行中':'○ 已停止')+
 '</div>'+
-'<hr style="border-color:var(--border);margin:14px 0">'+
+'<div class="sec-divider"></div>'+
 '<p style="font-size:12px;color:var(--text2);line-height:2"><strong style="color:var(--text)">B站 AI 智能管理系统</strong><br>基于大语言模型 · 视频理解 · 评论互动 · 私信回复 · 知识沉淀 · 自我进化</p>'+
-'<div style="margin-top:14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span style="color:var(--text2);font-size:12px">作者联系方式：</span><span style="display:inline-flex;align-items:center;gap:6px;background:rgba(88,166,255,.08);padding:6px 14px;border-radius:6px;color:var(--accent);font-weight:600;font-size:14px;letter-spacing:.5px">🐧 QQ: 3781960338</span></div>';
+'<div style="margin-top:14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span style="color:var(--text2);font-size:12px">作者联系方式：</span><span style="display:inline-flex;align-items:center;gap:6px;background:rgba(88,166,255,.08);padding:6px 14px;border-radius:6px;color:var(--accent);font-weight:600;font-size:14px;letter-spacing:.5px">🐧 QQ: 3781960338</span><span style="display:inline-flex;align-items:center;gap:6px;background:rgba(88,166,255,.08);padding:6px 14px;border-radius:6px;color:var(--accent);font-weight:600;font-size:14px;letter-spacing:.5px">👥 交流群: 1056941856</span></div>';
 }catch(e){}
 }
 
 // ── UTIL ──
-function esc(s){return(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+function esc(s){return(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
 
 // ── AUTO REFRESH ──
 var autoTmr=null;
 function auto(){
 if(autoTmr)return;
 autoTmr=setInterval(async function(){
+if(document.hidden)return;
 var ap=document.querySelector('.page.on');if(!ap)return;
 var id=ap.id.replace('pg-','');if(window['rf_'+id])window['rf_'+id]();
 try{var d=await api('GET','/api/info');document.getElementById('uptime').textContent=d.uptime}catch(e){}
@@ -1158,7 +1687,7 @@ function moodToggleCustom(){document.getElementById("moodCustomText").disabled=!
 
 // ── BEHAVIOR ──
 var _aiMarkerConfirmed=false;
-function rf_behavior(){fetchBehavior()}
+function rf_behavior(){fetchBehavior();fetchSafety()}
 async function fetchBehavior(){
 try{
 var r=await api("GET","/api/behavior/get");
@@ -1174,8 +1703,8 @@ document.getElementById("engRoundsMin").value=e.rounds_min||3;
 document.getElementById("engRoundsMax").value=e.rounds_max||10;
 document.getElementById("engRoundIntMin").value=e.round_interval_min||60;
 document.getElementById("engRoundIntMax").value=e.round_interval_max||180;
-document.getElementById("engVideoIntMin").value=e.video_interval_min||20;
-document.getElementById("engVideoIntMax").value=e.video_interval_max||50;
+document.getElementById("engVideoIntMin").value=e.video_interval_min||1;
+document.getElementById("engVideoIntMax").value=e.video_interval_max||5;
 // comment mode
 var cm=r.comment_mode||"real";
 var radios=document.getElementsByName("cmtMode");
@@ -1212,8 +1741,8 @@ rounds_min:parseInt(document.getElementById("engRoundsMin").value)||3,
 rounds_max:parseInt(document.getElementById("engRoundsMax").value)||10,
 round_interval_min:parseInt(document.getElementById("engRoundIntMin").value)||60,
 round_interval_max:parseInt(document.getElementById("engRoundIntMax").value)||180,
-video_interval_min:parseInt(document.getElementById("engVideoIntMin").value)||20,
-video_interval_max:parseInt(document.getElementById("engVideoIntMax").value)||50
+video_interval_min:parseInt(document.getElementById("engVideoIntMin").value)||1,
+video_interval_max:parseInt(document.getElementById("engVideoIntMax").value)||5
 };
 var r=await api("POST","/api/behavior/save",{energy:b});
 document.getElementById("engMsg").textContent=r.message||"";
@@ -1234,8 +1763,7 @@ toast(r.message,r.ok?"ok":"err");
 	var r=await api("GET","/api/behavior/safety");
 	document.getElementById("safetyEnabled").checked=r.enabled||false;
 	var kws=r.keywords||[];
-	document.getElementById("safetyKeywords").value=kws.join("
-");
+	document.getElementById("safetyKeywords").value=kws.join("\n");
 	document.getElementById("safetyKwSection").style.display=r.enabled?"":"none";
 	_safetyLoaded=true;
 	}catch(e){}
@@ -1244,12 +1772,7 @@ toast(r.message,r.ok?"ok":"err");
 	if(!_safetyLoaded){await fetchSafety();}
 	var cb=document.getElementById("safetyEnabled");
 	if(!cb.checked){
-	if(!confirm("⚠ 确定要关闭关键词安全校验吗？
-
-关闭后AI将不再过滤任何评论和回复。
-这可能导致账号风险。
-
-你可以随时在设置中重新开启。")){
+	if(!confirm("⚠ 确定要关闭关键词安全校验吗？\n\n关闭后AI将不再过滤任何评论和回复。\n这可能导致账号风险。\n\n你可以随时在设置中重新开启。")){
 	cb.checked=true;
 	return;
 	}
@@ -1261,8 +1784,7 @@ toast(r.message,r.ok?"ok":"err");
 	}
 	async function saveSafetyKeywords(){
 	var txt=document.getElementById("safetyKeywords").value.trim();
-	var kws=txt.split(/[
-,]/).map(function(s){return s.trim()}).filter(function(s){return s.length>0});
+	var kws=txt.split(/[\n,]/).map(function(s){return s.trim()}).filter(function(s){return s.length>0});
 	var r=await api("POST","/api/behavior/safety/save",{keywords:kws});
 	document.getElementById("safetyMsg").textContent=r.message||"";
 	toast(r.message,r.ok?"ok":"err");
@@ -1272,12 +1794,10 @@ toast(r.message,r.ok?"ok":"err");
 	var kw=inp.value.trim();
 	if(!kw){toast("请输入关键词","err");return}
 	var ta=document.getElementById("safetyKeywords");
-	var kws=ta.value.split("
-").map(function(s){return s.trim()}).filter(function(s){return s.length>0});
+	var kws=ta.value.split("\n").map(function(s){return s.trim()}).filter(function(s){return s.length>0});
 	if(kws.indexOf(kw)>=0){toast("关键词已存在","err");inp.value="";return}
 	kws.push(kw);
-	ta.value=kws.join("
-");
+	ta.value=kws.join("\n");
 	inp.value="";
 	await saveSafetyKeywords();
 	}
@@ -1362,8 +1882,12 @@ if(!req.ok){toast(req.message,"err");return}
 var token=prompt("⚠ 最后确认：输入确认令牌以执行\n\n令牌: "+req.token+"\n（直接复制粘贴上面的令牌）");
 if(!token||token!==req.token){toast("令牌不匹配，已取消","err");return}
 var delKB=document.getElementById("resetKB").checked;
+var delWeb=document.getElementById("resetWeb").checked;
+var delBackup=document.getElementById("resetBackup").checked;
 if(delKB&&!confirm("同时删除知识库目录？此操作不可逆！"))return;
-var r=await api("POST","/api/factory-reset",{delete_kb:delKB,confirm_token:token});toast(r.message,r.ok?"ok":"err");if(r.ok){rf_dash();listBackups()}}
+if(delWeb&&!confirm("同时删除web/导出目录？此操作不可逆！"))return;
+if(delBackup&&!confirm("同时删除导出备份目录？此操作不可逆！"))return;
+var r=await api("POST","/api/factory-reset",{delete_kb:delKB,delete_web:delWeb,delete_backup:delBackup,confirm_token:token});toast(r.message,r.ok?"ok":"err");if(r.ok){rf_dash();listBackups()}}
 
 // ── TUTOR (v2.0.3) ──
 var _tutorHistory=[],_tutorRelPaths=[];
@@ -1423,7 +1947,7 @@ if(mode=="html")msg=msg||"请生成知识讲解网页。";
 
 var log=document.getElementById("tutorChatLog");
 if(mode=="chat"){
-log.innerHTML+='<div style="margin-bottom:8px"><span style="color:var(--accent);font-weight:600">💬 你:</span> '+esc(msg)+'</div>';
+log.innerHTML+='<div class="chat-bubble user"><span style="color:var(--accent);font-weight:600">💬 你:</span> '+esc(msg)+'</div>';
 inp.value="";
 }
 var stat=document.getElementById("tutorStatus");
@@ -1435,19 +1959,18 @@ rel_paths:_tutorRelPaths, message:msg,
 history:_tutorHistory, mode:mode,
 style:document.getElementById("tutorHtmlStyle").value
 });
-if(!r.ok){stat.textContent="";toast(r.message,"err");log.innerHTML+='<div style="color:var(--red);margin-bottom:8px">❌ '+esc(r.message)+'</div>';return}
+if(!r.ok){stat.textContent="";toast(r.message,"err");log.innerHTML+='<div class="chat-bubble" style="color:var(--red);border-left-color:var(--red)">❌ '+esc(r.message)+'</div>';return}
 stat.textContent="";
 
 if(mode=="chat"){
 _tutorHistory.push({role:"user",content:msg},{role:"assistant",content:r.reply});
 if(_tutorHistory.length>20)_tutorHistory=_tutorHistory.slice(-20);
-log.innerHTML+='<div style="margin-bottom:10px;background:var(--bg3);border-left:3px solid var(--accent);padding:8px 12px;border-radius:4px"><span style="color:var(--accent2);font-weight:600">🎓 导师:</span> '+r.reply.replace(/
-/g,"<br>")+'</div>';
+log.innerHTML+='<div class="chat-bubble ai"><span style="color:var(--accent2);font-weight:600">🎓 导师:</span> '+esc(r.reply).replace(/\n/g,"<br>")+'</div>';
 log.scrollTop=log.scrollHeight;
 }else if(mode=="rewrite"){
 var rb=document.getElementById("tutorResultBox");
 var rc=document.getElementById("tutorResultContent");
-rc.innerHTML='<div style="background:rgba(76,175,124,.08);border:1px solid rgba(76,175,124,.25);border-radius:6px;padding:10px;margin-bottom:10px"><strong>修改说明:</strong> '+esc(r.summary)+'</div><pre style="background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:10px;max-height:300px;overflow:auto;font-size:11px;white-space:pre-wrap">'+esc(r.new_content||"")+'</pre>';
+rc.innerHTML='<div style="background:rgba(76,175,124,.08);border:1px solid rgba(76,175,124,.25);border-radius:6px;padding:10px;margin-bottom:10px"><strong>修改说明:</strong> '+esc(r.summary)+'</div><pre class="preview-pre" style="max-height:300px">'+esc(r.new_content||"")+'</pre>';
 rb.style.display="";
 var ra=document.getElementById("tutorResultActions");
 ra.style.display="";
@@ -1488,7 +2011,72 @@ if(w){w.document.write(window._tutorHtmlContent);w.document.close()}
 else{toast("请允许弹窗以预览HTML","err")}
 }
 
+// ── THEME SYSTEM ──
+function switchTheme(t){
+document.body.classList.add('theme-transition');
+document.documentElement.setAttribute('data-theme',t);
+localStorage.setItem('xiongda_theme',t);
+setTimeout(()=>document.body.classList.remove('theme-transition'),600);
+}
+function applyTheme(){
+var t;try{t=localStorage.getItem('xiongda_theme')}catch(e){t='aurora'};t=t||'aurora';
+document.documentElement.setAttribute('data-theme',t);
+var sel=document.getElementById('themeSelect');
+if(sel)sel.value=t;
+}
+function applyBg(){
+var cfg;try{cfg=JSON.parse(localStorage.getItem('xiongda_bg')||'{}')}catch(e){cfg={}};
+var layer=document.getElementById('bgLayer');
+if(!layer)return;
+layer.innerHTML='';
+var hasVideo=cfg.video&&cfg.video.trim();
+var hasImage=cfg.image&&cfg.image.trim();
+var opacity=(cfg.opacity!=null?cfg.opacity:35)/100;
+if(hasVideo){
+var v=document.createElement('video');
+v.src=cfg.video;v.autoplay=true;v.loop=true;v.muted=true;v.playsInline=true;
+v.style.cssText='width:100%;height:100%;object-fit:cover;opacity:'+opacity;
+v.onerror=function(){layer.innerHTML='<div class="bg-default"></div>';};
+layer.appendChild(v);
+}else if(hasImage){
+var img=document.createElement('img');
+img.src=cfg.image;img.alt='';
+img.style.cssText='width:100%;height:100%;object-fit:cover;opacity:'+opacity;
+img.onerror=function(){layer.innerHTML='<div class="bg-default"></div>';};
+layer.appendChild(img);
+}else{
+layer.innerHTML='<div class="bg-default"></div>';
+}
+var opEl=document.getElementById('bgOpacity');
+var opVal=document.getElementById('bgOpacityVal');
+if(opEl)opEl.value=(cfg.opacity!=null?cfg.opacity:35);
+if(opVal)opVal.textContent=(cfg.opacity!=null?cfg.opacity:35)+'%';
+}
+function saveThemeSettings(){
+var cfg={
+image:document.getElementById('bgImage').value.trim(),
+video:document.getElementById('bgVideo').value.trim(),
+opacity:parseInt(document.getElementById('bgOpacity').value)||35
+};
+localStorage.setItem('xiongda_bg',JSON.stringify(cfg));
+applyTheme();applyBg();
+var msg=document.getElementById('themeMsg');
+if(msg){msg.textContent='✅ 已保存';msg.style.color='var(--green)';setTimeout(()=>msg.textContent='',2000);}
+}
+function resetThemeSettings(){
+localStorage.removeItem('xiongda_bg');
+document.getElementById('bgImage').value='';
+document.getElementById('bgVideo').value='';
+document.getElementById('bgOpacity').value=35;
+document.getElementById('bgOpacityVal').textContent='35%';
+switchTheme('aurora');
+applyBg();
+var msg=document.getElementById('themeMsg');
+if(msg){msg.textContent='✅ 已恢复默认';msg.style.color='var(--green)';setTimeout(()=>msg.textContent='',2000);}
+}
+
 // ── INIT ──
+applyTheme();applyBg();
 rf_dash();auto();
 (async function(){try{var d=await api('GET','/api/info');document.getElementById('uptime').textContent=d.uptime}catch(e){}})();
 </script>
@@ -1502,12 +2090,36 @@ rf_dash();auto();
 def index():
     return _load_html()
 
+@app.route('/ppt')
+def ppt_panel():
+    """PPT生成面板页面"""
+    ppt_html = BASE_DIR / "ppt_panel.html"
+    if ppt_html.exists():
+        return ppt_html.read_text(encoding='utf-8')
+    return "<h1>PPT面板文件不存在</h1>", 404
+
+def _has_valid_bili_cookies():
+    """检查 bili cookie 文件是否存在且包含有效字段（DedeUserID + bili_jct）"""
+    if not COOKIE_FILE.exists():
+        return False
+    try:
+        c = read_json(COOKIE_FILE)
+        return bool(c and c.get('DedeUserID') and c.get('bili_jct'))
+    except Exception:
+        return False
+
 # ── 信息 ──
 @app.route('/api/info')
 def api_info():
     config = read_json(CONFIG_FILE)
     mood = read_json(DATA_DIR / "mood_state.json") or read_json(DATA_DIR / "web_mood.json")
     persona = read_json(DATA_DIR / "web_personas.json") or read_json(DATA_DIR / "personas.json")
+    # fallback: 从 config.json 的 persona 段获取活跃人格
+    if not persona or not persona.get('active'):
+        cfg_persona = config.get('persona', {})
+        active_name = cfg_persona.get('active_persona', '') or cfg_persona.get('prompt_name', '')
+        if active_name:
+            persona = dict(active=active_name, items={active_name: dict(name=active_name)})
     costs = read_json(DATA_DIR / "web_costs.json")
     api_key = config.get('api', {}).get('unified_api_key', '') or os.getenv('BILI_AI_API_KEY', '')
     bili_token = os.getenv('BILI_REFRESH_TOKEN', '') or config.get('bilibili', {}).get('refresh_token', '')
@@ -1522,12 +2134,27 @@ def api_info():
     us = f"{upt.days}d{upt.seconds//3600}h{(upt.seconds%3600)//60}m" if upt.days>0 else f"{upt.seconds//3600}h{(upt.seconds%3600)//60}m{upt.seconds%60}s"
 
     comment_mode = config.get('behavior', {}).get('comment_mode', 'real')
+    ai_marker = config.get('behavior', {}).get('ai_marker', '')
+    safety_enabled = config.get('reply_safety', {}).get('enabled', False)
+    diary_enabled = config.get('diary', {}).get('enabled', False)
+    evolution_enabled = config.get('self_evolution', {}).get('enabled', False)
+    agent_enabled = config.get('agent', {}).get('enabled', False)
+    pm_enabled = config.get('private_message', {}).get('enabled', False)
+    notification_mode = config.get('standby', {}).get('notification_mode', True) if config.get('standby') else True
+    model_brain = config.get('api', {}).get('model_brain', '') or config.get('api', {}).get('model', '')
+    # 尝试读取待机状态
+    standby_running_info = standby_running
+    try:
+        from brain.standby import load_stats
+        standby_stats = load_stats()
+    except Exception:
+        standby_stats = {}
     return jsonify(dict(
         bot_running=bot_running,
         bot_start_time=bot_start_time.strftime('%Y-%m-%d %H:%M:%S') if bot_start_time else None,
         uptime=us,
         api_configured=bool(api_key),
-        bili_logged_in=bool(bili_token) or COOKIE_FILE.exists(),
+        bili_logged_in=bool(bili_token) or _has_valid_bili_cookies(),
         config_sections=len(config),
         data_files=sum(1 for f in files.values() if f['exists']),
         mood=dict(mood=mood.get('mood','?'), energy=mood.get('energy','?')) if mood else None,
@@ -1535,6 +2162,16 @@ def api_info():
         cost_total=costs.get('total',0) if costs else 0,
         files=files,
         comment_mode=comment_mode,
+        ai_marker=ai_marker,
+        safety_enabled=safety_enabled,
+        diary_enabled=diary_enabled,
+        evolution_enabled=evolution_enabled,
+        agent_enabled=agent_enabled,
+        pm_enabled=pm_enabled,
+        notification_mode=notification_mode,
+        standby_running=standby_running_info,
+        standby_stats=standby_stats,
+        model_brain=model_brain,
         python_version=sys.version.split()[0],
         platform=sys.platform,
         cwd=str(BASE_DIR),
@@ -1553,6 +2190,40 @@ def api_config():
         return jsonify(dict(ok=ok, message='配置已保存' if ok else '保存失败'))
     except Exception as e:
         return jsonify(dict(ok=False, message=str(e))), 400
+
+# ── 模型列表 ──
+@app.route('/api/models/list')
+def api_models_list():
+    """从配置的 API 端点获取可用模型列表"""
+    config = read_json(CONFIG_FILE)
+    api_key = config.get('api', {}).get('unified_api_key', '') or os.getenv('BILI_AI_API_KEY', '')
+    base_url = config.get('api', {}).get('unified_base_url', '') or os.getenv('BILI_AI_BASE_URL', '')
+    if not api_key or not base_url:
+        return jsonify(dict(ok=False, message='请先配置 API Key 和 Base URL', models=[]))
+    
+    import urllib.request, ssl
+    url = base_url.rstrip('/') + '/models'
+    try:
+        req = urllib.request.Request(url, headers={
+            'Authorization': f'Bearer {api_key}',
+            'User-Agent': 'bilibili_learning_bot/3.0',
+        })
+        ctx = ssl.create_default_context()
+        with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
+            data = json.loads(resp.read())
+        raw_models = data.get('data', data if isinstance(data, list) else [])
+        models = []
+        for m in raw_models:
+            mid = m.get('id', '') if isinstance(m, dict) else str(m)
+            if mid and 'embed' not in mid.lower() and 'moderation' not in mid.lower() and 'dall-e' not in mid.lower() and 'tts' not in mid.lower() and 'whisper' not in mid.lower():
+                models.append(dict(
+                    id=mid,
+                    owned_by=m.get('owned_by', '') if isinstance(m, dict) else '',
+                ))
+        models.sort(key=lambda x: x['id'])
+        return jsonify(dict(ok=True, models=models, count=len(models)))
+    except Exception as e:
+        return jsonify(dict(ok=False, message=f'获取模型列表失败: {str(e)}', models=[], error=str(e)))
 
 # ── 机器人控制 ──
 @app.route('/api/bot/start', methods=['POST'])
@@ -1578,6 +2249,350 @@ def api_bot_clear():
         bot_output_lines.clear()
     log_line("日志已清空")
     return jsonify(dict(ok=True, message='日志已清空'))
+
+# ── 实时监听 ──
+monitor_process = None
+monitor_running = False
+monitor_output_lines = collections.deque(maxlen=500)
+monitor_output_lock = threading.Lock()
+
+def _monitor_reader(pipe, prefix=""):
+    """读取监听进程输出"""
+    try:
+        for line in iter(pipe.readline, ""):
+            if not line: break
+            text = line.rstrip()
+            if text:
+                with monitor_output_lock:
+                    monitor_output_lines.append(prefix + text)
+    except OSError:
+        pass
+    finally:
+        try: pipe.close()
+        except OSError: pass
+
+@app.route('/api/monitor/start', methods=['POST'])
+def api_monitor_start():
+    global monitor_process, monitor_running
+    if monitor_running:
+        return jsonify(dict(ok=False, message='监听已在运行'))
+    if bot_running:
+        return jsonify(dict(ok=False, message='机器人主进程运行中，请先停止'))
+
+    monitor_script = BASE_DIR / "brain" / "monitor.py"
+    if not monitor_script.exists():
+        return jsonify(dict(ok=False, message=f'找不到 {monitor_script}'))
+
+    log_line("📡 正在启动实时监听...")
+    try:
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONUNBUFFERED"] = "1"
+
+        monitor_process = subprocess.Popen(
+            [sys.executable, str(monitor_script)],
+            cwd=str(BASE_DIR),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=env,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+        monitor_running = True
+        threading.Thread(target=_monitor_reader, args=(monitor_process.stdout, ""), daemon=True).start()
+        log_line("✅ 实时监听已启动")
+        return jsonify(dict(ok=True, message='实时监听已启动'))
+    except Exception as e:
+        log_line(f"❌ 启动监听失败: {e}")
+        return jsonify(dict(ok=False, message=str(e)))
+
+@app.route('/api/monitor/stop', methods=['POST'])
+def api_monitor_stop():
+    global monitor_process, monitor_running
+    if not monitor_running:
+        return jsonify(dict(ok=False, message='监听未在运行'))
+    try:
+        if monitor_process:
+            log_line("⏹ 正在停止监听...")
+            try:
+                if monitor_process.stdin and not monitor_process.stdin.closed:
+                    monitor_process.stdin.write("0\n")
+                    monitor_process.stdin.flush()
+            except (BrokenPipeError, OSError, ValueError):
+                pass
+            time.sleep(0.5)
+            monitor_process.terminate()
+            try: monitor_process.wait(timeout=8)
+            except subprocess.TimeoutExpired:
+                monitor_process.kill()
+            monitor_process = None
+    except Exception as e:
+        log_line(f"停止监听异常: {e}")
+    monitor_running = False
+    log_line("✅ 实时监听已停止")
+    return jsonify(dict(ok=True, message='已停止'))
+
+@app.route('/api/monitor/status')
+def api_monitor_status():
+    from brain.monitor import load_monitor_config, is_monitor_running
+    cfg = load_monitor_config()
+    # 从日志中读取统计
+    stats = {"comments_processed": 0, "messages_processed": 0, "total_replies": 0, "errors": 0}
+    stats_file = DATA_DIR / "monitor_stats.json"
+    if stats_file.exists():
+        try:
+            with open(stats_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                stats = data.get("stats", stats)
+        except Exception:
+            pass
+    return jsonify(dict(
+        running=monitor_running,
+        start_time=None,
+        config=cfg,
+        stats=stats,
+        uptime='-'
+    ))
+
+@app.route('/api/monitor/config', methods=['POST'])
+def api_monitor_config():
+    from brain.monitor import save_monitor_config, load_monitor_config
+    cfg = load_monitor_config()
+    data = request.get_json(silent=True) or {}
+    # 更新配置
+    for key in ['comment_check_interval', 'private_msg_check_interval', 'auto_reply', 'max_replies_per_check', 'enabled']:
+        if key in data:
+            cfg[key] = data[key]
+    if save_monitor_config(cfg):
+        return jsonify(dict(ok=True, message='监听配置已保存', config=cfg))
+    return jsonify(dict(ok=False, message='保存失败'))
+
+@app.route('/api/monitor/output')
+def api_monitor_output():
+    with monitor_output_lock:
+        lines = list(monitor_output_lines)[-80:]
+    return jsonify(dict(output='\n'.join(lines) if lines else '等待输出...'))
+
+# ── 待机模式（Standby） ──
+standby_process: subprocess.Popen | None = None
+standby_running = False
+standby_output_lines: list = []
+standby_output_lock = threading.Lock()
+
+def _standby_reader(stream, tag=""):
+    global standby_output_lines
+    for line in iter(stream.readline, ''):
+        if not line:
+            break
+        with standby_output_lock:
+            standby_output_lines.append(line.rstrip('\n'))
+            if len(standby_output_lines) > 500:
+                standby_output_lines = standby_output_lines[-200:]
+
+@app.route('/api/standby/start', methods=['POST'])
+def api_standby_start():
+    global standby_process, standby_running, standby_output_lines
+    if standby_running:
+        return jsonify(dict(ok=False, message='待机模式已在运行'))
+    if bot_running:
+        return jsonify(dict(ok=False, message='主Bot运行中，请先停止'))
+
+    standby_script = BASE_DIR / "brain" / "standby.py"
+    if not standby_script.exists():
+        return jsonify(dict(ok=False, message=f'找不到 {standby_script}'))
+
+    # 先保存最新配置
+    data = request.get_json(silent=True) or {}
+    if data:
+        from brain.standby import save_standby_config, load_standby_config
+        cfg = load_standby_config()
+        for key in ['auto_reply', 'at_trigger_enabled', 'at_trigger_keywords',
+                     'comment_check_interval', 'max_replies_per_check', 'reply_cooldown_seconds',
+                     'ppt_auto_generate', 'ppt_theme', 'video_trigger_enabled', 'custom_prompt',
+                     'asr_enabled', 'asr_backend', 'vision_enabled', 'comment_mode',
+                     'comment_fetch_enabled', 'summary_style', 'summary_max_length',
+                     'monitor_own_videos_only', 'enabled']:
+            if key in data:
+                cfg[key] = data[key]
+        save_standby_config(cfg)
+
+    log_line("[SB] 正在启动待机模式...")
+    try:
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONUNBUFFERED"] = "1"
+        standby_output_lines = []
+
+        standby_process = subprocess.Popen(
+            [sys.executable, str(standby_script)],
+            cwd=str(BASE_DIR),
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            env=env, text=True, encoding="utf-8", errors="replace", bufsize=1,
+        )
+        standby_running = True
+        threading.Thread(target=_standby_reader, args=(standby_process.stdout, ""), daemon=True).start()
+        log_line("[OK] 待机模式已启动")
+        return jsonify(dict(ok=True, message='待机模式已启动'))
+    except Exception as e:
+        log_line(f"[ERR] 启动待机失败: {e}")
+        return jsonify(dict(ok=False, message=str(e)))
+
+@app.route('/api/standby/stop', methods=['POST'])
+def api_standby_stop():
+    global standby_process, standby_running
+    if not standby_running:
+        return jsonify(dict(ok=False, message='待机模式未在运行'))
+    try:
+        if standby_process:
+            log_line("[SB] 正在停止待机...")
+            try:
+                if standby_process.stdin and not standby_process.stdin.closed:
+                    standby_process.stdin.write("0\n")
+                    standby_process.stdin.flush()
+            except (BrokenPipeError, OSError, ValueError):
+                pass
+            time.sleep(0.5)
+            standby_process.terminate()
+            try: standby_process.wait(timeout=8)
+            except subprocess.TimeoutExpired: standby_process.kill()
+            standby_process = None
+    except Exception as e:
+        log_line(f"[ERR] 停止待机异常: {e}")
+    standby_running = False
+    log_line("[OK] 待机模式已停止")
+    return jsonify(dict(ok=True, message='已停止'))
+
+@app.route('/api/standby/status')
+def api_standby_status():
+    from brain.standby import load_standby_config, load_stats
+    cfg = load_standby_config()
+    st = load_stats()
+    return jsonify(dict(running=standby_running, config=cfg, stats=st))
+
+@app.route('/api/standby/config', methods=['POST'])
+def api_standby_config():
+    from brain.standby import save_standby_config, load_standby_config
+    cfg = load_standby_config()
+    data = request.get_json(silent=True) or {}
+    # 所有可配置字段
+    for key in ['auto_reply', 'at_trigger_enabled', 'at_trigger_keywords',
+                 'comment_check_interval', 'max_replies_per_check', 'reply_cooldown_seconds',
+                 'ppt_auto_generate', 'ppt_theme', 'video_trigger_enabled', 'custom_prompt',
+                 'asr_enabled', 'asr_backend', 'vision_enabled', 'comment_mode',
+                 'comment_fetch_enabled', 'summary_style', 'summary_max_length',
+                 'monitor_own_videos_only', 'notification_mode', 'enabled']:
+        if key in data:
+            cfg[key] = data[key]
+    # 确保新字段有默认值
+    cfg.setdefault("asr_enabled", False)
+    cfg.setdefault("vision_enabled", True)
+    cfg.setdefault("comment_fetch_enabled", True)
+    cfg.setdefault("summary_style", "structured")
+    cfg.setdefault("summary_max_length", 500)
+    cfg.setdefault("monitor_own_videos_only", False)
+    cfg.setdefault("notification_mode", True)
+    if save_standby_config(cfg):
+        return jsonify(dict(ok=True, message='待机配置已保存', config=cfg))
+    return jsonify(dict(ok=False, message='保存失败'))
+
+@app.route('/api/standby/output')
+def api_standby_output():
+    with standby_output_lock:
+        lines = list(standby_output_lines)[-80:]
+    return jsonify(dict(output='\n'.join(lines) if lines else '等待输出...'))
+
+# ── PPT生成面板 API ──
+@app.route('/api/ppt/generate', methods=['POST'])
+def api_ppt_generate():
+    """异步生成PPT风格HTML"""
+    data = request.get_json(silent=True) or {}
+    bvid = data.get('bvid', '').strip()
+    themes = data.get('themes', ['claude'])
+    mode = data.get('mode', 'ppt')  # 'ppt' or 'default'
+    custom_prompt = data.get('custom_prompt', '')
+
+    if not bvid:
+        return jsonify(dict(ok=False, message='请提供BV号'))
+
+    if isinstance(themes, str):
+        themes = [themes]
+
+    def _do_generate():
+        api_key = ""
+        base_url = ""
+        model = "qwen/qwen3.5-122b-a10b"
+        if CONFIG_FILE.exists():
+            try:
+                with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                    cfg = json.load(f)
+                api_cfg = cfg.get('api', {})
+                api_key = api_cfg.get('unified_api_key', '') or os.getenv('BILI_AI_API_KEY', '')
+                base_url = api_cfg.get('unified_base_url', '') or os.getenv('BILI_AI_BASE_URL', '')
+                model = api_cfg.get('model_name', model)
+            except Exception:
+                pass
+
+        if not api_key or not base_url:
+            log_line("[PPT] API未配置，无法生成")
+            return
+
+        cookies = None
+        if COOKIE_FILE.exists():
+            try:
+                with open(COOKIE_FILE, 'r', encoding='utf-8') as f:
+                    cookies = json.load(f)
+            except Exception:
+                pass
+
+        async def run():
+            from services.video_to_ppt import generate_ppt_from_bvid
+            for theme in themes:
+                try:
+                    result = await generate_ppt_from_bvid(
+                        bvid, api_key, base_url, model,
+                        cookies_obj=cookies, theme=theme,
+                        open_browser=False
+                    )
+                    if result['success']:
+                        log_line(f"[PPT] {theme} 主题已生成: {result['html_path']}")
+                    else:
+                        log_line(f"[PPT] {theme} 主题失败: {result.get('error','')}")
+                except Exception as e:
+                    log_line(f"[PPT] {theme} 异常: {e}")
+
+        if os.name == 'nt':
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        asyncio.run(run())
+
+    threading.Thread(target=_do_generate, daemon=True).start()
+    return jsonify(dict(ok=True, message=f'正在生成 {len(themes)} 个主题的PPT...'))
+
+@app.route('/api/ppt/list')
+def api_ppt_list():
+    """列出已生成的HTML文件"""
+    export_dir = BASE_DIR / "html_exports"
+    files = []
+    if export_dir.exists():
+        for f in sorted(export_dir.glob("*.html"), key=lambda x: x.stat().st_mtime, reverse=True)[:20]:
+            files.append({
+                'name': f.name,
+                'size': f.stat().st_size,
+                'time': datetime.fromtimestamp(f.stat().st_mtime).strftime('%Y-%m-%d %H:%M:%S'),
+                'path': str(f.relative_to(BASE_DIR)),
+            })
+    return jsonify(dict(files=files))
+
+@app.route('/api/ppt/themes')
+def api_ppt_themes():
+    """返回可用主题列表"""
+    from services.video_to_ppt import THEMES
+    return jsonify(dict(themes=[
+        {'id': k, 'name': v['name'], 'preview_colors': [v['primary'], v['accent'], v['bg_start']]}
+        for k, v in THEMES.items()
+    ]))
 
 # ── B站登录 ──
 @app.route('/api/bili/qr/start', methods=['POST'])
@@ -1621,7 +2636,17 @@ def api_bili_logout():
 # ── 人格管理 ──
 @app.route('/api/personas', methods=['GET','POST'])
 def api_personas():
-    data = read_json(DATA_DIR / "web_personas.json", dict(active="默认人格", items={}))
+    data = read_json(DATA_DIR / "web_personas.json")
+    if not data or not data.get('items'):
+        fallback = read_json(DATA_DIR / "personas.json")
+        if fallback and isinstance(fallback, dict) and fallback.get('name'):
+            data = dict(active=fallback.get('name','默认人格'), items={fallback['name']: fallback})
+        else:
+            # 从 config.json persona 段读取
+            config = read_json(CONFIG_FILE, {})
+            cfg_p = config.get('persona', {})
+            active = cfg_p.get('active_persona', '') or cfg_p.get('prompt_name', '') or '默认人格'
+            data = dict(active=active, items={})
     if request.method=='GET':
         return jsonify(data)
     try:
@@ -1942,16 +2967,27 @@ def api_factory_reset():
             return jsonify(dict(ok=False, message='操作未确认，请先调用 /api/factory-reset/request 获取令牌')), 403
         _factory_reset_pending_token = None  # 一次性使用
         delete_kb = body.get('delete_kb', False)
+        delete_web = body.get('delete_web', False)
+        delete_backup = body.get('delete_backup', False)
         deleted = []
         for fname in ['config.json', 'bilibili_cookies.json', 'mood_state.json', 'personas.json',
                        'user_profiles.json', 'comment_log.json', 'bot_diary.json',
                        'self_evolution.json', 'agent_skill_log.json', 'bot_runtime_state.json',
-                       'history_videos.json', 'interests.json', 'web_personas.json']:
+                       'history_videos.json', 'interests.json', 'web_personas.json',
+                       'web_persona.json', 'web_mood.json', 'web_user_profiles.json',
+                       'web_action_log.json', 'web_prompt_templates.json', 'web_costs.json',
+                       '.web_secret_key', 'search_history.json', 'private_message_log.json',
+                       'private_context_db.json', 'standby_config.json', 'standby_stats.json',
+                       'monitor_config.json', 'monitor_stats.json', 'reply_cache.json',
+                       'processed_comments.json', 'psycho_profile.json', 'recommendation_log.json',
+                       'action_log.json', 'content_aversions.json', 'owner_profile.json',
+                       'kb_vector_index.json', 'interest_engine.json']:
             fp = DATA_DIR / fname
             if fp.exists():
                 fp.unlink()
                 deleted.append(fname)
-        for fname in ['bot_memory.json', 'knowledge_metadata.json']:
+        for fname in ['bot_memory.json', 'knowledge_metadata.json', 'bot_journal.md',
+                       'learning_log.md', '.cipher_key']:
             fp = BASE_DIR / fname
             if fp.exists():
                 fp.unlink()
@@ -1962,11 +2998,23 @@ def api_factory_reset():
                 import shutil
                 shutil.rmtree(kb_dir, ignore_errors=True)
                 deleted.append('KnowledgeBase/')
+        if delete_web:
+            web_dir = BASE_DIR / "web"
+            if web_dir.exists():
+                import shutil
+                shutil.rmtree(web_dir, ignore_errors=True)
+                deleted.append('web/')
+        if delete_backup:
+            backup_dir = get_backup_dir()
+            if backup_dir.exists():
+                import shutil
+                shutil.rmtree(backup_dir, ignore_errors=True)
+                deleted.append(f'{backup_dir}')
         # 清除日志
         global bot_output_lines
         with bot_output_lock:
             bot_output_lines.clear()
-        log_line(f"恢复出厂设置完成，删除了 {len(deleted)} 个文件/目录" + ("（含知识库）" if delete_kb else ""))
+        log_line(f"恢复出厂设置完成，删除了 {len(deleted)} 个文件/目录" + ("（含知识库）" if delete_kb else "") + ("（含web/）" if delete_web else "") + ("（含备份）" if delete_backup else ""))
         return jsonify(dict(ok=True, message=f'已清除 {len(deleted)} 个文件', deleted=deleted))
     except Exception as e:
         return jsonify(dict(ok=False, message=str(e))), 500
@@ -2022,11 +3070,11 @@ def api_action_analyze_video():
         if not bvid:
             return jsonify(dict(ok=False, message='请输入 BV号')), 400
         log_line(f"触发手动视频分析: {bvid}")
-        # 直接在子进程中调用 new_agent.py 的函数
+        # 直接在子进程中调用 start_cli.py 的函数
         def _run_analysis():
             try:
                 sys.path.insert(0, str(BASE_DIR))
-                import new_agent
+                import start_cli
                 # 尝试调用手动分析
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
@@ -2282,8 +3330,8 @@ def api_behavior_get():
             rounds_max=energy.get('rounds_max', 10),
             round_interval_min=energy.get('round_interval_min', 60),
             round_interval_max=energy.get('round_interval_max', 180),
-            video_interval_min=energy.get('video_interval_min', 20),
-            video_interval_max=energy.get('video_interval_max', 50),
+            video_interval_min=energy.get('video_interval_min', 1),
+            video_interval_max=energy.get('video_interval_max', 5),
         )
     ))
 
@@ -2339,6 +3387,46 @@ def api_behavior_save():
         return jsonify(dict(ok=False, message=str(e))), 400
 
 
+# ── 安全关键词 ──
+@app.route('/api/behavior/safety')
+def api_behavior_safety():
+    config = read_json(CONFIG_FILE, {})
+    safety = config.get('reply_safety', {})
+    return jsonify(dict(
+        enabled=safety.get('enabled', False),
+        keywords=safety.get('blocked_keywords', []),
+    ))
+
+
+@app.route('/api/behavior/safety/toggle', methods=['POST'])
+def api_behavior_safety_toggle():
+    try:
+        body = request.get_json(force=True)
+        enabled = bool(body.get('enabled', True))
+        config = read_json(CONFIG_FILE, {})
+        safety = config.setdefault('reply_safety', {})
+        safety['enabled'] = enabled
+        write_json(CONFIG_FILE, config)
+        msg = '关键词安全校验已开启' if enabled else '关键词安全校验已关闭'
+        return jsonify(dict(ok=True, message=msg))
+    except Exception as e:
+        return jsonify(dict(ok=False, message=str(e))), 400
+
+
+@app.route('/api/behavior/safety/save', methods=['POST'])
+def api_behavior_safety_save():
+    try:
+        body = request.get_json(force=True)
+        keywords = body.get('keywords', [])
+        config = read_json(CONFIG_FILE, {})
+        safety = config.setdefault('reply_safety', {})
+        safety['blocked_keywords'] = [str(k).strip() for k in keywords if str(k).strip()]
+        write_json(CONFIG_FILE, config)
+        return jsonify(dict(ok=True, message=f'已保存 {len(safety["blocked_keywords"])} 个关键词'))
+    except Exception as e:
+        return jsonify(dict(ok=False, message=str(e))), 400
+
+
 # ── 免责声明 HTML 页面 ──
 def _disclaimer_html():
     return r"""<!DOCTYPE html>
@@ -2346,30 +3434,37 @@ def _disclaimer_html():
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
-<title>免责声明</title>
+<title>免责声明 — B站 AI 管理系统</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'Segoe UI','Microsoft YaHei',sans-serif;background:#0d1117;color:#c9d1d9;display:flex;align-items:center;justify-content:center;min-height:100vh}
-.card{background:#161b22;border:2px solid #f85149;border-radius:12px;padding:32px 28px;max-width:520px;width:90%;text-align:center}
-.card h2{color:#f85149;font-size:22px;margin-bottom:20px}
-.card .lines{background:rgba(248,81,73,.06);border:1px solid rgba(248,81,73,.2);border-radius:8px;padding:16px 20px;margin-bottom:20px;font-size:14px;line-height:1.9;text-align:left}
-.card .lines .en{font-size:12px;color:#8b949e;margin-top:6px;display:block}
+body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;background:#f7f7f7;color:#0d0d0d;display:flex;align-items:center;justify-content:center;min-height:100vh;-webkit-font-smoothing:antialiased}
+.card{background:#fff;border:1px solid #e6e6e6;border-radius:16px;padding:40px 36px;max-width:480px;width:90%;text-align:center;box-shadow:0 4px 24px rgba(0,0,0,.06)}
+.card .icon{font-size:36px;margin-bottom:16px}
+.card h2{color:#D14343;font-size:20px;font-weight:600;margin-bottom:8px;letter-spacing:-.3px}
+.card .sub{font-size:13px;color:#999;margin-bottom:24px}
+.card .lines{background:rgba(209,67,67,.04);border:1px solid rgba(209,67,67,.15);border-radius:10px;padding:18px 20px;margin-bottom:24px;font-size:14px;line-height:1.9;text-align:left;font-weight:400}
+.card .lines .en{font-size:12px;color:#999;margin-top:8px;display:block}
 .inp-row{display:flex;gap:10px}
-.inp-row input{flex:1;background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:10px 14px;color:#c9d1d9;font-size:16px;outline:none;transition:border-color .2s}
-.inp-row input:focus{border-color:#58a6ff}
-.inp-row input.error{border-color:#f85149;animation:shake .4s}
-.btn{background:#f85149;color:#fff;border:none;border-radius:8px;padding:10px 24px;font-size:15px;cursor:pointer;transition:opacity .2s}
-.btn:hover{opacity:.85}
+.inp-row input{flex:1;background:#f7f7f7;border:1px solid #e6e6e6;border-radius:8px;padding:10px 14px;color:#0d0d0d;font-size:15px;outline:none;transition:border-color .2s;font-family:inherit}
+.inp-row input:focus{border-color:#D97757;box-shadow:0 0 0 3px rgba(217,119,87,.1)}
+.inp-row input.error{border-color:#D14343;animation:shake .4s}
+.btn{background:#D14343;color:#fff;border:none;border-radius:8px;padding:10px 24px;font-size:14px;font-weight:500;cursor:pointer;transition:all .2s;font-family:inherit}
+.btn:hover{background:#B53535;box-shadow:0 4px 12px rgba(209,67,67,.25)}
 .btn:disabled{opacity:.4;cursor:not-allowed}
-.msg{margin-top:12px;font-size:13px;min-height:20px}
-.msg.err{color:#f85149}
-.msg.ok{color:#3fb950}
+.msg{margin-top:12px;font-size:13px;min-height:20px;font-weight:500}
+.msg.err{color:#D14343}
+.msg.ok{color:#2D8A4E}
 @keyframes shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-6px)}75%{transform:translateX(6px)}}
 </style>
 </head>
 <body>
 <div class="card">
-<h2>⚠ 免责声明 / DISCLAIMER</h2>
+<div class="icon">⚠</div>
+<h2>免责声明 / DISCLAIMER</h2>
+<p class="sub">请阅读并确认以下声明</p>
 <div class="lines">
 本项目仅供学习参考，<br>
 若因使用本项目产生任何后果，本人一概不负责。
@@ -2393,8 +3488,8 @@ btn.disabled=true;
 fetch('/api/disclaimer/confirm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({agree:v})})
 .then(function(r){return r.json()})
 .then(function(d){
-if(d.ok){msg.textContent='✓ 已确认，跳转中...';msg.className='msg ok';setTimeout(function(){location.href='/'},600)}
-else{msg.textContent='✗ 请输入"我同意"';msg.className='msg err';btn.disabled=false;inp.classList.add('error');setTimeout(function(){inp.classList.remove('error')},400)}
+if(d.ok){msg.textContent='\u2713 已确认，跳转中...';msg.className='msg ok';setTimeout(function(){location.href='/'},600)}
+else{msg.textContent='\u2717 请输入"我同意"';msg.className='msg err';btn.disabled=false;inp.classList.add('error');setTimeout(function(){inp.classList.remove('error')},400)}
 })
 .catch(function(){msg.textContent='请求失败，请重试';msg.className='msg err';btn.disabled=false})
 }
@@ -2410,30 +3505,35 @@ def _setup_html():
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
 <title>首次设置 · 管理面板</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'Segoe UI','Microsoft YaHei',sans-serif;background:#0d1117;color:#c9d1d9;display:flex;align-items:center;justify-content:center;min-height:100vh}
-.card{background:#161b22;border:2px solid #58a6ff;border-radius:12px;padding:32px 28px;max-width:440px;width:90%;text-align:center}
-.card h2{color:#58a6ff;font-size:22px;margin-bottom:8px}
-.card .sub{font-size:13px;color:#8b949e;margin-bottom:20px}
-.fg{margin-bottom:14px;text-align:left}
-.fg label{display:block;font-size:12px;font-weight:600;color:#8b949e;margin-bottom:4px}
-.fg input{width:100%;background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:10px 14px;color:#c9d1d9;font-size:15px;outline:none;transition:border-color .2s}
-.fg input:focus{border-color:#58a6ff}
-.fg input.error{border-color:#f85149;animation:shake .4s}
-.hint{font-size:11px;color:#6e7681;margin-top:4px}
-.btn{background:#58a6ff;color:#fff;border:none;border-radius:8px;padding:10px 24px;font-size:15px;cursor:pointer;transition:opacity .2s;width:100%;margin-top:6px}
-.btn:hover{opacity:.85}
+body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;background:#f7f7f7;color:#0d0d0d;display:flex;align-items:center;justify-content:center;min-height:100vh;-webkit-font-smoothing:antialiased}
+.card{background:#fff;border:1px solid #e6e6e6;border-radius:16px;padding:40px 36px;max-width:420px;width:90%;text-align:center;box-shadow:0 4px 24px rgba(0,0,0,.06)}
+.card .icon{font-size:36px;margin-bottom:16px}
+.card h2{color:#0d0d0d;font-size:20px;font-weight:600;margin-bottom:6px;letter-spacing:-.3px}
+.card .sub{font-size:13px;color:#999;margin-bottom:28px;line-height:1.6}
+.fg{margin-bottom:16px;text-align:left}
+.fg label{display:block;font-size:11px;font-weight:600;color:#999;margin-bottom:5px;text-transform:uppercase;letter-spacing:.4px}
+.fg input{width:100%;background:#f7f7f7;border:1px solid #e6e6e6;border-radius:8px;padding:10px 14px;color:#0d0d0d;font-size:15px;outline:none;transition:border-color .2s;font-family:inherit}
+.fg input:focus{border-color:#D97757;box-shadow:0 0 0 3px rgba(217,119,87,.1)}
+.fg input.error{border-color:#D14343;animation:shake .4s}
+.hint{font-size:11px;color:#999;margin-top:4px}
+.btn{background:#D97757;color:#fff;border:none;border-radius:8px;padding:11px 24px;font-size:14px;font-weight:500;cursor:pointer;transition:all .2s;width:100%;margin-top:4px;font-family:inherit}
+.btn:hover{background:#C56545;box-shadow:0 4px 12px rgba(217,119,87,.25)}
 .btn:disabled{opacity:.5;cursor:not-allowed}
-.msg{margin-top:12px;font-size:13px;min-height:20px}
-.msg.err{color:#f85149}
-.msg.ok{color:#3fb950}
+.msg{margin-top:12px;font-size:13px;min-height:20px;font-weight:500}
+.msg.err{color:#D14343}
+.msg.ok{color:#2D8A4E}
 @keyframes shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-6px)}75%{transform:translateX(6px)}}
 </style>
 </head>
 <body>
 <div class="card">
-<h2>🔐 首次设置</h2>
+<div class="icon">🔐</div>
+<h2>首次设置</h2>
 <p class="sub">欢迎使用 B站 AI 管理系统<br>请设置管理面板的用户名和密码</p>
 <div class="fg"><label>用户名</label><input id="setupUser" type="text" placeholder="设置用户名" autocomplete="off" autofocus></div>
 <div class="fg"><label>密码</label><input id="setupPass" type="password" placeholder="设置密码（至少4位）" autocomplete="off"></div>
@@ -2455,8 +3555,8 @@ btn.disabled=true;btn.textContent='正在保存...';
 try{
 var r=await fetch('/api/auth/setup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,password:p})});
 var d=await r.json();
-if(d.ok){msg.textContent='✓ 设置成功！正在跳转...';msg.className='msg ok';setTimeout(function(){location.href='/login'},800)}
-else{msg.textContent='✗ '+d.message;msg.className='msg err';btn.disabled=false;btn.textContent='完成设置'}
+if(d.ok){msg.textContent='\u2713 设置成功！正在跳转...';msg.className='msg ok';setTimeout(function(){location.href='/login'},800)}
+else{msg.textContent='\u2717 '+d.message;msg.className='msg err';btn.disabled=false;btn.textContent='完成设置'}
 }catch(e){msg.textContent='请求失败，请重试';msg.className='msg err';btn.disabled=false;btn.textContent='完成设置'}
 }
 </script>
@@ -2471,33 +3571,38 @@ def _login_html():
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
 <title>登录 · 管理面板</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'Segoe UI','Microsoft YaHei',sans-serif;background:#0d1117;color:#c9d1d9;display:flex;align-items:center;justify-content:center;min-height:100vh}
-.card{background:#161b22;border:2px solid #30363d;border-radius:12px;padding:32px 28px;max-width:400px;width:90%;text-align:center}
-.card h2{color:#c9d1d9;font-size:22px;margin-bottom:8px}
-.card .sub{font-size:13px;color:#8b949e;margin-bottom:20px}
-.fg{margin-bottom:14px;text-align:left}
-.fg label{display:block;font-size:12px;font-weight:600;color:#8b949e;margin-bottom:4px}
-.fg input{width:100%;background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:10px 14px;color:#c9d1d9;font-size:15px;outline:none;transition:border-color .2s}
-.fg input:focus{border-color:#58a6ff}
-.fg input.error{border-color:#f85149;animation:shake .4s}
-.btn{background:#238636;color:#fff;border:none;border-radius:8px;padding:10px 24px;font-size:15px;cursor:pointer;transition:opacity .2s;width:100%;margin-top:6px}
-.btn:hover{opacity:.85}
+body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;background:#f7f7f7;color:#0d0d0d;display:flex;align-items:center;justify-content:center;min-height:100vh;-webkit-font-smoothing:antialiased}
+.card{background:#fff;border:1px solid #e6e6e6;border-radius:16px;padding:40px 36px;max-width:400px;width:90%;text-align:center;box-shadow:0 4px 24px rgba(0,0,0,.06)}
+.card .icon{font-size:36px;margin-bottom:16px}
+.card h2{color:#0d0d0d;font-size:20px;font-weight:600;margin-bottom:6px;letter-spacing:-.3px}
+.card .sub{font-size:13px;color:#999;margin-bottom:28px}
+.fg{margin-bottom:16px;text-align:left}
+.fg label{display:block;font-size:11px;font-weight:600;color:#999;margin-bottom:5px;text-transform:uppercase;letter-spacing:.4px}
+.fg input{width:100%;background:#f7f7f7;border:1px solid #e6e6e6;border-radius:8px;padding:10px 14px;color:#0d0d0d;font-size:15px;outline:none;transition:border-color .2s;font-family:inherit}
+.fg input:focus{border-color:#D97757;box-shadow:0 0 0 3px rgba(217,119,87,.1)}
+.fg input.error{border-color:#D14343;animation:shake .4s}
+.btn{background:#D97757;color:#fff;border:none;border-radius:8px;padding:11px 24px;font-size:14px;font-weight:500;cursor:pointer;transition:all .2s;width:100%;margin-top:4px;font-family:inherit}
+.btn:hover{background:#C56545;box-shadow:0 4px 12px rgba(217,119,87,.25)}
 .btn:disabled{opacity:.5;cursor:not-allowed}
-.msg{margin-top:12px;font-size:13px;min-height:20px}
-.msg.err{color:#f85149}
-.msg.ok{color:#3fb950}
+.msg{margin-top:12px;font-size:13px;min-height:20px;font-weight:500}
+.msg.err{color:#D14343}
+.msg.ok{color:#2D8A4E}
 @keyframes shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-6px)}75%{transform:translateX(6px)}}
 </style>
 </head>
 <body>
 <div class="card">
-<h2>🔑 登录管理面板</h2>
-<p class="sub">请输入用户名和密码</p>
-<div class="fg"><label>用户名</label><input id="loginUser" type="text" placeholder="用户名" autocomplete="off" autofocus></div>
-<div class="fg"><label>密码</label><input id="loginPass" type="password" placeholder="密码" autocomplete="off"></div>
-<button class="btn" id="loginBtn" onclick="doLogin()">登 录</button>
+<div class="icon">⚡</div>
+<h2>管理面板登录</h2>
+<p class="sub">B站 AI 管理系统</p>
+<div class="fg"><label>用户名</label><input id="loginUser" type="text" placeholder="输入用户名" autocomplete="off" autofocus></div>
+<div class="fg"><label>密码</label><input id="loginPass" type="password" placeholder="输入密码" autocomplete="off"></div>
+<button class="btn" id="loginBtn" onclick="doLogin()">登录</button>
 <div class="msg" id="msg"></div>
 </div>
 <script>
@@ -2511,9 +3616,9 @@ btn.disabled=true;btn.textContent='验证中...';
 try{
 var r=await fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,password:p})});
 var d=await r.json();
-if(d.ok){msg.textContent='✓ 登录成功，跳转中...';msg.className='msg ok';setTimeout(function(){location.href='/'},500)}
-else{msg.textContent='✗ '+d.message;msg.className='msg err';btn.disabled=false;btn.textContent='登 录';inpP.value='';inpP.classList.add('error');setTimeout(function(){inpP.classList.remove('error')},400)}
-}catch(e){msg.textContent='请求失败，请重试';msg.className='msg err';btn.disabled=false;btn.textContent='登 录'}
+if(d.ok){msg.textContent='\u2713 登录成功，跳转中...';msg.className='msg ok';setTimeout(function(){location.href='/'},500)}
+else{msg.textContent='\u2717 '+d.message;msg.className='msg err';btn.disabled=false;btn.textContent='登录';inpP.value='';inpP.classList.add('error');setTimeout(function(){inpP.classList.remove('error')},400)}
+}catch(e){msg.textContent='请求失败，请重试';msg.className='msg err';btn.disabled=false;btn.textContent='登录'}
 }
 </script>
 </body>
@@ -2556,7 +3661,7 @@ def api_auth_setup():
     config = read_json(CONFIG_FILE, {})
     web_cfg = config.setdefault('web', {})
     web_cfg['username'] = username
-    web_cfg['password'] = password
+    web_cfg['password'] = _hash_password(password)
     if write_json(CONFIG_FILE, config):
         # 设置成功后自动登录
         session['disclaimer_agreed'] = True
@@ -2577,7 +3682,7 @@ def api_auth_login():
     saved_pass = web_cfg.get('password', '')
     if not saved_user or not saved_pass:
         return jsonify(dict(ok=False, message='面板尚未设置，请先完成首次配置'))
-    if username == saved_user and password == saved_pass:
+    if username == saved_user and _verify_password(password, saved_pass):
         session['panel_authenticated'] = True
         log_line(f"面板登录成功，用户: {username}")
         return jsonify(dict(ok=True, message='登录成功'))
@@ -2643,6 +3748,9 @@ def main():
     # ── 免责声明确认（从bat启动时BILI_DISCLAIMER_SKIP=1可跳过）──
     if not os.getenv('BILI_DISCLAIMER_SKIP'):
         _disclaimer_confirm_terminal()
+    # 终端已确认免责声明，直接标记 session 跳过网页端再次确认
+    with app.test_request_context():
+        session['disclaimer_agreed'] = True
 
     banner = f"""
 ╔══════════════════════════════════════════════╗

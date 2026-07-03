@@ -28,9 +28,12 @@ class AgentSkillRunner:
         return []
 
     def _save_goal_log(self):
+        """原子写入 JSON 文件（tmp+replace 防止断电损坏）"""
         try:
-            with open(AGENT_SKILL_LOG_FILE, 'w', encoding='utf-8') as f:
+            tmp = AGENT_SKILL_LOG_FILE + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as f:
                 json.dump(self.goal_log, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, AGENT_SKILL_LOG_FILE)
         except Exception as e:
             log(f"保存Agent技能日志失败: {e}", "WARN")
 
@@ -139,11 +142,15 @@ class AgentSkillRunner:
         return results
 
     async def _search_videos(self, query: str, count: int = 8):
-        if not self.credential:
+        # 动态获取 credential，因为 brain.credential 可能在 init 后异步设置
+        cred = self.credential
+        if not cred and self.brain:
+            cred = getattr(self.brain, "credential", None)
+        if not cred:
             return {"error": "No credential"}
         try:
             from bilibili_api import search as bili_search
-            data = await bili_search.search_by_type(keyword=query, search_type=bili_search.SearchObjectType.VIDEO)
+            data = await bili_search.search_by_type(keyword=query, search_type=bili_search.SearchObjectType.VIDEO, credential=cred)
             items = data.get("result") or []
             return [{"title": re.sub(r"<.*?>", "", str(v.get("title", ""))), "bvid": v.get("bvid")}
                     for v in items[:count]]

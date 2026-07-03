@@ -7,7 +7,7 @@ knowledge_tutor.py — 知识库辅导/讲解服务
 3. 支持生成 HTML 网页用于可视化讲解
 4. 支持直接修改 md 文件（二次创作）
 
-设计为同时供 CLI（new_agent.py）和 Web（web_panel.py）调用。
+设计为同时供 CLI（start_cli.py）和 Web（web_panel.py）调用。
 """
 
 from __future__ import annotations
@@ -29,9 +29,9 @@ KNOWLEDGE_BASE_DIR = BASE_DIR / "KnowledgeBase"
 def _get_llm_client():
     """获取 LLM 客户端（延迟导入）"""
     try:
-        from xingye_bot.llm import ModelClient
-        from xingye_bot.settings import load_settings
-        from xingye_bot.state import BotState
+        from bili_core.llm import ModelClient
+        from bili_core.settings import load_settings
+        from bili_core.state import BotState
         settings = load_settings()
         return ModelClient(settings, BotState())
     except Exception:

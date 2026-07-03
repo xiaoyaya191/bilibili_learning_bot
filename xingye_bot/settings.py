@@ -164,9 +164,24 @@ def _dict(value: Any) -> dict[str, Any]:
 
 
 def load_settings() -> BotSettings:
+    """从统一配置源 (core.config) 构建 BotSettings。
+    
+    不再独立读取 config.json，而是使用 core.config 已加载的配置，
+    确保所有模块共享同一份配置。
+    """
+    import core.config as _root_cfg
+    raw = _root_cfg.config
     DATA_DIR.mkdir(exist_ok=True)
-    raw = read_runtime_config()
     api = _dict(raw.get("api"))
+    # 回退：如果 config dict 未同步，从模块级属性取
+    if not api.get("unified_api_key"):
+        api["unified_api_key"] = getattr(_root_cfg, "UNIFIED_API_KEY", "")
+    if not api.get("unified_base_url"):
+        api["unified_base_url"] = getattr(_root_cfg, "UNIFIED_BASE_URL", "")
+    if not api.get("model_brain"):
+        api["model_brain"] = getattr(_root_cfg, "MODEL_BRAIN", "")
+    if not api.get("model_vision"):
+        api["model_vision"] = getattr(_root_cfg, "MODEL_VISION", "")
     automation = _dict(raw.get("automation"))
     web = _dict(raw.get("web"))
     video = _dict(raw.get("video"))

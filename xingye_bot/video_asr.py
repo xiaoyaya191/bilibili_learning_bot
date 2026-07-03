@@ -15,6 +15,11 @@ from typing import Any
 
 from .settings import DATA_DIR
 
+try:
+    from utils.helpers import find_ffmpeg
+except ImportError:
+    find_ffmpeg = None
+
 CACHE_DIR = DATA_DIR / "asr_cache"
 
 # ── 数据结构 ────────────────────────────
@@ -89,7 +94,7 @@ class VideoASR:
 
     @property
     def ffmpeg_available(self) -> bool:
-        return shutil.which("ffmpeg") is not None
+        return ((find_ffmpeg() if find_ffmpeg else None) is not None) or (shutil.which("ffmpeg") is not None)
 
     # ── 主入口 ──
     async def transcribe(self, video_path: str | Path, 
@@ -200,7 +205,7 @@ class VideoASR:
 
     def _extract_audio(self, video_path: str) -> str:
         """从视频提取音频为16kHz单声道wav"""
-        ffmpeg = shutil.which("ffmpeg")
+        ffmpeg = (find_ffmpeg() if find_ffmpeg else None) or shutil.which("ffmpeg")
         if not ffmpeg:
             raise RuntimeError("ffmpeg 不可用")
 
@@ -364,11 +369,27 @@ class VideoASR:
 # ── 工具函数 ──
 def check_asr_availability() -> dict[str, bool]:
     """检查ASR各组件的可用性"""
+    _ff = (find_ffmpeg() if find_ffmpeg else None) or shutil.which("ffmpeg")
+    _fp = shutil.which("ffprobe")
+    # imageio-ffmpeg 也可能提供 ffprobe
+    if not _fp and find_ffmpeg:
+        try:
+            ffmpeg_exe = find_ffmpeg()
+            if ffmpeg_exe:
+                import os as _os
+                ffmpeg_dir = _os.path.dirname(ffmpeg_exe)
+                for name in ["ffprobe", "ffprobe.exe"]:
+                    probe_path = _os.path.join(ffmpeg_dir, name)
+                    if _os.path.isfile(probe_path):
+                        _fp = probe_path
+                        break
+        except Exception:
+            pass
     return {
         "whisper_openai": _check_import("whisper"),
         "whisper_faster": _check_import("faster_whisper"),
-        "ffmpeg": shutil.which("ffmpeg") is not None,
-        "ffprobe": shutil.which("ffprobe") is not None,
+        "ffmpeg": _ff is not None,
+        "ffprobe": _fp is not None,
     }
 
 def _check_import(name: str) -> bool:

@@ -17,7 +17,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
 echo -e "${CYAN}============================================${NC}"
-echo -e "${CYAN}   bilibili_learning_bot v2.2.0${NC}"
+echo -e "${CYAN}   bilibili_learning_bot v3.0.0${NC}"
 echo -e "${CYAN}============================================${NC}"
 echo ""
 
@@ -54,7 +54,7 @@ echo ""
 
 # ── 菜单 ──
 echo -e "${YELLOW}请选择启动模式:${NC}"
-echo "  1) 机器人菜单 (new_agent.py - 交互式)"
+echo "  1) 机器人菜单 (main.py - 交互式)"
 echo "  2) Web 管理面板 (web_panel.py - 端口7860)"
 echo "  3) 后台运行 Web 面板"
 echo "  4) 安装/更新全部依赖"
@@ -65,7 +65,7 @@ read -r -p "输入选项 [1-4]: " choice
 case "$choice" in
     1)
         echo -e "${GREEN}启动机器人菜单...${NC}"
-        exec python3 new_agent.py
+        exec python3 main.py
         ;;
     2)
         echo -e "${GREEN}启动 Web 管理面板 (http://localhost:7860)${NC}"

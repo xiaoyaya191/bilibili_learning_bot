@@ -32,9 +32,12 @@ class PrivateContextDB:
         return {}
 
     def _save(self):
+        """原子写入 JSON 文件（tmp+replace 防止断电损坏）"""
         try:
-            with open(self.file_path, "w", encoding="utf-8") as f:
+            tmp = self.file_path + '.tmp'
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self.data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, self.file_path)
             return True
         except Exception:
             return False
@@ -287,6 +290,16 @@ class UserProfileManager:
         new_val = max(-1.0, min(1.0, prof.get("affinity", 0.0) + delta))
         self.update_profile(user_id, {"affinity": new_val})
 
+    def adjust_affinity(self, user_id: str, user_name: str, delta: int, note: str) -> dict:
+        """调整用户好感度（兼容 xingye_bot/state.py 调用约定）"""
+        prof = self.get_profile(user_id)
+        if not prof:
+            self.update_profile(user_id, {"name": user_name or "未知用户"})
+            prof = self.get_profile(user_id)
+        new_val = max(-1.0, min(1.0, prof.get("affinity", 0.0) + delta * 0.01))
+        self.update_profile(user_id, {"affinity": new_val, "name": user_name or prof.get("name", "")})
+        return prof
+
     def update_impression(self, user_id: str, user_name: str, impression: str) -> dict:
         """记录对用户的印象/评价"""
         prof = self.get_profile(user_id)
@@ -398,3 +411,85 @@ class SelfEvolutionManager:
 
     def recheck(self):
         self.data = self._load()
+
+    async def reflect(self, session_events, persona_prompt, current_mood, diary_entries=None):
+        """自我反思进化 — AI生成人格微调建议
+        Args:
+            session_events: 本次会话事件列表
+            persona_prompt: 当前人格提示
+            current_mood: 当前心情
+            diary_entries: 近期日记条目列表
+        Returns:
+            dict with keys: id, parsed{reflection, style_delta, relationship_delta, new_rule, mood_delta}
+        """
+        from openai import OpenAI
+        import re as _re
+        
+        api_cfg = self._cfg.get("api", {})
+        base_url = api_cfg.get("base_url", "")
+        api_key = api_cfg.get("api_key", "")
+        model = api_cfg.get("model_brain", "")
+        
+        if not base_url or not api_key:
+            return {"id": len(self.data.get("items", [])), "parsed": {}, "raw": "API未配置"}
+        
+        # 构建事件摘要
+        events_text = ""
+        for i, evt in enumerate(session_events[-20:]):
+            if isinstance(evt, dict):
+                events_text += f"- {evt.get('type','event')}: {str(evt.get('summary',evt.get('text','')))[:200]}\n"
+            else:
+                events_text += f"- {str(evt)[:200]}\n"
+        
+        diary_text = ""
+        if diary_entries:
+            for d in diary_entries[-5:]:
+                diary_text += f"- {str(d.get('content', d))[:200]}\n"
+        
+        prompt = (
+            "你是一个AI角色的成长记录员。根据最近的互动和行为日志，对角色人格进行温和可控的微调建议。\n"
+            "只输出严格JSON，字段：reflection(反思), style_delta(风格调整建议), "
+            "relationship_delta(关系边界调整), new_rule(新增约束), mood_delta(心情变化值,-2到+2)。\n"
+            f"当前人格：{persona_prompt}\n当前心情：{current_mood}\n"
+            f"---\n最近互动记录：\n{events_text}\n"
+            f"---\n近期日记：\n{diary_text}\n"
+            "请分析趋势并给出建议JSON："
+        )
+        
+        try:
+            client = OpenAI(base_url=base_url, api_key=api_key, timeout=60.0)
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "你是角色成长记录员，只提出温和、可控的性格演化建议。只输出JSON。"},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.5,
+                max_tokens=600
+            )
+            raw = resp.choices[0].message.content.strip()
+            # 尝试提取 JSON
+            raw = raw.strip()
+            if raw.startswith("```"):
+                raw = _re.sub(r'^```\w*\n?', '', raw)
+                raw = _re.sub(r'\n?```$', '', raw)
+            parsed = json.loads(raw) if raw else {}
+            
+            item = {
+                "id": len(self.data.get("items", [])),
+                "category": "auto_reflect",
+                "suggestion": parsed.get("reflection", ""),
+                "parsed": parsed,
+                "raw": raw,
+                "time": datetime.now().isoformat(),
+                "status": "pending"
+            }
+            self.data.setdefault("items", []).append(item)
+            self._save()
+            return item
+        except Exception as e:
+            from utils.display import log
+            log(f"[EVOLVE] 自我进化反思失败: {e}", "WARN")
+            return {"id": len(self.data.get("items", [])), "parsed": {
+                "reflection": f"反思失败: {e}", "style_delta": "", "relationship_delta": "", "new_rule": "", "mood_delta": 0
+            }, "raw": str(e)}

@@ -78,6 +78,8 @@ class ASRResult:
     backend: str = ""                       # funasr / whisper
     error: str = ""
     skipped_reason: str = ""
+    # ── 耗时统计 ──
+    timing: dict[str, float] = field(default_factory=dict)  # 各阶段耗时(秒)
 
 
 class ASREngine:
@@ -109,6 +111,7 @@ class ASREngine:
         self.funasr_spk_enabled = cfg.get("funasr_spk_enabled", False)
         self.funasr_batch_size_s = cfg.get("funasr_batch_size_s", 300)
         self.funasr_hotword = cfg.get("funasr_hotword", "")
+        self.num_workers = max(1, int(cfg.get("num_workers", 3)))  # 并行worker数（长音频切块并行）
 
         # 模型缓存
         self._model = None
@@ -122,7 +125,7 @@ class ASREngine:
     _cached_ffmpeg_path: str | None = None  # [SPEED] class-level cache
 
     def _find_ffmpeg(self) -> str:
-        """查找 ffmpeg 路径（搜多个常见位置），首次查找后缓存"""
+        """查找 ffmpeg 路径（搜多个常见位置 + imageio-ffmpeg），首次查找后缓存"""
         if ASREngine._cached_ffmpeg_path is not None:
             cached = ASREngine._cached_ffmpeg_path
             if os.path.isfile(cached) or shutil.which(cached):
@@ -139,6 +142,15 @@ class ASREngine:
             if shutil.which(candidate):
                 ASREngine._cached_ffmpeg_path = candidate
                 return candidate
+        # imageio-ffmpeg 内嵌
+        try:
+            import imageio_ffmpeg
+            exe = imageio_ffmpeg.get_ffmpeg_exe()
+            if exe and (os.path.isfile(exe) or shutil.which(exe)):
+                ASREngine._cached_ffmpeg_path = exe
+                return exe
+        except (ImportError, RuntimeError):
+            pass
         # 常见安装位置
         candidates = [
             Path(__file__).parent.parent / "ffmpeg" / "bin" / "ffmpeg.exe",
@@ -182,17 +194,16 @@ class ASREngine:
             return False
 
     def _get_model_dir(self) -> str:
-        """获取 FunASR 模型目录"""
+        """获取 FunASR 模型目录（自动创建，供 AutoModel 下载模型）"""
         if self.funasr_model_dir and os.path.isdir(self.funasr_model_dir):
             return self.funasr_model_dir
-        # 默认路径：项目下的 model/asr
+        # 默认路径：项目下的 model/asr，自动创建目录
         default = Path(__file__).parent.parent / "model" / "asr"
-        if default.exists():
-            return str(default)
-        return ""
+        os.makedirs(str(default), exist_ok=True)
+        return str(default)
 
     def _check_funasr_available(self) -> bool:
-        """检查 FunASR 是否可用（依赖 + 模型文件）"""
+        """检查 FunASR 是否可用（仅检查包是否安装，模型由 AutoModel 自动下载）"""
         if self._funasr_available is not None:
             return self._funasr_available
 
@@ -200,21 +211,7 @@ class ASREngine:
             self._funasr_available = False
             return False
 
-        model_dir = self._get_model_dir()
-        if not model_dir:
-            self._funasr_available = False
-            return False
-
-        # 检查关键模型文件
-        para_path = os.path.join(
-            model_dir, "models", "iic",
-            "speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
-            "model.pt"
-        )
-        if not os.path.isfile(para_path):
-            self._funasr_available = False
-            return False
-
+        # 只要 funasr 包已安装，就判为可用（AutoModel 首次调用会自动从 ModelScope 下载模型）
         self._funasr_available = True
         return True
 
@@ -287,60 +284,67 @@ class ASREngine:
     # 🎬 视频→音频提取（ffmpeg）
     # ═══════════════════════════════════════════════════════════════
 
-    def extract_audio(self, video_path: Path | str, output_dir: Path | str | None = None) -> Path | None:
-        """用 ffmpeg 从视频提取 16kHz 单声道 WAV（FunASR 推荐格式），ffmpeg 不可用时用 torchaudio 兜底"""
-        video_path = Path(video_path)
-        out_dir = Path(output_dir) if output_dir else video_path.parent
-        out_dir.mkdir(parents=True, exist_ok=True)
-        audio_path = out_dir / f"{video_path.stem}_audio.wav"
+    def extract_audio(self, video_path: Path | str, output_dir: Path | str | None = None) -> tuple[Path | None, float]:
+        """用 ffmpeg 从视频提取 16kHz 单声道 WAV（FunASR 推荐格式），ffmpeg 不可用时用 torchaudio 兜底。
+        返回 (音频路径, 耗时秒)"""
+        import time as _time
+        _start = _time.time()
+        try:
+            video_path = Path(video_path)
+            out_dir = Path(output_dir) if output_dir else video_path.parent
+            out_dir.mkdir(parents=True, exist_ok=True)
+            audio_path = out_dir / f"{video_path.stem}_audio.wav"
 
-        if audio_path.exists() and audio_path.stat().st_size > 1024:
-            return audio_path
+            if audio_path.exists() and audio_path.stat().st_size > 1024:
+                return audio_path, _time.time() - _start
 
-        ffmpeg = self._find_ffmpeg()
-        if os.path.isfile(ffmpeg) or shutil.which(ffmpeg):
-            # ✅ ffmpeg 可用，标准提取
-            cmd = [
-                ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
-                "-i", str(video_path),
-                "-vn",
-                "-acodec", "pcm_s16le",
-                "-ar", "16000",
-                "-ac", "1",
-                str(audio_path),
-            ]
-            try:
-                subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=600)
-                if audio_path.exists() and audio_path.stat().st_size > 1024:
-                    return audio_path
-                return None
-            except subprocess.CalledProcessError as e:
-                stderr_text = (e.stderr[:500] if e.stderr else "(无stderr)")
-                raise RuntimeError(f"ffmpeg 提取音频失败: {stderr_text}")
-            except subprocess.TimeoutExpired:
-                raise RuntimeError("ffmpeg 提取音频超时（10分钟）")
-        else:
-            # 🔧 ffmpeg 不可用，尝试 torchaudio 兜底
-            try:
-                import torchaudio
-                import torchaudio.functional as F
-                print(f"⚠️ ffmpeg 未找到，使用 torchaudio 提取音频: {video_path.name}")
-                waveform, sample_rate = torchaudio.load(str(video_path))
-                # 转单声道
-                if waveform.shape[0] > 1:
-                    waveform = waveform.mean(dim=0, keepdim=True)
-                # 重采样到 16kHz
-                if sample_rate != 16000:
-                    resampler = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=16000)
-                    waveform = resampler(waveform)
-                torchaudio.save(str(audio_path), waveform, 16000)
-                if audio_path.exists() and audio_path.stat().st_size > 1024:
-                    return audio_path
-                return None
-            except ImportError:
-                raise RuntimeError("ffmpeg 未安装且 torchaudio 不可用，无法提取音频。请安装 ffmpeg: https://ffmpeg.org/download.html")
-            except Exception as e:
-                raise RuntimeError(f"torchaudio 提取音频失败: {e}")
+            ffmpeg = self._find_ffmpeg()
+            if os.path.isfile(ffmpeg) or shutil.which(ffmpeg):
+                # ✅ ffmpeg 可用，标准提取
+                cmd = [
+                    ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+                    "-i", str(video_path),
+                    "-vn",
+                    "-acodec", "pcm_s16le",
+                    "-ar", "16000",
+                    "-ac", "1",
+                    str(audio_path),
+                ]
+                try:
+                    subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=600)
+                    if audio_path.exists() and audio_path.stat().st_size > 1024:
+                        return audio_path, _time.time() - _start
+                    return None, _time.time() - _start
+                except subprocess.CalledProcessError as e:
+                    stderr_text = (e.stderr[:500] if e.stderr else "(无stderr)")
+                    raise RuntimeError(f"ffmpeg 提取音频失败: {stderr_text}")
+                except subprocess.TimeoutExpired:
+                    raise RuntimeError("ffmpeg 提取音频超时（10分钟）")
+            else:
+                # 🔧 ffmpeg 不可用，尝试 torchaudio 兜底
+                try:
+                    import torchaudio
+                    import torchaudio.functional as F
+                    print(f"⚠️ ffmpeg 未找到，使用 torchaudio 提取音频: {video_path.name}")
+                    waveform, sample_rate = torchaudio.load(str(video_path))
+                    # 转单声道
+                    if waveform.shape[0] > 1:
+                        waveform = waveform.mean(dim=0, keepdim=True)
+                    # 重采样到 16kHz
+                    if sample_rate != 16000:
+                        resampler = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=16000)
+                        waveform = resampler(waveform)
+                    torchaudio.save(str(audio_path), waveform, 16000)
+                    if audio_path.exists() and audio_path.stat().st_size > 1024:
+                        return audio_path, _time.time() - _start
+                    return None, _time.time() - _start
+                except ImportError:
+                    raise RuntimeError("ffmpeg 未安装且 torchaudio 不可用，无法提取音频。请安装 ffmpeg: https://ffmpeg.org/download.html")
+                except Exception as e:
+                    raise RuntimeError(f"torchaudio 提取音频失败: {e}")
+        except Exception:
+            _elapsed = _time.time() - _start
+            raise
 
     # ═══════════════════════════════════════════════════════════════
     # FunASR (Paraformer) Primary Engine
@@ -353,7 +357,20 @@ class ASREngine:
             raise RuntimeError("funasr 未安装，请 pip install funasr")
 
         model_dir = self._get_model_dir()
-        print(f"[ASR] Loading FunASR model (local: {model_dir})...")
+        # 检测是否需要首次下载模型
+        model_exists = False
+        iic_dir = os.path.join(model_dir, "models", "iic")
+        if os.path.isdir(iic_dir):
+            for root, _, files in os.walk(iic_dir):
+                if "model.pt" in files:
+                    model_exists = True
+                    break
+        if model_exists:
+            print(f"[ASR] Loading FunASR model (cached: {model_dir})...")
+        else:
+            print(f"[ASR] [FIRST-TIME] 首次使用，正在从 ModelScope 下载模型 (~2GB, 约5-10分钟)...")
+            print(f"[ASR]  模型缓存目录: {model_dir}")
+            print(f"[ASR]  下载进度请稍候，后续使用将跳过此步骤...")
 
         # 设置模型缓存路径
         os.environ["TQDM_DISABLE"] = "1"
@@ -417,47 +434,13 @@ class ASREngine:
             print(f"[ASR] CUDA检查失败: {e}")
             return False
 
-    def transcribe_funasr(self, audio_path: Path | str) -> ASRResult:
-        """使用 FunASR/Paraformer 进行语音识别"""
-        audio_path = Path(audio_path)
-        if not self._check_funasr_available():
-            return ASRResult(
-                success=False,
-                error="FunASR 不可用（模型文件缺失或依赖未安装）",
-                backend="funasr"
-            )
-
-        if not audio_path.exists():
-            return ASRResult(
-                success=False,
-                error=f"音频文件不存在: {audio_path}",
-                backend="funasr"
-            )
-
+    def _transcribe_funasr_core(self, audio_path: Path) -> ASRResult:
+        """FunASR 单文件识别核心（前提：模型已加载，ffmpeg PATH已注入）"""
         try:
             duration = self._get_audio_duration(audio_path)
-            if duration > self.max_audio_duration:
-                return ASRResult(
-                    success=False, duration=duration,
-                    error=f"音频时长 {duration:.0f}s 超过上限 {self.max_audio_duration}s",
-                    backend="funasr"
-                )
         except Exception:
             duration = 0
-
         try:
-            # 确保 ffmpeg 在 PATH 中（FunASR 内部 _load_audio_ffmpeg 需要）
-            ffmpeg_path = self._find_ffmpeg()
-            prev_path = os.environ.get("PATH", "")
-            if ffmpeg_path and os.path.isfile(ffmpeg_path):
-                ffmpeg_dir = os.path.dirname(os.path.abspath(ffmpeg_path))
-                os.environ["PATH"] = ffmpeg_dir + os.pathsep + prev_path
-
-            # 加载模型（首次）
-            if self._model is None or self._backend_loaded != "funasr":
-                self._load_funasr_model()
-
-            # 执行识别
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                 result = self._model.generate(
                     input=str(audio_path),
@@ -480,7 +463,6 @@ class ASREngine:
                 if not text:
                     continue
 
-                # FunASR 时间戳
                 start = seg.get("start", seg.get("timestamp", [[0, 0]])[0][0] if "timestamp" in seg else 0)
                 if isinstance(start, list):
                     start = start[0] if start else 0
@@ -491,7 +473,6 @@ class ASREngine:
                 confidence = seg.get("confidence", seg.get("score", 0.8))
                 speaker = seg.get("spk", seg.get("speaker", ""))
 
-                # Safe timestamp conversion: prevent non-digit crash
                 def _safe_ts(val):
                     try:
                         f = float(val)
@@ -509,7 +490,6 @@ class ASREngine:
                 if s.confidence >= self.min_confidence:
                     segments.append(s)
 
-            # 如果没开spk分离且只有一个说话人，统一标记为UP主
             if not self.funasr_spk_enabled:
                 full_text = "\n".join(s.text for s in segments)
             else:
@@ -526,13 +506,221 @@ class ASREngine:
                 model_used="Paraformer-large (FunASR)",
                 backend="funasr",
             )
-
         except Exception as e:
             return ASRResult(
-                success=False, duration=duration,
+                success=False, duration=0,
                 error=f"FunASR 识别异常: {e}",
                 backend="funasr"
             )
+
+    def _transcribe_funasr_parallel(self, audio_path: Path) -> ASRResult:
+        """[PARALLEL] 长音频切块 → 多线程并行识别 → 合并去重
+        PyTorch CPU推理时释放GIL，多线程可以真正并行（约2-3x加速）
+        """
+        import concurrent.futures
+
+        duration = self._get_audio_duration(audio_path)
+        if duration <= 0:
+            return self._transcribe_funasr_core(audio_path)
+
+        nw = self.num_workers
+        min_chunk_s = 30
+        num_chunks = max(1, min(nw, max(1, int(duration / min_chunk_s))))
+        if num_chunks <= 1:
+            return self._transcribe_funasr_core(audio_path)
+
+        chunk_s = duration / num_chunks
+
+        ffmpeg = self._find_ffmpeg()
+        if not (os.path.isfile(ffmpeg) or shutil.which(ffmpeg)):
+            return self._transcribe_funasr_core(audio_path)
+
+        # ── 切分音频 ──
+        chunk_info = []
+        for i in range(num_chunks):
+            start = i * chunk_s
+            length = min(chunk_s + 3, duration - start)
+            if length <= 0:
+                break
+            chunk_path = audio_path.parent / f"{audio_path.stem}_c{i}.wav"
+            cmd = [
+                ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                "-i", str(audio_path), "-ss", str(start), "-t", str(length),
+                "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
+                str(chunk_path),
+            ]
+            try:
+                subprocess.run(cmd, capture_output=True, timeout=120)
+            except subprocess.TimeoutExpired:
+                continue
+            if chunk_path.exists() and chunk_path.stat().st_size > 1024:
+                chunk_info.append((chunk_path, start))
+            else:
+                try: chunk_path.unlink(missing_ok=True)
+                except OSError: pass
+
+        if len(chunk_info) <= 1:
+            for cp, _ in chunk_info:
+                try: cp.unlink(missing_ok=True)
+                except OSError: pass
+            return self._transcribe_funasr_core(audio_path)
+
+        print(f"[ASR] ⚡ 并行模式: {duration:.0f}s音频 → {len(chunk_info)}块×{len(chunk_info)}线程...")
+
+        model = self._model
+        _saved_omp = os.environ.get("OMP_NUM_THREADS", "")
+        _saved_mkl = os.environ.get("MKL_NUM_THREADS", "")
+
+        def _process_one(chunk_path, idx):
+            os.environ["OMP_NUM_THREADS"] = "1"
+            os.environ["MKL_NUM_THREADS"] = "1"
+            try:
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    result = model.generate(
+                        input=str(chunk_path),
+                        batch_size_s=self.funasr_batch_size_s,
+                        hotword=self.funasr_hotword or "",
+                        disable_pbar=True,
+                    )
+                if not result:
+                    return None
+                segments = []
+                for seg in result:
+                    text = seg.get("text", "").strip()
+                    text = _normalize_spaced_text(text)
+                    if not text:
+                        continue
+                    s = ASRSegment(
+                        start=seg.get("start", 0),
+                        end=seg.get("end", 0),
+                        text=text,
+                        confidence=float(seg.get("confidence", seg.get("score", 0.8))),
+                    )
+                    if s.confidence >= self.min_confidence:
+                        segments.append(s)
+                return segments
+            except Exception as e:
+                print(f"[ASR] 并行块 {idx} 失败: {e}")
+                return None
+
+        all_segments = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(chunk_info)) as executor:
+            futures = {}
+            for i, (chunk_path, start_offset) in enumerate(chunk_info):
+                fut = executor.submit(_process_one, chunk_path, i)
+                futures[fut] = (chunk_path, start_offset)
+
+            for fut in concurrent.futures.as_completed(futures):
+                chunk_path, start_offset = futures[fut]
+                try:
+                    chunk_segs = fut.result(timeout=600)
+                    if chunk_segs:
+                        for seg in chunk_segs:
+                            seg.start += start_offset
+                            seg.end += start_offset
+                        all_segments.extend(chunk_segs)
+                except Exception as e:
+                    print(f"[ASR] 并行块超时/异常: {e}")
+                finally:
+                    try: chunk_path.unlink(missing_ok=True)
+                    except OSError: pass
+
+        # 恢复环境变量
+        if _saved_omp:
+            os.environ["OMP_NUM_THREADS"] = _saved_omp
+        else:
+            os.environ.pop("OMP_NUM_THREADS", None)
+        if _saved_mkl:
+            os.environ["MKL_NUM_THREADS"] = _saved_mkl
+        else:
+            os.environ.pop("MKL_NUM_THREADS", None)
+
+        all_segments.sort(key=lambda s: s.start)
+        deduped = []
+        for seg in all_segments:
+            if deduped and seg.text.strip() == deduped[-1].text.strip() and seg.start - deduped[-1].start < 5:
+                deduped[-1].end = max(deduped[-1].end, seg.end)
+            else:
+                deduped.append(seg)
+
+        if not deduped:
+            return self._transcribe_funasr_core(audio_path)
+
+        if not self.funasr_spk_enabled:
+            full_text = "\n".join(s.text for s in deduped)
+        else:
+            full_text = "\n".join(
+                (f"[{s.speaker}] " if s.speaker else "") + s.text
+                for s in deduped
+            )
+
+        return ASRResult(
+            success=True,
+            text=full_text[:10000],
+            segments=deduped,
+            duration=duration,
+            model_used=f"Paraformer-large (FunASR Parallel x{len(chunk_info)})",
+            backend="funasr",
+        )
+
+    def transcribe_funasr(self, audio_path: Path | str) -> ASRResult:
+        """使用 FunASR/Paraformer 进行语音识别（长音频自动并行切块）"""
+        import time as _time
+        _t_start = _time.time()
+        audio_path = Path(audio_path)
+        if not self._check_funasr_available():
+            result = ASRResult(
+                success=False,
+                error="FunASR 不可用（模型文件缺失或依赖未安装）",
+                backend="funasr"
+            )
+            result.timing["transcribe_seconds"] = _time.time() - _t_start
+            return result
+
+        if not audio_path.exists():
+            result = ASRResult(
+                success=False,
+                error=f"音频文件不存在: {audio_path}",
+                backend="funasr"
+            )
+            result.timing["transcribe_seconds"] = _time.time() - _t_start
+            return result
+
+        try:
+            duration = self._get_audio_duration(audio_path)
+            if duration > self.max_audio_duration:
+                result = ASRResult(
+                    success=False, duration=duration,
+                    error=f"音频时长 {duration:.0f}s 超过上限 {self.max_audio_duration}s",
+                    backend="funasr"
+                )
+                result.timing["transcribe_seconds"] = _time.time() - _t_start
+                return result
+        except Exception:
+            duration = 0
+
+        # ── 确保 ffmpeg 在 PATH ──
+        ffmpeg_path = self._find_ffmpeg()
+        prev_path = os.environ.get("PATH", "")
+        if ffmpeg_path and os.path.isfile(ffmpeg_path):
+            ffmpeg_dir = os.path.dirname(os.path.abspath(ffmpeg_path))
+            os.environ["PATH"] = ffmpeg_dir + os.pathsep + prev_path
+
+        # ── 加载模型 ──
+        if self._model is None or self._backend_loaded != "funasr":
+            self._load_funasr_model()
+
+        try:
+            # [PARALLEL] 长音频(>120s)且worker≥2 → 并行切块处理
+            if duration > 120 and self.num_workers >= 2:
+                result = self._transcribe_funasr_parallel(audio_path)
+            else:
+                result = self._transcribe_funasr_core(audio_path)
+        finally:
+            os.environ["PATH"] = prev_path
+        
+        result.timing["transcribe_seconds"] = _time.time() - _t_start
+        return result
 
     # ═══════════════════════════════════════════════════════════════
     # 🎙️ Whisper 降级引擎
@@ -540,30 +728,38 @@ class ASREngine:
 
     def transcribe_whisper(self, audio_path: Path | str) -> ASRResult:
         """使用 Whisper 将音频转为文字（降级方案）"""
+        import time as _time
+        _t_start = _time.time()
         audio_path = Path(audio_path)
         whisper = _get_whisper()
         if whisper is None:
-            return ASRResult(
+            result = ASRResult(
                 success=False,
                 error="whisper 未安装，请 pip install openai-whisper",
                 backend="whisper"
             )
+            result.timing["transcribe_seconds"] = _time.time() - _t_start
+            return result
 
         if not audio_path.exists():
-            return ASRResult(
+            result = ASRResult(
                 success=False,
                 error=f"音频文件不存在: {audio_path}",
                 backend="whisper"
             )
+            result.timing["transcribe_seconds"] = _time.time() - _t_start
+            return result
 
         try:
             duration = self._get_audio_duration(audio_path)
             if duration > self.max_audio_duration:
-                return ASRResult(
+                result = ASRResult(
                     success=False, duration=duration,
                     error=f"音频时长 {duration:.0f}s 超过上限",
                     backend="whisper"
                 )
+                result.timing["transcribe_seconds"] = _time.time() - _t_start
+                return result
         except Exception:
             duration = 0
 
@@ -597,7 +793,7 @@ class ASREngine:
 
             full_text = " ".join(s.text for s in segments)
 
-            return ASRResult(
+            asr_result = ASRResult(
                 success=True,
                 text=full_text[:10000],
                 segments=segments,
@@ -605,12 +801,16 @@ class ASREngine:
                 model_used=self.whisper_model_name,
                 backend="whisper",
             )
+            asr_result.timing["transcribe_seconds"] = _time.time() - _t_start
+            return asr_result
 
         except Exception as e:
-            return ASRResult(
+            result = ASRResult(
                 success=False, duration=duration,
                 error=str(e), backend="whisper"
             )
+            result.timing["transcribe_seconds"] = _time.time() - _t_start
+            return result
 
     # ═══════════════════════════════════════════════════════════════
     # 👥 说话人分离（pyannote.audio，Whisper 降级时使用）
@@ -691,17 +891,26 @@ class ASREngine:
     # ═══════════════════════════════════════════════════════════════
 
     async def process_video(self, video_path: Path, title: str = "") -> ASRResult:
-        """完整 ASR 流程：提取音频 → 识别 → 说话人分离"""
+        """完整 ASR 流程：提取音频 → 识别 → 说话人分离（含耗时统计）"""
+        import time as _time
+        _pipeline_start = _time.time()
         loop = asyncio.get_event_loop()
 
         # 1. 提取音频
+        audio_extract_sec = 0.0
         try:
-            audio_path = await loop.run_in_executor(None, self.extract_audio, video_path, None)
+            audio_path, audio_extract_sec = await loop.run_in_executor(None, self.extract_audio, video_path, None)
         except Exception as e:
-            return ASRResult(success=False, error=f"音频提取失败: {e}")
+            result = ASRResult(success=False, error=f"音频提取失败: {e}")
+            result.timing["audio_extract_seconds"] = _time.time() - _pipeline_start
+            result.timing["total_pipeline_seconds"] = result.timing["audio_extract_seconds"]
+            return result
 
         if not audio_path:
-            return ASRResult(success=False, error="音频提取结果为空")
+            result = ASRResult(success=False, error="音频提取结果为空")
+            result.timing["audio_extract_seconds"] = audio_extract_sec
+            result.timing["total_pipeline_seconds"] = _time.time() - _pipeline_start
+            return result
 
         # 2. 选择引擎执行识别
         if self.backend == "funasr" and self._check_funasr_available():
@@ -714,6 +923,8 @@ class ASREngine:
         # 3. 说话人分离（仅 Whisper 需要额外处理）
         if not result.success:
             self._cleanup_audio(audio_path)
+            result.timing["audio_extract_seconds"] = audio_extract_sec
+            result.timing["total_pipeline_seconds"] = _time.time() - _pipeline_start
             return result
 
         if self.speaker_separation and result.backend == "whisper" and result.segments:
@@ -725,6 +936,9 @@ class ASREngine:
         # 4. 清理音频
         self._cleanup_audio(audio_path)
 
+        # ── 汇总耗时 ──
+        result.timing["audio_extract_seconds"] = round(audio_extract_sec, 2)
+        result.timing["total_pipeline_seconds"] = round(_time.time() - _pipeline_start, 2)
         return result
 
     def _cleanup_audio(self, audio_path: Path):
@@ -735,14 +949,70 @@ class ASREngine:
             except OSError:
                 pass
 
+    @staticmethod
+    def timing_summary(result: ASRResult, download_sec: float = 0, download_size_mb: float = 0) -> str:
+        """生成ASR全流程耗时汇总字符串。
+        
+        Args:
+            result: ASR结果
+            download_sec: 视频下载耗时（秒）
+            download_size_mb: 下载文件大小（MB）
+        Returns:
+            格式化的耗时汇总文本
+        """
+        t = result.timing
+        lines = ["\n⏱️ 【ASR耗时详情】"]
+        
+        if download_sec > 0:
+            lines.append(f"   视频下载: {download_sec:.1f}s ({download_size_mb:.1f}MB)" if download_size_mb > 0 else f"   视频下载: {download_sec:.1f}s")
+        
+        audio_extract = t.get("audio_extract_seconds", 0)
+        if audio_extract > 0:
+            lines.append(f"   音频提取: {audio_extract:.1f}s")
+        
+        transcribe = t.get("transcribe_seconds", 0)
+        if transcribe > 0:
+            lines.append(f"   ASR识别:  {transcribe:.1f}s (引擎: {result.backend.upper()})")
+        
+        pipeline = t.get("total_pipeline_seconds", 0)
+        if pipeline > 0:
+            lines.append(f"   ASR流水线: {pipeline:.1f}s (音频→识别→说话人)")
+        
+        total = t.get("total_elapsed_seconds", 0)
+        if total > 0:
+            lines.append(f"   全流程总计: {total:.1f}s")
+        elif pipeline > 0:
+            total = pipeline + download_sec
+            if download_sec > 0:
+                lines.append(f"   全流程总计: {total:.1f}s")
+        
+        # 效率对比
+        if result.duration > 0 and transcribe > 0:
+            speed = result.duration / transcribe
+            lines.append(f"   识别效率: {speed:.1f}x (音频{result.duration:.0f}s / 识别{transcribe:.1f}s)")
+        
+        return "\n".join(lines)
+
     # ═══════════════════════════════════════════════════════════════
     # ⏱️ 辅助：获取音频时长
     # ═══════════════════════════════════════════════════════════════
 
     def _get_audio_duration(self, audio_path: Path) -> float:
-        ffprobe = shutil.which("ffprobe") or (self.ffmpeg_path.replace("ffmpeg", "ffprobe") if self.ffmpeg_path else None)
-        if ffprobe and not shutil.which(ffprobe):
-            ffprobe = shutil.which(self.ffmpeg_path.replace("ffmpeg.exe", "ffprobe.exe")) if self.ffmpeg_path else None
+        # 优先使用 _find_ffmpeg 找到的路径推导 ffprobe
+        ffmpeg = self._find_ffmpeg()
+        ffprobe = None
+        if ffmpeg and ffmpeg != "ffmpeg":
+            ff_dir = os.path.dirname(os.path.abspath(ffmpeg))
+            candidates = [
+                os.path.join(ff_dir, "ffprobe.exe"),
+                os.path.join(ff_dir, "ffprobe"),
+            ]
+            for c in candidates:
+                if os.path.isfile(c):
+                    ffprobe = c
+                    break
+        if not ffprobe:
+            ffprobe = shutil.which("ffprobe")
         if not ffprobe:
             return 0
         cmd = [
@@ -753,9 +1023,12 @@ class ASREngine:
         ]
         try:
             result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=30)
-            return float(result.stdout.strip())
+            dur = float(result.stdout.strip())
+            if dur > 0:
+                return dur
         except (ValueError, subprocess.TimeoutExpired):
-            return 0
+            pass
+        return 0
 
 
 # ═══════════════════════════════════════════════════════════════
