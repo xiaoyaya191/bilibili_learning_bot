@@ -1,7 +1,7 @@
 # 🔧 bilibili_learning_bot 重构完成
 
 > 目标达成：16.8K 行单体 → 4 行入口 + 24 个小文件
-> 版本：3.0.0 | License: MIT
+> 版本：3.0.1 | License: MIT
 
 ---
 

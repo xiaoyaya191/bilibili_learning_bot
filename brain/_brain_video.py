@@ -32,7 +32,7 @@ class BrainVideoMixin:
 
     async def _understand_super_smart(self, bvid, title=None, force_mode=None):
         """
-        [BRAIN] 超级智能理解链（v3.0.0）：
+        [BRAIN] 超级智能理解链（v3.0.1）：
         1. 先抓字幕
         2. 字幕有内容 → AI判断字幕是否足够覆盖视频核心
         3. 字幕足够 → 直接用字幕，不下载视频 [OK]

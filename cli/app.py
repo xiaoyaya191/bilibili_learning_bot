@@ -775,7 +775,7 @@ def show_main_menu():
     print(f"""
     ╔══════════════════════════════════════════════════════════╗
     ║           bilibili_learning_bot - B站学习互动机器人     ║
-    ║               版本: v3.0.0 全功能增强版                  ║
+    ║               版本: v3.0.1 全功能增强版                  ║
     ║       特性: 智能兴趣引擎+投币管控+19种HTML风格+19种视觉风格   ║
     ╠══════════════════════════════════════════════════════════╣
     ╚══════════════════════════════════════════════════════════╝
@@ -3805,6 +3805,7 @@ async def video_to_html_bg():
         sibling_dirs = [
             ("bilibili_learning_bot", "Data/bilibili_cookies.json"),
             ("bilibili_learning_bot-2.2.1", "Data/bilibili_cookies.json"),
+            ("bilibili_learning_bot-3.0.1", "Data/bilibili_cookies.json"),
             ("bilibili_learning_bot-2.2.2/bilibili_learning_bot-3.0.0", "Data/bilibili_cookies.json"),
             ("bilibili_claw", "Data/bilibili_cookies.json"),
             ("batch_unfollow", "Data/bilibili_cookies.json"),

@@ -189,6 +189,7 @@ async def manual_video_analysis():
         sibling_dirs = [
             ("bilibili_learning_bot", "Data/bilibili_cookies.json"),
             ("bilibili_learning_bot-2.2.1", "Data/bilibili_cookies.json"),
+            ("bilibili_learning_bot-3.0.1", "Data/bilibili_cookies.json"),
             ("bilibili_learning_bot-2.2.2/bilibili_learning_bot-3.0.0", "Data/bilibili_cookies.json"),
             ("bilibili_claw", "Data/bilibili_cookies.json"),
             ("batch_unfollow", "Data/bilibili_cookies.json"),
