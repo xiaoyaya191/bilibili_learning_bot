@@ -380,7 +380,8 @@ KB_METADATA_FILE = os.path.join(BASE_DIR, "knowledge_metadata.json")
 # 见文件顶部的 _CONFIG_PATHS 映射表和 __getattr__ 函数。
 # 旧静态赋值已删除，NO_HUMAN_DELAY 等变量现在每次访问时实时从 config 字典读取。
 
-DEFAULT_CONFIG = config  # 引用默认配置模板
+# DEFAULT_CONFIG 从 core.config 导入真正的默认模板（而非运行时 config 对象）
+from core.config import DEFAULT_CONFIG  # noqa: E402
 
 # ══════════════════════════════════════════════════════════
 # JSON 辅助
@@ -407,7 +408,7 @@ def _save_json_file(path, data):
 
 
 def save_search_history(query, results_count):
-    """保存搜索记录"""
+    """保存搜索记录（原子写入）"""
     try:
         history = []
         if os.path.exists(SEARCH_HISTORY_FILE):
@@ -420,7 +421,11 @@ def save_search_history(query, results_count):
         })
         if len(history) > 100:
             history = history[-100:]
-        with open(SEARCH_HISTORY_FILE, 'w', encoding='utf-8') as f:
+        tmp_path = f"{SEARCH_HISTORY_FILE}.tmp"
+        with open(tmp_path, 'w', encoding='utf-8') as f:
             json.dump(history, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, SEARCH_HISTORY_FILE)
+    except OSError as e:
+        print(f"[WARN] 保存搜索历史失败: {e}", flush=True)
     except Exception as e:
         log(f"保存搜索记录失败: {e}", "WARN")

@@ -44,7 +44,10 @@ class BrainLoopMixin:
             from services.interest_engine import get_engine
             engine = get_engine()
             interests_new = engine.get_keywords()
-        except Exception:
+        except ImportError:
+            interests_new = []
+        except Exception as e:
+            log(f"兴趣引擎加载异常: {e}", "WARN")
             interests_new = []
         all_interests = list(dict.fromkeys(interests_old + interests_new))
         if all_interests:

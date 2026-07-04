@@ -306,8 +306,8 @@ def load_json_file(path, default):
         try:
             with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[WARN] 加载 JSON 文件失败: {path} - {e}", flush=True)
     return default.copy() if isinstance(default, dict) else default
 
 
@@ -319,7 +319,8 @@ def save_json_file(path, data):
             json.dump(data, f, ensure_ascii=False, indent=2)
         os.replace(tmp, path)
         return True
-    except Exception:
+    except Exception as e:
+        print(f"[WARN] 保存 JSON 文件失败: {path} - {e}", flush=True)
         return False
 
 

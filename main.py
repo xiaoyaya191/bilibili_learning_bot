@@ -41,6 +41,20 @@ def _run_async(coro):
     return asyncio.run(coro)
 
 
+def _safe_async(name, coro, *, finally_cb=None):
+    """统一的异步操作包装器：错误捕获 + 可选清理回调"""
+    try:
+        _run_async(coro)
+    except KeyboardInterrupt:
+        print(f"\n{Fore.YELLOW}[WARN] 用户中断{Style.RESET_ALL}")
+    except Exception as e:
+        print(f"{Fore.RED}[ERROR] {name}异常: {e}{Style.RESET_ALL}")
+        traceback.print_exc()
+    finally:
+        if finally_cb:
+            finally_cb()
+
+
 def main():
     """主菜单循环"""
     if os.name == 'nt':

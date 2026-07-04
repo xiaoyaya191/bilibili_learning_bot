@@ -78,7 +78,9 @@ def _hash_password(password: str) -> str:
 def _verify_password(password: str, stored: str) -> bool:
     """验证密码是否匹配存储的哈希"""
     if not stored or not stored.startswith('$sha256$'):
-        # 兼容旧版明文密码：直接比较
+        # 兼容旧版明文密码：直接比较（已废弃，建议重新设置密码以启用加密存储）
+        import warnings
+        warnings.warn("检测到旧版明文密码存储，建议进入 Web 面板重新设置密码以启用安全哈希", DeprecationWarning)
         return password == stored
     _, _, salt, hash_hex = stored.split('$', 3)
     h = hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), 100_000)
@@ -3225,6 +3227,7 @@ def api_kb_tutor_chat():
 
         def _run():
             nonlocal result, error
+            loop = None
             try:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
@@ -3256,9 +3259,11 @@ def api_kb_tutor_chat():
                             tutor.chat_about_file(full_paths, message, history)
                         )
                     result = dict(mode='chat', reply=reply)
-                loop.close()
             except Exception as e:
                 error = str(e)
+            finally:
+                if loop is not None and not loop.is_closed():
+                    loop.close()
 
         t = threading.Thread(target=_run, daemon=True)
         t.start()

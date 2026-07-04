@@ -17,7 +17,7 @@
 | 📡 **实时监听** | 独立消息监听，只盯私信+评论实时 AI 回复，不刷视频不耗精力 |
 | 🔔 **@通知响应** | 在任何视频下评论 "@bot 总结这个视频"，自动识别并总结回复 |
 | 🧬 **日记与自我进化** | 记录行为日志，AI 自我反思，人格动态进化 |
-| 🎙️ **ASR语音识别** | 视频语音转文字（FunASR / Whisper，可选） |
+| 🎙️ **ASR语音识别** | DASH 音视频分离下载 + ffmpeg 合并带声音，语音转文字（FunASR / Whisper，可选） |
 | 🤖 **Agent技能系统** | 自主规划目标→搜索 B站→看视频→总结知识，全自动闭环 |
 | 🔄 **复习回顾** | 定时重温已学知识，优化记忆 |
 | 🎓 **知识辅导** | AI 讲解/问答/二次创作/生成 HTML 学习卡片 |
@@ -137,9 +137,10 @@ pip install -r requirements.txt
 # 如果之前装过旧包，先卸载：
 # pip uninstall bilibili-api -y
 
-# 推荐安装 ffmpeg（视频帧提取）
-# apt install ffmpeg    # Linux
-# pkg install ffmpeg    # Termux
+# 推荐安装 ffmpeg（视频下载音视频合并 + 视频帧提取）
+# winget install ffmpeg          # Windows（不是 pip install!）
+# apt install ffmpeg             # Linux
+# pkg install ffmpeg             # Termux
 ```
 
 ### 2️⃣ 配置

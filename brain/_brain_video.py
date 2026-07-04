@@ -332,7 +332,7 @@ class BrainVideoMixin:
             for old in frames_dir.glob("frame_*.jpg"):
                 old.unlink()
             
-            # 获取时长
+            # 获取时长: 优先 ffprobe, fallback 到 ffmpeg stderr 解析
             ffprobe = find_ffprobe()
             ffmpeg = find_ffmpeg()
             duration = 0
@@ -344,19 +344,46 @@ class BrainVideoMixin:
                     duration = int(float(dur_out.stdout.strip())) if dur_out.stdout.strip() else 0
                 except Exception:
                     duration = 0
+            
+            # ffprobe 失败时用 ffmpeg stderr 解析 Duration
+            if duration <= 0 and ffmpeg:
+                try:
+                    dur_out2 = _sp.run([ffmpeg, "-i", str(video_path), "-f", "null", "-"],
+                        capture_output=True, text=True, timeout=30)
+                    import re as _re
+                    dm = _re.search(r"Duration:\s*(\d+):(\d+):(\d+)\.(\d+)", dur_out2.stderr)
+                    if dm:
+                        h, mi, s, ms = map(int, dm.groups())
+                        duration = h * 3600 + mi * 60 + s + (1 if ms > 0 else 0)
+                except Exception:
+                    pass
+
             if not ffmpeg:
+                log("[EYE] ffmpeg 未找到，无法抽帧", "WARN")
                 return None
             
-            # [SMART_FRAME] 使用AI决定的帧数
-            interval = max(1, duration // max(1, actual_frame_count)) if duration else 5
+            # [SMART_FRAME] 使用AI决定的帧数，用 fps 速率精确控制
+            if duration and duration > 0:
+                fps_rate = actual_frame_count / max(1, duration)
+                vf_filter = f"fps={fps_rate:.4f},scale=640:-1"
+            else:
+                vf_filter = "fps=1/5,scale=640:-1"
+            
             pattern = str(frames_dir / "frame_%03d.jpg")
-            _sp.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
-                "-i", str(video_path), "-vf", f"fps=1/{interval},scale=640:-1",
-                "-frames:v", str(actual_frame_count), pattern],
-                timeout=120, capture_output=True)
+            ffmpeg_result = _sp.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+                "-i", str(video_path), "-vf", vf_filter,
+                "-vsync", "vfr", pattern],
+                timeout=120, capture_output=True, text=True)
+            
+            if ffmpeg_result.returncode != 0:
+                log(f"[EYE] ffmpeg 抽帧失败 (rc={ffmpeg_result.returncode}): {ffmpeg_result.stderr.strip()[-200:]}", "ERROR")
+            
             frames = sorted(frames_dir.glob("frame_*.jpg"))
             if not frames:
+                log(f"[EYE] 抽帧结果为空 (duration={duration}, frame_count={actual_frame_count})", "WARN")
                 return None
+            
+            log(f"[EYE] ffmpeg 生成 {len(frames)} 帧 (期望 {actual_frame_count} 帧, 时长 {duration}s)", "DEBUG")
             
             # [SMART_FRAME] 帧数较多时智能抽样：均匀选取不超过max_frames_for_ai张发送给视觉AI
             # 避免一次发送太多图片导致API超限/成本过高
@@ -887,13 +914,14 @@ class BrainVideoMixin:
             log(f"📚 知识库审查完成: 抽查 {sample_size} 个条目全部通过", "KB")
 
     async def _download_video_for_asr(self, bvid):
-        """为ASR下载视频（完全对齐video_modes.py的下载逻辑：http2/Origin/Referer/长超时）。
-        返回 (视频路径, 下载耗时秒, 文件大小MB)"""
+        """DASH 模式下载视频（音视频分离 + ffmpeg 合并），确保有声音。
+        返回 (视频路径, 下载耗时秒, 文件大小MB)
+        无 ffmpeg 时回退到 FLV 一体流。"""
         import time as _t2
         _dl_start = _t2.time()
         file_size_mb = 0.0
         try:
-            import tempfile, hashlib as _h
+            import tempfile, hashlib as _h, subprocess as _sp
             import httpx as _httpx
             referer = f'https://www.bilibili.com/video/{bvid}'
             headers = {
@@ -904,7 +932,7 @@ class BrainVideoMixin:
             async with _httpx.AsyncClient(
                 http2=True,
                 headers=headers, cookies=self.cookies,
-                timeout=90.0, follow_redirects=True
+                timeout=180.0, follow_redirects=True
             ) as client:
                 # [FIX] WBI签名：独立获取，不依赖 self.bili._wbi_keys 避免 AttributeError
                 wkeys = None
@@ -917,46 +945,110 @@ class BrainVideoMixin:
                         sm = re.search(r'/([^/]+)\.(?:png|svg)$', wi.get('sub_url', ''))
                         if im and sm:
                             wkeys = (im.group(1), sm.group(1))
-                            # 顺便缓存到 bili 实例（如果可用）
                             bili = getattr(self, 'bili', None)
                             if bili and hasattr(bili, '_wbi_keys'):
                                 try:
                                     bili._wbi_keys = wkeys
                                     bili._wbi_keys_ts = time.time()
-                                except Exception as e:
-                                    log(f'非预期异常: {e}', 'WARN')
+                                except Exception:
+                                    pass
                 except Exception as e:
                     log(f"[WARN] ASR下载WBI密钥获取失败: {e}", "WARN")
 
-                params = {'bvid': bvid}
-                if wkeys:
-                    wts = int(_t2.time())
-                    sp = dict(params)
-                    sp['wts'] = wts
+                def _sign(params_dict):
+                    if not wkeys:
+                        return params_dict
+                    sp = dict(params_dict)
+                    sp['wts'] = int(_t2.time())
                     si = sorted(sp.items(), key=lambda x: x[0])
                     qs = '&'.join(f'{k}={v}' for k, v in si)
                     sp['w_rid'] = _h.md5((qs + wkeys[0] + wkeys[1]).encode()).hexdigest()
-                    params = sp
+                    return sp
 
-                v_res = await client.get('https://api.bilibili.com/x/web-interface/view', params=params)
+                # 获取视频元信息（cid/aid）
+                v_res = await client.get('https://api.bilibili.com/x/web-interface/view',
+                                         params=_sign({'bvid': bvid}))
                 v_data = v_res.json()
                 if v_data.get('code') != 0:
                     return None, 0, 0
                 info = v_data['data']
                 cid = info.get('cid', 0)
 
-                # 获取视频流
-                play_params = {'bvid': bvid, 'cid': cid, 'qn': 32, 'fnval': 0, 'fourk': 0}
-                if wkeys:
-                    wts = int(_t2.time())
-                    sp = dict(play_params)
-                    sp['wts'] = wts
-                    si = sorted(sp.items(), key=lambda x: x[0])
-                    qs = '&'.join(f'{k}={v}' for k, v in si)
-                    sp['w_rid'] = _h.md5((qs + wkeys[0] + wkeys[1]).encode()).hexdigest()
-                    play_params = sp
+                # ffmpeg 检测
+                ffmpeg = find_ffmpeg() or shutil.which('ffmpeg')
+
+                out_dir = os.path.join(tempfile.gettempdir(), "bilibili_asr", bvid)
+                os.makedirs(out_dir, exist_ok=True)
+                out_path = os.path.join(out_dir, f"{bvid}.mp4")
+
+                # ── 方案A: DASH 音视频分离 + ffmpeg 合并（有声音 + 高清）──
+                if ffmpeg:
+                    try:
+                        dash_params = _sign({
+                            'bvid': bvid, 'cid': cid,
+                            'qn': 127, 'fnval': 4048, 'fnver': 0, 'fourk': 1,
+                        })
+                        play = await client.get(
+                            'https://api.bilibili.com/x/player/wbi/playurl',
+                            params=dash_params
+                        )
+                        play_data = play.json()
+                        if play_data.get('code') == 0:
+                            dash = play_data.get('data', {}).get('dash')
+                            if dash and dash.get('video') and dash.get('audio'):
+                                video_url = dash['video'][0]['base_url']
+                                audio_url = dash['audio'][0]['base_url']
+
+                                video_tmp = os.path.join(out_dir, f"{bvid}_video.m4s")
+                                audio_tmp = os.path.join(out_dir, f"{bvid}_audio.m4s")
+
+                                try:
+                                    # 下载视频流
+                                    async with client.stream("GET", video_url, headers=headers) as v_resp:
+                                        v_resp.raise_for_status()
+                                        with open(video_tmp, "wb") as f:
+                                            async for chunk in v_resp.aiter_bytes(1024 * 1024):
+                                                f.write(chunk)
+                                    # 下载音频流
+                                    async with client.stream("GET", audio_url, headers=headers) as a_resp:
+                                        a_resp.raise_for_status()
+                                        with open(audio_tmp, "wb") as f:
+                                            async for chunk in a_resp.aiter_bytes(1024 * 1024):
+                                                f.write(chunk)
+                                    # ffmpeg 合并
+                                    result = _sp.run([
+                                        ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                                        "-i", video_tmp, "-i", audio_tmp,
+                                        "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+                                        "-movflags", "+faststart", out_path,
+                                    ], capture_output=True, text=True)
+                                    if result.returncode != 0:
+                                        _sp.run([
+                                            ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                                            "-i", video_tmp, "-i", audio_tmp,
+                                            "-c", "copy", "-movflags", "+faststart", out_path,
+                                        ], check=True, capture_output=True)
+                                finally:
+                                    # 清理临时文件
+                                    if os.path.exists(video_tmp):
+                                        os.unlink(video_tmp)
+                                    if os.path.exists(audio_tmp):
+                                        os.unlink(audio_tmp)
+
+                                file_size_mb = os.path.getsize(out_path) / (1024 * 1024) if os.path.exists(out_path) else 0
+                                download_sec = _t2.time() - _dl_start
+                                log(f"[ASR下载(DASH)] 耗时 {download_sec:.1f}s, 大小 {file_size_mb:.1f}MB", "DEBUG")
+                                return out_path, download_sec, file_size_mb
+                    except Exception as e:
+                        log(f"[ASR下载] DASH模式失败，回退FLV: {e}", "DEBUG")
+
+                # ── 方案B: FLV 单流回退（无需 ffmpeg，音视频一体）──
+                play_params = _sign({
+                    'bvid': bvid, 'cid': cid,
+                    'qn': 80, 'fnval': 0, 'fnver': 0, 'fourk': 1,
+                })
                 play = await client.get(
-                    'https://api.bilibili.com/x/player/playurl',
+                    'https://api.bilibili.com/x/player/wbi/playurl',
                     params=play_params
                 )
                 play_data = play.json()
@@ -964,11 +1056,6 @@ class BrainVideoMixin:
                 if not durls:
                     return None, 0, 0
                 video_url = durls[0]['url']
-
-                # 下载
-                out_dir = os.path.join(tempfile.gettempdir(), "bilibili_asr", bvid)
-                os.makedirs(out_dir, exist_ok=True)
-                out_path = os.path.join(out_dir, f"{bvid}.mp4")
 
                 async with client.stream("GET", video_url, headers=headers) as resp:
                     resp.raise_for_status()
@@ -978,7 +1065,7 @@ class BrainVideoMixin:
 
                 file_size_mb = os.path.getsize(out_path) / (1024 * 1024) if os.path.exists(out_path) else 0
                 download_sec = _t2.time() - _dl_start
-                log(f"[ASR下载] 耗时 {download_sec:.1f}s, 文件大小 {file_size_mb:.1f}MB", "DEBUG")
+                log(f"[ASR下载(FLV)] 耗时 {download_sec:.1f}s, 文件大小 {file_size_mb:.1f}MB", "DEBUG")
                 return out_path, download_sec, file_size_mb
         except Exception as e:
             download_sec = _t2.time() - _dl_start

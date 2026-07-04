@@ -354,6 +354,64 @@ DEFAULT_CONFIG = {
         "chat": "",
         "vision": "",
         "fast": ""
+    },
+    "knowledge": {
+        "auto_reclassify_enabled": True,
+        "auto_reclassify_interval_minutes": 10,
+        "auto_reclassify_clean_empty": True
+    },
+    "knowledge_verify": {
+        "enabled": True,
+        "use_web_search": True,
+        "min_reliability_score": 0.7,
+        "auto_fix": True
+    },
+    "curiosity_search": {
+        "enabled": True,
+        "max_videos_per_dive": 10,
+        "dive_videos_default": 3,
+        "dive_videos_mid": 5,
+        "dive_videos_max": 10,
+        "trigger_min_score": 7.5,
+        "prob_trigger": 0.3,
+        "cooldown_minutes": 120
+    },
+    "dry_goods": {
+        "enabled": False,
+        "min_score": 7.5,
+        "folder_name": "highlights"
+    },
+    "ai_subtitle_verify": {
+        "enabled": True,
+        "knowledge_review_interval": 10,
+        "knowledge_review_sample_size": 3
+    },
+    "cooldown": {
+        "startup_cooldown_min": 5,
+        "startup_cooldown_max": 10,
+        "post_comment_cooldown_min": 3,
+        "post_comment_cooldown_max": 8,
+        "post_dm_cooldown_min": 3,
+        "post_dm_cooldown_max": 8
+    },
+    "psycho_engine": {
+        "enabled": True,
+        "deep_analyze_interval_videos": 100,
+        "heuristic_update_interval": 15,
+        "cocoon_detect_interval": 15,
+        "cocoon_warning_threshold": 0.35,
+        "recommend_prob_per_round": 0.08,
+        "min_views_before_recommend": 10,
+        "max_surprise_daily": 5,
+        "max_explore_daily": 5,
+        "max_anticocoon_daily": 3,
+        "min_actions_for_deep_analysis": 50,
+        "deep_analysis_cooldown_seconds": 14400,
+        "max_actions_in_log": 2000,
+        "max_recommendation_log": 200,
+        "aversion_auto_blacklist_threshold": 3,
+        "aversion_score_block_threshold": 0.7,
+        "aversion_score_warn_threshold": 0.4
     }
 }
 
@@ -1147,7 +1205,7 @@ def configure_fallback_provider():
 
 def configure_api_key():
     global UNIFIED_API_KEY, openai
-    print(f"\n{Fore.CYAN}当前API密钥: {UNIFIED_API_KEY}{Style.RESET_ALL}")
+    print(f"\n{Fore.CYAN}当前API密钥: {mask_secret(UNIFIED_API_KEY)}{Style.RESET_ALL}")
     new_key = input(f"{Fore.YELLOW}请输入新的API密钥 (直接回车保持原样): {Style.RESET_ALL}").strip()
     if new_key:
         config["api"]["unified_api_key"] = new_key
@@ -1975,7 +2033,7 @@ def show_current_config():
     print(f"{Fore.CYAN}════════════════════════════════════════════════════════════{Style.RESET_ALL}")
 
     print(f"\n{Fore.YELLOW}📡 API配置:{Style.RESET_ALL}")
-    print(f"  • API密钥: {UNIFIED_API_KEY[:15]}...{UNIFIED_API_KEY[-5:] if len(UNIFIED_API_KEY) > 20 else ''}")
+    print(f"  • API密钥: {mask_secret(UNIFIED_API_KEY)}")
     print(f"  • API地址: {UNIFIED_BASE_URL}")
     print(f"  • 思考模型: {MODEL_BRAIN}")
     print(f"  • 视觉模型: {MODEL_VISION}")
@@ -2716,7 +2774,8 @@ def _load_recent_journal_events(limit=20):
     try:
         with open(JOURNAL_FILE, "r", encoding="utf-8") as f:
             content = f.read()
-    except Exception:
+    except Exception as e:
+        print(f"{Fore.YELLOW}[WARN] 读取日记文件失败: {e}{Style.RESET_ALL}", flush=True)
         return []
 
     entries = []
