@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-title bilibili_learning_bot - Web Panel [Account1:8080]
+title bilibili_learning_bot - Web Panel [Account1:7860]
 cd /d "%~dp0"
 
 echo.

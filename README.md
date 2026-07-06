@@ -166,8 +166,13 @@ python3 web_panel.py
 
 **Docker 部署**:
 ```bash
-docker-compose up -d
-# 访问 http://localhost:8080
+docker compose up -d
+# 访问 http://localhost:7860
+```
+
+默认容器内外端口统一为 `7860`，和 Web 管理面板监听端口一致；如需改宿主机端口：
+```bash
+WEB_PORT=17860 docker compose up -d
 ```
 
 **Termux (Android) 一键启动**:
@@ -229,6 +234,46 @@ bash start.sh
 **19 种视觉风格**：Claude Slides / Bento 网格 / 玻璃拟态 / 极光渐变 / 新野蛮主义 / 深色OLED / 赛博朋克 / 新拟态 / 液态玻璃 / 复古主义 / Linear / 新变风 / 柔和流行 / PromptPort ...
 
 **模板文件**：`templates/claude/examples/` 下有 7 个参考页面，可直接浏览器打开。
+
+
+## 🐳 Docker 镜像发布与在线更新
+
+### 本地构建
+```bash
+docker compose build
+docker compose up -d
+```
+
+### 使用已发布镜像
+发布到 Docker Hub 后，把 `.env` 或启动环境里的 `DOCKER_IMAGE` 改成你的镜像名：
+```bash
+DOCKER_IMAGE=yourname/bilibili_learning_bot:latest docker compose up -d
+```
+
+### 更新容器
+Web 面板“关于系统”会读取当前 `VERSION`，并通过 `UPDATE_CHECK_URL` 检查远端最新版本。发现新版时会提示：
+```bash
+docker compose pull
+docker compose up -d
+```
+
+默认 `UPDATE_CHECK_URL` 为空，不主动联网；发布者可以填 GitHub raw `VERSION` 或自托管 version.txt：
+```bash
+UPDATE_CHECK_URL=https://example.com/bilibili_learning_bot/VERSION docker compose up -d
+```
+
+### 推送到 Docker Hub
+仓库已包含 GitHub Actions 工作流 `.github/workflows/docker-publish.yml`：
+
+1. 在 GitHub 仓库 Settings → Secrets and variables → Actions 中添加：
+   - `DOCKERHUB_USERNAME`
+   - `DOCKERHUB_TOKEN`
+2. push 到 `main` 或打 `v*.*.*` tag 后自动构建并推送：
+   - `latest`
+   - `VERSION` 文件里的版本号
+   - tag 版本
+
+凭据只放 GitHub Secrets，不要写进代码、compose 或镜像。
 
 ## 🔒 隐私安全
 

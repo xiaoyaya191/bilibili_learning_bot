@@ -66,6 +66,61 @@ COOKIE_FILE = DATA_DIR / "bilibili_cookies.json"
 # 账号标识名（显示在网页标题等处）
 ACCOUNT_NAME = os.getenv('BILI_ACCOUNT_NAME', '').strip() or '默认'
 
+VERSION_FILE = BASE_DIR / "VERSION"
+def _read_app_version() -> str:
+    """读取当前应用版本，优先使用镜像/容器注入的 APP_VERSION。"""
+    env_version = os.getenv('APP_VERSION', '').strip()
+    if env_version:
+        return env_version.lstrip('v')
+    try:
+        return VERSION_FILE.read_text(encoding='utf-8').strip().lstrip('v') or '0.0.0'
+    except Exception:
+        return '0.0.0'
+
+APP_VERSION = _read_app_version()
+DEFAULT_UPDATE_CHECK_URL = "https://raw.githubusercontent.com/xiaoyaya191/bilibili_learning_bot/main/VERSION"
+UPDATE_CHECK_URL = os.getenv('UPDATE_CHECK_URL', DEFAULT_UPDATE_CHECK_URL).strip()
+UPDATE_CHECK_TTL = int(os.getenv('UPDATE_CHECK_TTL', '3600'))
+_update_cache = {"checked_at": 0.0, "data": None}
+
+def _version_key(version: str):
+    parts = []
+    for part in (version or '').strip().lstrip('v').split('.'):
+        num = ''.join(ch for ch in part if ch.isdigit())
+        parts.append(int(num) if num else 0)
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts[:3])
+
+def check_update(force: bool = False) -> dict:
+    """检查远端 VERSION。失败不影响面板加载。"""
+    now = time.time()
+    if not force and _update_cache["data"] and now - _update_cache["checked_at"] < UPDATE_CHECK_TTL:
+        return _update_cache["data"]
+    data = {
+        "current": APP_VERSION,
+        "latest": None,
+        "has_update": False,
+        "checked_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        "source": UPDATE_CHECK_URL,
+        "error": None,
+    }
+    if not UPDATE_CHECK_URL:
+        data["error"] = "未配置更新检查地址"
+    else:
+        try:
+            import urllib.request
+            req = urllib.request.Request(UPDATE_CHECK_URL, headers={"User-Agent": "bilibili-learning-bot-update-check"})
+            with urllib.request.urlopen(req, timeout=4) as resp:
+                latest = resp.read(128).decode('utf-8', errors='replace').strip().splitlines()[0].strip().lstrip('v')
+            data["latest"] = latest
+            data["has_update"] = _version_key(latest) > _version_key(APP_VERSION)
+        except Exception as e:
+            data["error"] = str(e)
+    _update_cache["checked_at"] = now
+    _update_cache["data"] = data
+    return data
+
 app = Flask(__name__, static_folder=None)
 
 # ── 🔐 密码哈希（SHA-256 + salt，不引入额外依赖） ──
@@ -2175,9 +2230,16 @@ def api_info():
         python_version=sys.version.split()[0],
         platform=sys.platform,
         cwd=str(BASE_DIR),
+        version=APP_VERSION,
+        update=check_update(False),
         asr_enabled=config.get('asr', {}).get('enabled', False),
         asr_backend=config.get('asr', {}).get('backend', 'funasr'),
     ))
+
+@app.route('/api/version')
+def api_version():
+    force = request.args.get('force') in {'1', 'true', 'yes'}
+    return jsonify(check_update(force))
 
 # ── 配置 ──
 @app.route('/api/config', methods=['GET','POST'])
@@ -3435,12 +3497,9 @@ def _disclaimer_html():
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
 <title>免责声明 — B站 AI 管理系统</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;background:#f7f7f7;color:#0d0d0d;display:flex;align-items:center;justify-content:center;min-height:100vh;-webkit-font-smoothing:antialiased}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;background:#f7f7f7;color:#0d0d0d;display:flex;align-items:center;justify-content:center;min-height:100vh;-webkit-font-smoothing:antialiased}
 .card{background:#fff;border:1px solid #e6e6e6;border-radius:16px;padding:40px 36px;max-width:480px;width:90%;text-align:center;box-shadow:0 4px 24px rgba(0,0,0,.06)}
 .card .icon{font-size:36px;margin-bottom:16px}
 .card h2{color:#D14343;font-size:20px;font-weight:600;margin-bottom:8px;letter-spacing:-.3px}
@@ -3505,12 +3564,9 @@ def _setup_html():
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
 <title>首次设置 · 管理面板</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;background:#f7f7f7;color:#0d0d0d;display:flex;align-items:center;justify-content:center;min-height:100vh;-webkit-font-smoothing:antialiased}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;background:#f7f7f7;color:#0d0d0d;display:flex;align-items:center;justify-content:center;min-height:100vh;-webkit-font-smoothing:antialiased}
 .card{background:#fff;border:1px solid #e6e6e6;border-radius:16px;padding:40px 36px;max-width:420px;width:90%;text-align:center;box-shadow:0 4px 24px rgba(0,0,0,.06)}
 .card .icon{font-size:36px;margin-bottom:16px}
 .card h2{color:#0d0d0d;font-size:20px;font-weight:600;margin-bottom:6px;letter-spacing:-.3px}
@@ -3571,12 +3627,9 @@ def _login_html():
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
 <title>登录 · 管理面板</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;background:#f7f7f7;color:#0d0d0d;display:flex;align-items:center;justify-content:center;min-height:100vh;-webkit-font-smoothing:antialiased}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;background:#f7f7f7;color:#0d0d0d;display:flex;align-items:center;justify-content:center;min-height:100vh;-webkit-font-smoothing:antialiased}
 .card{background:#fff;border:1px solid #e6e6e6;border-radius:16px;padding:40px 36px;max-width:400px;width:90%;text-align:center;box-shadow:0 4px 24px rgba(0,0,0,.06)}
 .card .icon{font-size:36px;margin-bottom:16px}
 .card h2{color:#0d0d0d;font-size:20px;font-weight:600;margin-bottom:6px;letter-spacing:-.3px}
@@ -3705,6 +3758,10 @@ def api_auth_status():
 # ── 面板认证检查（免责声明 + 首次设置 + 登录）──
 @app.before_request
 def _check_auth():
+    # 版本/健康检查接口必须免登录，便于 Docker HEALTHCHECK 和主页更新探测
+    if request.endpoint == 'api_version' or request.path == '/api/version':
+        return None
+
     # 1. 先检查免责声明
     if not session.get('disclaimer_agreed'):
         if request.endpoint in ('disclaimer_page', 'api_disclaimer_confirm', 'static'):
@@ -3741,7 +3798,7 @@ def _check_auth():
 #  启动
 # ═══════════════════════════════════════════
 def main():
-    port = int(os.getenv('WEB_PORT', '8080'))
+    port = int(os.getenv('WEB_PORT', '7860'))
     host = os.getenv('WEB_HOST', '0.0.0.0')
     account_label = f" [账号: {ACCOUNT_NAME}]" if ACCOUNT_NAME != '默认' else ""
 

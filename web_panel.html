@@ -4,9 +4,6 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
 <title>{{ACCOUNT_TITLE}}</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@100;200;300;400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <script>if(typeof Chart==='undefined'){document.write('<script src="https://cdn.bootcdn.net/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"><\/script>')}</script>
 <script>if(typeof Chart==='undefined'){document.write('<script src="https://unpkg.com/chart.js@4.4.0/dist/chart.umd.min.js"><\/script>')}</script>
@@ -41,7 +38,7 @@
   --sidebar-border: #EBEBEB;
   --log-bg: #F5F5F5;
   --log-text: #333333;
-  --font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
   --font-mono: 'SF Mono', 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
 }
 
@@ -359,6 +356,13 @@ a:hover{color:var(--accent-hover)}
 .qr-wrap{text-align:center;padding:36px}
 .qr-wrap img{max-width:200px;border-radius:8px;border:1px solid var(--border)}
 .qr-wrap .qr-status{margin-top:16px;font-size:14px;font-weight:500;color:var(--text-secondary)}
+
+/* ── UPDATE NOTICE ── */
+.update-notice{margin-top:14px;padding:12px 14px;border:1px solid var(--border);border-radius:12px;background:var(--bg-card);font-size:13px;color:var(--text-secondary)}
+.update-notice.ok{border-color:var(--green);background:var(--green-bg);color:var(--green)}
+.update-notice.warn{border-color:var(--accent);background:var(--accent-bg);color:var(--accent)}
+.update-notice.err{border-color:var(--border);color:var(--text-tertiary)}
+.update-notice code{font-family:var(--font-mono);font-size:12px;background:var(--bg-secondary);padding:2px 6px;border-radius:6px;color:var(--text-primary)}
 
 /* ── TOAST ── */
 .toast{
@@ -1549,14 +1553,24 @@ var d=await api('GET','/api/info');
 function aboutCard(label,value,mono){
 return '<div class="info-card"><div class="il">'+label+'</div><div class="iv'+(mono?' style="font-family:var(--font-mono);font-size:13px"':'')+'">'+value+'</div></div>';
 }
+var up=d.update||{};
+var updateHtml='';
+if(up.has_update){
+  updateHtml='<div class="update-notice warn">发现新版 v'+esc(up.latest||'-')+'，当前 v'+esc(d.version||up.current||'-')+'。Docker 部署可执行 <code>docker compose pull && docker compose up -d</code> 更新。</div>';
+}else if(up.error){
+  updateHtml='<div class="update-notice err">当前 v'+esc(d.version||up.current||'-')+'，暂时无法检查更新：'+esc(up.error)+'</div>';
+}else{
+  updateHtml='<div class="update-notice ok">当前已是最新版 v'+esc(d.version||up.current||'-')+'</div>';
+}
 document.getElementById('aboutBox').innerHTML='<div class="info-grid">'+
-aboutCard('系统版本','v1.0')+
+aboutCard('系统版本','v'+esc(d.version||'0.0.0'))+
+aboutCard('最新版本',up.latest?('v'+esc(up.latest)):'-')+
 aboutCard('面板运行时长',d.uptime)+
 aboutCard('Python 版本',d.python_version||'-')+
 aboutCard('运行平台',d.platform||'-')+
 aboutCard('工作目录',d.cwd||'-',true)+
 aboutCard('机器人状态',d.bot_running?'运行中':'已停止')+
-'</div>'+
+'</div>'+updateHtml+
 '<div class="sec-divider"></div>'+
 '<p style="font-size:14px;color:var(--text-secondary);line-height:2"><strong style="color:var(--text-primary);font-weight:500">B站 AI 智能管理系统</strong><br>基于大语言模型 · 视频理解 · 评论互动 · 私信回复 · 知识沉淀 · 自我进化</p>'+
 '<div style="margin-top:16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap"><span style="color:var(--text-secondary);font-size:13px">作者联系方式：</span><span style="display:inline-flex;align-items:center;gap:6px;background:var(--accent-bg);padding:8px 16px;border-radius:8px;color:var(--accent);font-weight:500;font-size:14px;letter-spacing:.5px">QQ: 3781960338</span><span style="display:inline-flex;align-items:center;gap:6px;background:var(--accent-bg);padding:8px 16px;border-radius:8px;color:var(--accent);font-weight:500;font-size:14px;letter-spacing:.5px">交流群: 1056941856</span></div>';
