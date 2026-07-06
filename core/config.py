@@ -8,6 +8,7 @@ import sys
 import json
 import hashlib, base64, secrets
 from colorama import Fore, Style
+from utils.display import mask_secret
 from utils.storage import get_backup_dir
 
 # ===== 路径常量 =====
@@ -290,14 +291,6 @@ def get_config_or_env(section, key, env_name):
     if val is not None:
         return val
     return config.get(section, {}).get(key, "")
-
-
-def mask_secret(value):
-    if not value:
-        return "(未配置)"
-    if len(value) <= 12:
-        return "*" * len(value)
-    return f"{value[:6]}...{value[-4:]}"
 
 
 # ===== JSON 辅助 =====

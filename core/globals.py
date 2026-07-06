@@ -11,7 +11,10 @@ from datetime import datetime
 from colorama import Fore, Style
 
 from core.config import config, load_config as _load_config, save_config as _save_config
-from core.config import get_backup_dir, mask_secret, get_config_or_env
+from core.config import (
+    get_backup_dir, mask_secret, get_config_or_env,
+    _get_vision_api_key, _get_vision_base_url, _get_fallback_models,
+)
 from utils.display import log
 
 # ══════════════════════════════════════════════════════════
@@ -267,21 +270,6 @@ _CONFIG_PATHS = {
 }
 
 # 特殊处理的 getter：需要回退逻辑或额外计算
-def _get_vision_api_key():
-    val = config.get("api", {}).get("vision_api_key")
-    if val:
-        return val
-    return get_config_or_env("api", "unified_api_key", "BILI_AI_API_KEY")
-
-def _get_vision_base_url():
-    val = config.get("api", {}).get("vision_base_url")
-    if val:
-        return val
-    return get_config_or_env("api", "unified_base_url", "BILI_AI_BASE_URL")
-
-def _get_fallback_models():
-    return config.get("fallback_models", {})
-
 def _get_fallback_model_chat():
     return config.get("fallback_models", {}).get("chat", "")
 
