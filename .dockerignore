@@ -2,25 +2,35 @@
 .git
 .gitignore
 .gitattributes
+.github
 
 # Python
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
 *.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 .venv/
 venv/
 *.egg-info/
 
-# 本地运行时数据（挂载卷方式注入）
+# Local runtime data: mounted through Docker volumes
 Data/
 KnowledgeBase/
 highlights/
+html_exports/
+model/
+qr_codes/
+storage/
+backups/
 
-# 临时文件
+# Runtime files / secrets / logs
 *.zip
 *.bak
 *.db
+*.sqlite
 *.tmp
 *.log
 bot_memory.json
@@ -29,32 +39,25 @@ learning_log.md
 knowledge_metadata.json
 bot.pid
 bot_web.log
+.cipher_key
+.web_secret_key
+.env
+.env.*
+!.env.example
+config.json
+bilibili_cookies.json
 
-# IDE / 编辑器
+# IDE / editor
 .idea/
 .vscode/
 *.swp
 *.swo
 *~
 
-# 备份和存储
-backups/
-storage/
-html_exports/
-model/
-
-# 运行时密钥和锁
-.cipher_key
-.web_secret_key
-
-# 测试和文档（不需要打包进镜像）
-tests/
-*.md
-!README.md
+# Local launch helpers not needed in image
 *.bat
-*.sh
 *.ps1
 
-# 杂项
+# CI/test/cache docs not needed at runtime
 .reasonix/
 .codebuddy/

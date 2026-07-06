@@ -164,10 +164,16 @@ python3 web_panel.py
 # 包含: 仪表盘 / 机器人控制 / 实时监听 / 配置编辑 / 知识辅导 等页面
 ```
 
-**Docker 部署**:
+**Docker 部署（推荐）**:
 ```bash
-docker-compose up -d
-# 访问 http://localhost:8080
+docker compose up -d
+# 访问 http://localhost:7860
+```
+
+默认容器内外端口统一为 `7860`，和 Web 管理面板监听端口一致；运行数据会写入 Docker volumes，升级镜像不丢配置和 Cookie。需要改宿主机端口时只改左侧端口：
+```bash
+WEB_PORT=17860 docker compose up -d
+# 访问 http://localhost:17860，容器内仍是 7860
 ```
 
 **Termux (Android) 一键启动**:
@@ -229,6 +235,138 @@ bash start.sh
 **19 种视觉风格**：Claude Slides / Bento 网格 / 玻璃拟态 / 极光渐变 / 新野蛮主义 / 深色OLED / 赛博朋克 / 新拟态 / 液态玻璃 / 复古主义 / Linear / 新变风 / 柔和流行 / PromptPort ...
 
 **模板文件**：`templates/claude/examples/` 下有 7 个参考页面，可直接浏览器打开。
+
+
+## 🐳 Docker 部署、更新与镜像发布
+
+### 端口说明
+
+Web 管理面板默认监听 `7860`，Docker 里也保持 `7860:7860`，避免“宿主机端口”和“容器内端口”不一致导致排查困难。
+
+```bash
+# 默认：宿主机 7860 -> 容器 7860
+docker compose up -d
+
+# 如宿主机 7860 被占用，只改左侧宿主机端口
+WEB_PORT=17860 docker compose up -d
+```
+
+访问地址：
+- 默认：`http://localhost:7860`
+- 自定义宿主机端口：`http://localhost:17860`
+
+### 数据持久化
+
+`docker-compose.yml` 默认使用 Docker volumes，不把运行数据打进镜像：
+
+| Volume | 容器路径 | 用途 |
+|---|---|---|
+| `bili_data` | `/app/Data` | 配置、Cookie、日志、状态数据 |
+| `bili_knowledge` | `/app/KnowledgeBase` | 知识库 |
+| `bili_highlights` | `/app/highlights` | 高光/归档内容 |
+| `bili_exports` | `/app/html_exports` | HTML/PPT 导出结果 |
+
+查看数据卷：
+```bash
+docker volume ls | grep bili_
+```
+
+备份示例：
+```bash
+docker run --rm   -v bili_data:/data   -v "$PWD":/backup   alpine tar czf /backup/bili_data_backup.tar.gz -C /data .
+```
+
+### 本地源码构建
+
+适合开发者或还没发布镜像时使用：
+
+```bash
+docker compose build
+docker compose up -d
+```
+
+常用检查：
+```bash
+docker compose ps
+docker compose logs -f bilibili-bot
+```
+
+### 使用已发布镜像
+
+发布到 Docker Hub 或 GHCR 后，可以通过 `DOCKER_IMAGE` 指定镜像，不必本地 build：
+
+```bash
+DOCKER_IMAGE=yourname/bilibili_learning_bot:latest docker compose up -d
+```
+
+也可以写入 `.env`：
+```env
+DOCKER_IMAGE=yourname/bilibili_learning_bot:latest
+WEB_PORT=7860
+APP_VERSION=3.0.1
+UPDATE_CHECK_URL=
+```
+
+然后启动：
+```bash
+docker compose up -d
+```
+
+### 在线更新提示
+
+Web 面板“关于系统”会显示：
+- 当前版本：来自 `APP_VERSION` 环境变量，未设置时读取 `VERSION` 文件
+- 最新版本：来自 `UPDATE_CHECK_URL`
+- 有新版时：提示执行 `docker compose pull && docker compose up -d`
+
+默认 `UPDATE_CHECK_URL` 为空，不主动联网。发布者可以填 GitHub raw `VERSION`、自托管 version.txt，或其它只返回版本号的文本地址：
+
+```bash
+UPDATE_CHECK_URL=https://example.com/bilibili_learning_bot/VERSION docker compose up -d
+```
+
+更新流程：
+```bash
+docker compose pull
+docker compose up -d
+```
+
+如果是本地源码构建镜像：
+```bash
+git pull
+docker compose build
+docker compose up -d
+```
+
+### 推送到 Docker Hub / GHCR
+
+仓库已包含 GitHub Actions 工作流 `.github/workflows/docker-publish.yml`，支持自动构建并推送：
+
+1. 如需推送 Docker Hub，在 GitHub 仓库 Settings → Secrets and variables → Actions 中添加：
+   - `DOCKERHUB_USERNAME`
+   - `DOCKERHUB_TOKEN`
+2. GHCR 使用仓库自带的 `GITHUB_TOKEN`，不需要额外配置。
+3. push 到 `main` 或打 `v*.*.*` tag 后自动构建多架构镜像：
+   - `latest`
+   - `VERSION` 文件里的版本号
+   - Git tag 版本
+
+注意：凭据只放 GitHub Secrets，不要写进代码、compose、README 或镜像。
+
+### 常见问题
+
+**1. 访问不到 Web 面板**
+```bash
+docker compose ps
+docker compose logs --tail=100 bilibili-bot
+```
+确认容器健康状态，以及端口是否是 `7860:7860` 或你自定义的 `WEB_PORT:7860`。
+
+**2. 更新后配置丢失？**
+正常不会。配置和 Cookie 在 Docker volumes 里，不在镜像里。不要手动删除 `bili_data` volume。
+
+**3. 版本检查失败但面板能用？**
+正常。`UPDATE_CHECK_URL` 为空或网络不可达时只是不显示远端最新版，不影响机器人运行。
 
 ## 🔒 隐私安全
 
