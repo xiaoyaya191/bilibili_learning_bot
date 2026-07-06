@@ -13,6 +13,7 @@ from core.config import config
 from core.globals import SUBTITLE_STRICT_CHECK
 from utils.display import log
 from utils.helpers import _mask_urls
+from utils.subtitles import subtitle_priority
 from api.throttle import _bili_throttle
 
 async def fetch_bilibili_subtitles(bvid, cookies_obj=None, title=None, ai_verify_func=None):
@@ -155,15 +156,7 @@ async def fetch_bilibili_subtitles(bvid, cookies_obj=None, title=None, ai_verify
                 return False, "[该视频无有效CC字幕]", video_desc, False
 
             # ── 按优先级排序所有字幕轨，逐个下载验证 ──
-            def _sub_priority(s):
-                lan = s.get('lan', '')
-                if lan == 'ai-zh': return 0
-                if lan == 'zh': return 10
-                if 'zh' in lan: return 20
-                if lan.startswith('ai-'): return 30
-                return 50
-
-            sorted_subs = sorted(subs, key=_sub_priority)
+            sorted_subs = sorted(subs, key=subtitle_priority)
             _ai_mismatch_count = 0  # 连续AI验证不匹配计数
 
             for sub_idx, sub_info in enumerate(sorted_subs):
