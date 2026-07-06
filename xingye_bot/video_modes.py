@@ -14,6 +14,8 @@ from typing import Any
 
 import httpx
 
+from utils.subtitles import subtitle_priority
+
 from .llm import ModelClient
 from .settings import BotSettings, DATA_DIR
 
@@ -227,14 +229,7 @@ class VideoUnderstanding:
                 asset.subtitles = "[该视频没有可用 CC 字幕]"
                 return
             # [AI字幕] 优先选AI中文 > 人工中文 > 其他中文
-            def _sub_priority(s):
-                lan = s.get('lan', '')
-                if lan == 'ai-zh': return 0
-                if lan == 'zh': return 10
-                if 'zh' in lan: return 20
-                if lan.startswith('ai-'): return 30
-                return 50
-            best_sub = min(subs, key=_sub_priority)
+            best_sub = min(subs, key=subtitle_priority)
             sub_url = best_sub.get("subtitle_url", '')
             # [FIX] player/wbi/v2 返回的 URL 可能为空但 subtitle_url_v2 有效
             if not sub_url or sub_url in ('/', ''):
