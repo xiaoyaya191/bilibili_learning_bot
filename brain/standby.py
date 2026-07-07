@@ -479,6 +479,20 @@ class StandbyBot:
 
         aid_str = str(aid) if aid else target_bv
 
+        if self._is_rag_question(ntf.get('content', '')):
+            reply_text = await self._answer_rag_question(ntf.get('content', ''))
+            if len(reply_text) > 500:
+                reply_text = reply_text[:480] + "...[完整回答请在Web面板知识库问答查看]"
+            await self._post_comment(
+                client, aid_str,
+                int(rpid) if rpid.isdigit() else 0,
+                int(rpid) if rpid.isdigit() else 0,
+                reply_text or "知识库暂未找到相关内容。"
+            )
+            self.stats['at_replies'] += 1
+            save_stats(self.stats)
+            return
+
         # 获取视频信息 + 字幕
         video_info = await self._get_video_info(client, target_bv)
         if not video_info:
@@ -522,6 +536,14 @@ class StandbyBot:
         """legacy: 在自己视频下的@触发处理"""
         self._log(f"[AT] {comment['uname']} @请求: {bv_or_topic}", "AT")
         target_bv = bv_or_topic if bv_or_topic and bv_or_topic != "auto" else my_bvid
+
+        if self._is_rag_question(comment.get('content', '')):
+            reply_text = await self._answer_rag_question(comment.get('content', ''))
+            if len(reply_text) > 500:
+                reply_text = reply_text[:480] + "...[完整回答请在Web面板知识库问答查看]"
+            await self._post_comment(client, my_bvid, int(comment['rpid']), int(comment['rpid']), reply_text or "知识库暂未找到相关内容。")
+            save_stats(self.stats)
+            return
 
         video_info = await self._get_video_info(client, target_bv)
         if not video_info:

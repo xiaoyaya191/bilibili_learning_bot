@@ -1,0 +1,553 @@
+================================================================================
+  bilibili_learning_bot v3.0.2 — 开发者完整参考手册
+  项目路径: G:\code\work\bilibili_learning_bot-3.0.2
+  更新时间: 2026-07-07
+================================================================================
+
+【⚠ 重要规则】每次完成开发任务后，必须及时更新本文件！
+  新增/删除/修改文件 -> 立即更新本手册对应章节
+  新增/修改功能 -> 在"变更记录"章节追加记录
+
+================================================================================
+  一、项目概述
+================================================================================
+
+项目名称: bilibili_learning_bot (B站 AI 学习互动机器人)
+项目介绍: https://bot1.bxya.top/
+许可证:   MIT
+版本:     3.0.2（VERSION / README / CLI / 启动脚本已统一）
+
+核心功能: AI 驱动的 B站自动刷视频、学知识、评论互动、自我进化机器人
+
+================================================================================
+  二、项目目录结构（完整文件清单）
+================================================================================
+
+G:\code\work\测试/
+│
+├── main.py                          # 🚀 主入口 (244行), CLI交互式菜单
+├── start_cli.py                     # 📎 兼容转发层 (23行), 引导到 main.py
+├── web_panel.py                     # 🌐 Flask Web 管理面板 (大文件)
+├── web_panel.html                   # 🎨 Web面板前端模板
+│
+├── api/                             # 🔌 B站 API 层
+│   ├── __init__.py
+│   ├── client.py                   # B站客户端 BiliClient, 视频/评论/私信/UP主等API
+│   ├── auth.py                     # 登录认证, 扫码/二维码/Cookie 登录
+│   ├── subtitles.py               # 字幕获取与校验, player/wbi/v2 412风控 fallback
+│   ├── throttle.py                # 请求节流器, 控制API调用频率
+│   ├── compat.py                  # 兼容层
+│   └── qr_codes/                  # 生成的二维码图片目录
+│
+├── brain/                           # 🧠 核心大脑 (Mixin 组合模式)
+│   ├── __init__.py
+│   ├── agent_brain.py             # 主调度器 AgentBrain 类 (Mixin组合, ~55行核心)
+│   ├── _mixin_imports.py          # Mixin 统一导入汇总
+│   ├── _brain_init.py             # 初始化: 加载配置/登录/知识库/全局状态
+│   ├── _brain_loop.py             # 主循环: 视频推荐流浏览 (~905行)
+│   ├── _brain_video.py           # 视频理解: 封面分析/帧提取/AI理解/评分 (~621行)
+│   ├── _brain_session.py         # 会话管理: 学习会话/决策引擎 (~640行)
+│   ├── _brain_ai.py              # AI 调用后端: LLM请求/重试/Fallback管理
+│   ├── _brain_learn.py           # 学习归档: 知识提取/入库/分类
+│   ├── _brain_curiosity.py       # 好奇心搜索: 自发搜索B站新知识
+│   ├── _brain_auto.py            # 自动日记/自我进化触发
+│   ├── _brain_journal.py         # 日记/学习日志系统
+│   ├── _brain_history.py         # 视频历史: 已看视频去重/追踪
+│   ├── _brain_ups.py             # UP主管理: 关注/取关/主页浏览
+│   ├── _brain_runtime.py         # 运行时时钟: 休眠/时间窗口
+│   ├── _brain_interact.py       # 视觉分析+互动: 图片理解/评论回复
+│   ├── comment.py               # 评论互动管理: 获取/回复/节奏控制
+│   ├── private_msg.py           # 私信处理: 获取/回复/上下文管理
+│   ├── video_analysis.py        # 视频分析: V命令 手动分析BV号视频
+│   ├── standby.py               # 待机监听 v2: @通知响应引擎
+│   ├── monitor.py               # 实时监听引擎: 私信+评论实时AI回复
+│   └── Data/                    # brain模块内部数据
+│
+├── knowledge/                       # 📚 知识库系统
+│   ├── __init__.py
+│   ├── classifier.py            # 智能分类: 3层分类器, 知识条目评分归档
+│   ├── web_search.py            # 联网搜索 + AI 验证知识可靠性
+│   ├── browse.py                # 浏览整理: 知识库浏览/搜索/管理
+│   ├── revisit.py               # 知识重温: 定时复习已学知识
+│   ├── organize.py              # 一键整理: 知识库批量优化
+│   └── custom.py               # 自定义知识管理: 增删改查 + AI搜索B站整理入库
+│
+├── persona/                         # 🎭 人格 + 心理系统
+│   ├── managers.py              # 人格/心情/日记/进化管理器
+│   ├── psycho.py               # 心理画像引擎: 用户画像/推荐系统/反茧房
+│   └── Data/                    # 人格数据存储
+│
+├── security/                        # 🛡️ 安全审查
+│   ├── __init__.py
+│   └── guard.py                # 内容审查: 关键词过滤/政治敏感拦截/注入防护
+│
+├── cli/                             # 💻 命令行界面
+│   ├── __init__.py
+│   └── app.py                  # 菜单+配置系统 (~4200行): 所有菜单函数/配置管理
+│
+├── core/                            # ⚙️ 核心配置
+│   ├── __init__.py
+│   ├── config.py               # 统一配置加载/保存: load_config()/save_config()
+│   └── globals.py             # 运行时全局变量: 动态从 config 读取 (~280行)
+│
+├── services/                        # 🔧 服务模块
+│   ├── __init__.py
+│   ├── agent_service.py        # Agent 技能执行: 目标规划->搜索B站->看视频->总结
+│   ├── knowledge_tutor.py      # 知识辅导: AI讲解/问答/二次创作/生成HTML学习卡片
+│   ├── mindmap_export.py       # Markdown → markmap HTML 思维导图导出（自动/手动/批量）
+│   ├── platform_adapter.py     # B站视频输入识别与归一化（BV号 / 链接 / b23.tv 短链）
+
+│   ├── rag_qa.py               # KnowledgeBase RAG 检索问答服务（Web API + @bot入口）
+│   ├── version_history.py      # 知识笔记多版本记录与 diff 保存
+│   ├── video_to_ppt.py         # 视频→HTML网页: 19种视觉风格可选
+│   ├── interest_engine.py      # 🎯 智能兴趣引擎 v2.0: 多维度评分/同义词/排除词/PsychoProfile同步/AI建议
+│   └── utils.py               # 服务工具: 兴趣管理/配置处理
+│
+├── utils/                           # 🛠 通用工具
+│   ├── __init__.py
+│   ├── helpers.py              # 工具函数: _safe_task_callback等通用函数
+│   ├── storage.py             # JSON 线程安全存储: JsonStore + 脱敏 + 原子写入
+│   ├── display.py             # 日志显示: 格式化输出/颜色
+│   └── lock.py               # 单实例锁: 防止重复启动机器人
+│
+├── xingye_bot/                      # 🤖 扩展组件（legacy 模块，部分功能已迁移到新模块）
+│   ├── __init__.py
+│   ├── llm.py                 # LLM 客户端: ModelClient, 带 fallback 重试
+│   ├── state.py              # 状态管理: BotState + JsonStore
+│   ├── memory.py             # 语义记忆: 向量嵌入记忆系统
+│   ├── settings.py           # 设置: 从 core.config 读取
+│   ├── diary.py              # 日记系统
+│   ├── evolution.py          # 自我进化: 人格/行为策略自我优化
+│   ├── skills.py             # Agent 技能定义
+│   ├── asr_engine.py         # 语音识别: FunASR/Whisper 引擎
+│   ├── video_modes.py        # 视频理解: 多模态分析
+│   ├── video_asr.py          # 视频ASR处理
+│   ├── kb_search.py          # 向量检索: 知识库语义搜索
+│   ├── bilibili_ops.py       # B站操作封装
+│   ├── background.py         # 后台任务管理
+│   ├── proactive.py          # 主动行为: 自动评论/点赞/投币
+│   ├── safety.py             # 安全检查 (legacy)
+│   ├── web_search.py         # 联网搜索
+│   └── owner.py              # 主人管理
+│
+├── templates/                       # 🎨 设计模板
+│   └── claude/
+│       ├── prompts/           # AI 设计规范 (v1.0)
+│       ├── examples/          # 7 个参考 HTML 页面
+│       └── ... (7 HTML + 2 MD)
+│
+├── tests/                           # 🧪 测试 (pytest, 5个测试文件)
+│   ├── __init__.py
+│   ├── test_display.py
+│   ├── test_helpers.py
+│   ├── test_json_utils.py
+│   └── test_reply_safety.py
+
+│
+├── Data/                            # 💾 运行时数据（自动生成）
+│   └── config.json            # 主配置文件 (从 config.example.json 创建)
+│
+├── KnowledgeBase/                   # 📖 知识库文件存储
+├── html_exports/                    # 📄 HTML 导出目录
+│
+├── config.example.json              # 📋 配置模板文件 (完整配置示例, 200+行)
+├── requirements.txt                 # 📦 Python 依赖清单 (精确版本锁定)
+│
+├── Dockerfile                       # 🐳 Docker 镜像构建 (多阶段, Python 3.11-slim)
+├── docker-compose.yml               # 🐳 Docker Compose 编排 (端口8080, 数据持久化)
+│
+├── start.sh                         # 📱 Termux (Android) 启动脚本
+├── install_termux.sh               # 📱 Termux 安装脚本
+├── 启动网页版.bat                   # 🪟 Windows 启动脚本 (端口8080, 账号1)
+├── 启动网页版_账号2.bat            # 🪟 Windows 启动脚本 (端口8081, 账号2)
+│
+├── README.md                        # 📖 项目文档
+├── CHANGELOG.md                     # 📋 更新日志 (2.2.1 → 3.0.0 → 3.0.2)
+├── REFACTOR_PLAN.md                # 🔧 重构记录 (16.8K行→模块化 + 代码审查)
+├── VERSION                          # 📌 版本号: 3.0.2
+├── SECURITY.md                      # 🔒 安全说明
+├── LICENSE                          # 📄 MIT 许可证
+├── pyrightconfig.json              # 🔍 Pyright 类型检查配置
+├── _upgrade_v2.py                   # 📦 v2升级脚本
+├── test_v2_slides.py               # 🧪 v2幻灯片测试
+└── bilibili_learning_bot_slides.html # 🎬 项目介绍幻灯片
+
+================================================================================
+  三、架构设计
+================================================================================
+
+【整体架构】
+  main.py (入口) ──> cli/app.py (菜单路由) ──> brain/agent_brain.py (核心大脑)
+        │                                              │
+        └── web_panel.py (Web面板)                      ├── api/ (B站API层)
+                                                       ├── knowledge/ (知识库)
+                                                       ├── persona/ (人格心理)
+                                                       ├── services/ (服务模块)
+                                                       ├── security/ (安全)
+                                                       └── xingye_bot/ (扩展组件)
+
+【核心类: AgentBrain】
+  - 位置: brain/agent_brain.py
+  - 设计模式: Mixin 组合模式 (13个 Mixin 类横向组合)
+  - 主要方法: run() — 启动机器人主循环
+  - Mixin 列表:
+    1. _BrainInitMixin      (_brain_init.py)      — 初始化
+    2. _BrainLoopMixin      (_brain_loop.py)      — 主循环
+    3. _BrainVideoMixin     (_brain_video.py)     — 视频理解
+    4. _BrainSessionMixin   (_brain_session.py)   — 会话管理
+    5. _BrainAIMixin        (_brain_ai.py)        — AI调用
+    6. _BrainLearnMixin     (_brain_learn.py)     — 学习归档
+    7. _BrainCuriosityMixin (_brain_curiosity.py)  — 好奇心搜索
+    8. _BrainAutoMixin      (_brain_auto.py)      — 自动日记/进化
+    9. _BrainJournalMixin   (_brain_journal.py)   — 日记系统
+   10. _BrainHistoryMixin   (_brain_history.py)   — 视频历史
+   11. _BrainUpsMixin       (_brain_ups.py)       — UP主管理
+   12. _BrainRuntimeMixin   (_brain_runtime.py)   — 运行时时钟
+   13. _BrainInteractMixin  (_brain_interact.py)  — 交互/视觉
+
+【数据流】
+  用户操作 -> main.py -> cli/app.py 菜单 -> AgentBrain.run()
+    -> _brain_loop.py: B站推荐流获取视频
+    -> _brain_video.py: 封面/帧/AI理解 + 评分
+    -> _brain_learn.py: 高质量视频 -> 知识提取 -> knowledge/classifier.py 分类归档
+    -> knowledge/KnowledgeBase/: 持久化存储
+    -> persona/managers.py: 更新人格/心情
+    -> persona/psycho.py: 更新心理画像
+
+【配置系统】
+  配置文件: Data/config.json (从 config.example.json 复制)
+  加载:     core/config.py -> load_config()
+  保存:     core/config.py -> save_config() (tmp+replace 原子写入)
+  全局变量: core/globals.py — 从 config 动态读取, 通过 from core.globals import * 使用
+
+================================================================================
+  四、入口与启动方式
+================================================================================
+
+| 方式 | 命令 | 说明 |
+|------|------|------|
+| CLI交互式菜单 | python main.py | 244行主菜单, 23个功能选项 |
+| Web管理面板 (账号1) | python web_panel.py | 默认端口7860, Flask |
+| Web管理面板 (账号2) | python web_panel.py --port 8081 | 或双击 启动网页版_账号2.bat |
+| Windows快捷启动 | 双击 启动网页版.bat | 账号1, 端口8080 |
+| Termux (Android) | bash start.sh | 交互式菜单选择模式 |
+| Docker | docker-compose up -d | 端口8080 |
+
+【主菜单功能映射 (main.py)】
+  按键 -> 功能 -> 调用函数
+  0  -> 退出
+  1  -> 启动机器人       -> AgentBrain().run()
+  2  -> 配置AI参数       -> show_config_menu()
+  3  -> 配置登录         -> show_login_menu()
+  4  -> 管理知识库       -> show_knowledge_base_menu()
+  5  -> 管理兴趣爱好     -> show_interest_menu()
+  6  -> 评论互动设置     -> show_comment_menu()
+  7  -> 私信设置         -> show_private_message_menu()
+  8  -> 日记/自我进化    -> show_diary_evolution_menu()
+  9  -> Agent技能       -> show_agent_skill_menu()
+  A  -> ASR快速切换      -> 直接切换 ASR_ENABLED
+  B  -> 查看后台任务     -> _show_bg_tasks()
+  C  -> 封面分析开关     -> 切换 VISION_COVER_ENABLED
+  D  -> 干货归档设置     -> _configure_dry_goods_settings()
+  E  -> 导出配置         -> export_config()
+  F  -> UP主/弹幕设置    -> show_up_danmaku_menu()
+  G  -> ASR设置          -> _configure_asr_settings()
+  H  -> 搜索历史         -> show_search_history()
+  I  -> 导入配置         -> import_config()
+  J  -> 🆕 学习工具子菜单 -> show_learning_tools_menu() → [1.出题考试 / 2.深入了解]
+  K  -> 知识库重温       -> revisit_knowledge_base_menu()
+  L  -> 实时监听设置     -> _configure_standby_settings()
+  M  -> AI心情管理       -> show_mood_menu()
+  N  -> 自定义知识管理   -> custom_knowledge_menu()
+  O  -> 整理知识库       -> organize_knowledge_base()
+  P  -> 兴趣偏好设置     -> show_interest_prefs_menu()
+  Q  -> 快速模式切换     -> 直接切换 no_human_delay
+  R  -> 恢复出厂设置     -> factory_reset_all()
+  S  -> 关键词审查开关   -> show_reply_safety_menu()
+  T  -> 知识辅导         -> show_knowledge_tutor_menu()
+  U  -> UP主主页学习     -> up_homepage_learn()
+  V  -> 手动视频分析     -> manual_video_analysis()
+  W  -> 视频→网页        -> video_to_html_bg()
+  X  -> 投币设置         -> show_coin_settings_menu()
+  Y  -> 视频间隔设置     -> _configure_video_interval_settings()
+  Z  -> 安静模式切换     -> 直接切换 QUIET_MODE
+
+================================================================================
+  五、关键文件说明（按职责）
+================================================================================
+
+【入口文件】
+  main.py           — 244行, 主入口, 所有菜单选项的路由和异步执行
+  start_cli.py      — 23行, 兼容转发层, 引导用户使用 python main.py
+  web_panel.py      — Flask Web面板, 含仪表盘/机器人控制/实时监听/配置编辑/知识辅导等
+
+【B站API层 (api/)】
+  client.py         — BiliClient 核心客户端类: 获取推荐视频/搜索/评论/私信/UP主/弹幕/投币等
+  auth.py           — 登录认证: QR码登录/密码登录/Cookie登录/Token刷新
+  subtitles.py      — 字幕: player/wbi/v2接口获取, 412风控fallback到player/v2
+  throttle.py       — 请求节流: 控制B站API请求频率, 防止限流
+  compat.py         — 兼容层: 处理不同版本的bilibili-api-python API差异
+
+【核心大脑 (brain/)】
+  agent_brain.py    — 55行核心, 13个Mixin组合为AgentBrain类, main.py调用其.run()
+  _brain_loop.py    — ~905行, 主循环: 获取推荐视频->理解->评分->决定是否学习
+  _brain_video.py   — ~621行, 视频理解: 封面视觉分析/帧提取/多模态AI理解/质量评分
+  _brain_session.py — ~640行, 会话管理: 学习会话控制/每日行为决策/统计
+  _brain_ai.py      — AI调用: 封装LLM请求/重试逻辑/Fallback API切换
+  _brain_learn.py   — 学习归档: 提取视频知识->调用classifier分类->写入知识库；接入章节锁定、笔记风格、思维导图自动导出
+  _chapter_lock.py  — 🆕 章节锁定 + 内容追加: 长视频先生成锁定大纲，再逐段追加知识点
+  _brain_curiosity.py — 自发搜索B站: 根据兴趣好奇心搜索新知识
+  _brain_auto.py    — 自动化: 日记自动生成/自我进化触发
+  _brain_journal.py — 日记: 学习日记和日志系统
+  _brain_history.py — 历史: 已看视频去重/追踪
+  _brain_ups.py     — UP主: 关注管理/UP主页视频批量学习
+  _brain_runtime.py — 运行时: 休眠/时间窗口控制
+  _brain_interact.py — 交互: 视觉分析(AI看图)/评论回复建议
+  comment.py        — 评论: 获取B站评论/AI智能回复/节奏控制/CD冷却
+  private_msg.py    — 私信: 获取B站私信/AI回复/上下文记忆
+  video_analysis.py — 手动视频分析: V命令, 输入BV号分析视频
+  standby.py        — v2待机监听: 拉取B站@通知->识别视频->AI总结回复
+  monitor.py        — 实时监听引擎: 持续监听私信+评论, 立即AI回复
+
+【知识库 (knowledge/)】
+  classifier.py     — 分类器: 3层智能分类, 视频知识提取->分类->归档
+  web_search.py     — 联网搜索: 百度/Google搜索 + AI验证知识可靠性
+  browse.py         — 浏览: 知识库浏览/搜索/管理
+  revisit.py        — 重温: 定时复习/间隔学习/记忆优化
+  organize.py       — 整理: 一键优化/去重/重新分类
+  custom.py         — 自定义: CRUD知识条目 + AI搜索B站自动入库
+
+【人格心理 (persona/)】
+  managers.py       — 综合管理: 人格定义/心情系统/日记/自我进化
+  psycho.py         — 心理引擎: 用户画像引擎(兴趣/厌恶/置信度)/推荐系统/信息茧房检测
+
+【安全审查 (security/)】
+  guard.py          — 内容过滤: 关键词过滤/政治敏感拦截/prompt注入防护
+
+【CLI界面 (cli/)】
+  app.py            — ~4200行: 所有菜单函数 show_*_menu(), 配置函数 configure_*_*()
+                     全局变量: config, ASR_ENABLED, SUBTITLE_STRICT_CHECK 等
+                     工具函数: save_config, export_config, import_config, factory_reset_all 等
+
+【服务模块 (services/)】
+  agent_service.py  — Agent技能: 目标规划->搜索B站视频->逐个学习->生成总结
+  knowledge_tutor.py — 辅导: AI讲解知识/问答/二次创作/HTML学习卡片
+  video_to_ppt.py   — 视频转网页: 已学视频->精美PPT风格HTML (19种视觉风格)
+  interest_engine.py — 兴趣引擎v2.0: 多维度评分/同义词映射/排除词/PsychoProfile同步/灵光一闪探索
+  quiz_generator.py — 🆕 出题考试引擎: 从视频字幕/知识库内容 AI 生成考题 (支持自定义难度/题型/数量/风格)
+  deep_dive.py      — 🆕 深入了解引擎: AI 联网搜索或B站刷视频, 深度学习指定主题并生成报告
+  utils.py          — 工具: 兴趣数据管理/配置文件处理
+
+【通用工具 (utils/)】
+  helpers.py        — 通用函数: _safe_task_callback, 各种辅助方法
+  storage.py        — JsonStore: 线程安全JSON读写, 脱敏: sanitize_config_for_export, 原子写入: tmp+replace
+  display.py        — 日志: 格式化输出, 颜色控制, 日志级别
+  lock.py           — 锁: 单实例文件锁, 防止重复启动
+
+【扩展组件 (xingye_bot/) — legacy模块】
+  注意: 部分功能已被新的模块替代, 但仍有部分功能未被整合:
+  - llm.py: ModelClient 类(干净的LLM客户端, 带fallback), 但 AgentBrain 未使用它
+  - state.py: BotState + JsonStore, 同样未被 AgentBrain 使用
+  - 其他模块: 日记/进化/技能/ASR/视频模式等, brain/中已有等价实现
+
+================================================================================
+  六、配置文件结构 (config.example.json)
+================================================================================
+
+顶级配置项:
+├── api                     # AI API 配置
+│   ├── unified_api_key    # 统一 API Key
+│   ├── unified_base_url   # API 地址 (默认 https://api.openai.com/v1)
+│   ├── model_brain        # 主推理模型
+│   └── model_vision       # 视觉模型
+│
+├── models                  # 模型指定
+│   ├── chat / vision / image / fast / embedding
+│
+├── fallback_models         # 降级模型
+│   ├── chat / vision / image / fast / embedding
+│
+├── fallback_provider       # 跨API服务商降级（主API失败3次后切换）
+│   ├── enabled / name / api_key / base_url / models
+│
+├── web                     # Web面板密码
+│   └── password           # SHA-256哈希存储
+│
+├── bilibili                # B站登录
+│   ├── owner_mid          # 主人UID
+│   └── refresh_token      # 登录Token
+│
+├── automation              # 自动化行为
+│   ├── dry_run            # 试运行模式（默认true）
+│   ├── max_daily_actions  # 每日最大操作数
+│   ├── proactive_*        # 主动行为参数
+│   ├── sleep_start/end    # 休眠时间窗口
+│   ├── allow_comment/like/coin/favorite/dynamic  # 执行开关
+│   ├── enable_*           # 功能开关
+│   ├── comment_poll_interval  # 评论轮询间隔
+│   └── max_replies_per_check  # 每次最多回复数
+│
+├── video                   # 视频参数
+│   ├── mode               # 模式 (smart)
+│   ├── max_duration_seconds # 最大时长 (900s)
+│   ├── frame_count        # 帧采样数 (12)
+│   ├── download_interest_threshold  # 下载阈值 (7.0)
+│   └── delete_video_after_understand # 学完删除
+│
+├── reply_safety            # 回复安全
+│   ├── enabled / block_on_incoming / block_on_outgoing
+│   └── blocked_keywords   # 黑名单关键词 (40+条)
+│
+├── diary                   # 日记
+│   ├── enabled / auto_enabled / auto_interval_minutes
+│   └── min_events_for_auto
+│
+├── self_evolution          # 自我进化
+│   ├── enabled / auto_enabled / reflect_interval_events
+│   └── auto_apply
+│
+├── agent                   # Agent技能
+│   ├── enabled / auto_enabled / max_steps_per_plan
+│   └── cooldown_minutes
+│
+├── behavior                # 行为控制
+│   ├── ai_marker           # AI标记文本
+│   ├── private_reply_cooldown_minutes
+│   ├── min/max_reply_delay_seconds
+│   └── prefer_short_replies
+│
+├── revisit                 # 知识重温
+├── knowledge_verify        # 知识验证
+├── curiosity_search        # 好奇心搜索
+├── dry_goods               # 干货归档
+├── active_chat             # 主动聊天
+├── up_follow               # UP主关注
+├── danmaku                 # 弹幕设置
+└── psycho_engine           # 心理画像引擎
+
+================================================================================
+  七、依赖清单 (requirements.txt)
+================================================================================
+
+核心依赖 (精确版本):
+  bilibili-api-python==17.4.1  — B站API
+  openai==2.33.0               — AI/LLM (注意: 旧API, 未迁移到 >=1.0)
+  pydantic>=2.0.0              — 数据验证
+  httpx==0.28.1                — HTTP客户端
+  colorama==0.4.6              — 终端颜色
+  qrcode==8.2                  — 二维码生成
+  qrcode-terminal==0.8         — 终端二维码
+  Pillow==12.1.0               — 图片处理
+  Flask==3.1.2                 — Web框架
+  flask-cors==6.0.2            — 跨域支持
+  requests==2.32.5             — HTTP请求
+  imageio-ffmpeg==0.6.0        — 视频帧提取
+
+可选依赖:
+  funasr==1.3.1 / torch==2.11.0  — ASR语音识别
+  sentence-transformers          — 向量检索
+
+================================================================================
+  八、已知问题与待办事项 (REFACTOR_PLAN.md)
+================================================================================
+
+【🔴 严重问题】
+  1. God Class: AgentBrain 4000+行, 70+方法, 建议拆分为:
+     brain/video_processor.py, brain/knowledge_manager.py, brain/interaction.py, brain/agent_loop.py
+  2. LLM同步阻塞: _call_ai_via_openai 在 async def 中直接调用同步 openai API, 阻塞事件循环 5-30秒
+  3. 废弃 OpenAI SDK API: 全项目使用 openai.ChatCompletion.create() (v1.0之前旧API), 9+处需迁移
+
+【🟡 重要问题】
+  1. 双系统未整合: xingye_bot/llm.py 的 ModelClient 和 state.py 的 BotState 未被 AgentBrain 使用
+  2. 通配符导入: from core.globals import * 导入200+全局变量, 难以追踪
+  3. JSON提取重复: brain/agent_brain.py, knowledge/classifier.py, knowledge/web_search.py 各自手写 JSON 解析
+  4. 部分API无重试: follow_up, unfollow_up, search_bilibili
+  5. LLM调用缺timeout: 部分位置无超时设置
+
+【🟢 次要问题】
+  1. main.py try/except 模式重复10+次, 可提取 run_async(coro) 辅助函数
+  2. HTTP Client 未关闭: BiliClient.close() 从未被调用
+  3. known_ups 无限增长无淘汰机制
+
+================================================================================
+  九、变更记录
+================================================================================
+
+2026-07-06   创建本文件 (DEV_REFERENCE.txt), 完整的项目结构和文件清单
+2026-07-06   🆕 新增 J 学习工具命令: 出题考试 + 深入了解 (详情见下)
+2026-07-06   🆕 创建 dev_refs/ 参考文件夹: 8个分类参考文档 + README 索引
+2026-07-06   🔧 查漏补缺: 修复 config.example.json 语法错误；Web 默认禁止本地文件路径分析；platform_adapter.download_format 改为 bv*+ba/best/best；新增配置模板回归测试
+2026-07-07   🔧 配置同步与运行稳定性修复: CLI 保存 API 配置后同步 core.config；core/config.py 支持 BILI_ACCOUNT_DATA_DIR 和旧字段归一化；Web /api/config 归一化；Windows 扫码登录不再写 Android 相册路径且登录后清理项目根 qr_codes；补齐 PrivateMessageManager.get_chat_target；知识库统计/列表/读取/健康检查/重置清理支持配置路径和 .MD；模型列表非 JSON 响应提示 /v1。
+2026-07-07   🔧 知识库路径解析收尾: core/config.py 新增 resolve_knowledge_base_dir()，KNOWLEDGE_BASE_DIR 导入时按 knowledge_base_dir/knowledge.base_dir 解析；services/knowledge_tutor.py 不再硬编码 KB 目录（修复 /api/kb/list-files/read-file/tutor-* 不读配置）；/api/kb/files 改为读配置路径；/api/kb/file 增加 .md 大小写不敏感回退。
+2026-07-07   ✨ 主页智能对话 + 导出目录改造: 新增 services/home_chat.py 与 POST /api/home/chat（AI/Agent 双模式，六类意图问答，含用户画像/自我描述）；思维导图默认目录 Data/MindMaps/→MindMaps/（config/globals/实时配置同步，新增 mindmap.prompt）；新增 document_export 配置段，Word 文档独立导出到 Word/ 文件夹且归档时自动导出（受 enabled 控制）；配置快捷面板新增「思维导图&文档导出」开关与人格自我描述字段。
+2026-07-07   🔧 对话页增强(持久多会话/上下文模式/自定义): services/home_chat.py 新增 Data/HomeChat/<id>.json 会话持久化（create/get/save/rename/delete/list_conversations + _append_message）；上下文模式 persistent(保留最近20条)/infinite(全部)/none(仅知识检索)；自定义系统提示词/模型/温度随会话保存；LLM 调用由 xingye_bot.llm.ModelClient 切换为 services._services_ai.call_ai 以透传 model/temperature；web_panel.py 新增 /api/home/conversations 等 5 个接口；web_panel.html 对话页重构为会话列表+上下文下拉+⚙自定义面板，导航 chat 时 rf_chat 自动加载并恢复最近会话。
+2026-07-07   🔧 W命令多格式导出: cli/app.py video_to_html_bg() 在HTML保存后追加多选导出(1=Word 2=PDF 3=PPT)，复用与V共用的视频获取流程与内容ctx；services/document_export.py 新增 export_docx_text()/export_pdf_text()（内存文本直出docx/pdf，绕过KB目录限制，默认落到 Word/ 文件夹）；PPT 复用 services/video_to_ppt.generate_ppt_from_bvid（取 services._services_ai._live_config 的 api_key/base_url/model_brain + brain.cookies）。
+2026-07-07   🔧 W/V/网页端 统一视频导出: services/document_export.py 抽成 export_video_content()(非交互, 返回{fmt:{path|error}}) + export_video_content_interactive()(CLI交互包装); W(video_to_html_bg)与 V(brain/video_analysis.manual_video_analysis B站分支)均调用 interactive 版; web_panel.py 新增 POST /api/export/video（解析BV→AgentBrain+本地COOKIE_FILE→understand_video_for_decision+评论/弹幕→export_video_content）；web_panel.html 手动视频分析卡片后新增「📤 视频内容导出」卡片(多选Word/PDF/PPT)。主菜单 V 项说明同步更新。
+2026-07-07   ✨ 启动模式「两个总选择」: 主菜单 1 启动机器人前弹出模式选择 —— 1) 智能省token模式(跳过封面视觉分析/ASR下载与抽帧、AI决策改用 models.fast 快速模型、关闭 Agent深度搜索/好奇心探索/AI推荐/心理深度分析/兴趣AI建议/知识验证与回顾) 与 2) 当前模式(默认); 选择持久化到 config.system.smart_token_mode。cli/app.py 主菜单状态区新增「省token模式」显示; config.example.json system 段新增 smart_token_mode。brain/_brain_loop.run() 实时读取该开关落地各项省token策略。
+2026-07-07   ✨ 主菜单新增「MM 思维导图」入口: 复用 services/mindmap_export.export_mindmap；cli/app.py 新增 show_mindmap_menu()(提供「整个知识库批量导出」与「选择单个已学视频导出」两种, 输出交互式 HTML/Markmap 至 MindMaps/)；main.py 主循环分发 MM 键、show_main_menu 渲染 MM 项、输入提示补充 MM。该能力此前仅挂在 web_panel(知识辅导 T 页「导出思维导图」按钮 + /api/export/mindmap 与 /api/export/mindmap/all)。
+2026-07-07   🐛 修复 knowledge_tutor.py 导入 bug: 原误用不存在的包名 bili_core(应为项目内真实包 xingye_bot)，导致 _get_llm_client() 永远返回 None、知识辅导(T 菜单问答/改写/生成HTML)全部静默失效；改为 xingye_bot.llm/.settings/.state 后验证通过。另核实 mindmap_export.py 的 asyncio.run 嵌套非 bug(已有 loop.is_running 守卫)。全项目 py_compile 通过。
+2026-07-07   🔧 网页端同步: web_panel.py 此前未运行(8080 无 LISTENING)。发现 _disclaimer_confirm_terminal() 在后台无 TTY 时会因 input() EOFError 退出; 新增非交互环境(sys.stdin.isatty()==False)自动确认免责声明的守卫(交互终端仍正常要求输入"我同意")。现已后台启动并监听 0.0.0.0:8080(PID 46268, HTTP 200)。网页端思维导图 API(/api/export/mindmap、/api/export/mindmap/all、/api/mindmap/file)本就齐全, 且 knowledge_tutor 的 bili_core→xingye_bot 修复为共享模块、网页端调用自动生效, 故网页端代码无需其他改动。
+2026-07-07   🖼️ 项目图标上线: 用户指定 G:\code\work\bilibili_learning_bot\image.png 作为网站左上角图标(浏览器标签页 favicon + 侧边栏头像)。web_panel.py 新增 /app-icon 路由(Response 返回 image.png 字节, mimetype=image/png), 并加入三处登录拦截白名单(disclaimer/setup/login 的 allowed 元组均追加 'app_icon')。web_panel.html(实际提供页面的文件, _load_html 优先读它) 第7行加 <link rel="icon" href="/app-icon">, 第619行侧边栏 .sb-av 由 <i data-lucide="zap"> 改为 <img src="/app-icon" 22x22 圆角>。_DEFAULT_HTML 兜底模板同步加 favicon 与头像。重启网页端(PID 17232)后 /app-icon 实测 200 image/png 171265 字节。
+2026-07-07   ⚠️ 重要: 网页端真正提供页面的是仓库根目录 web_panel.html(_load_html 优先 file.exists() 读它, 仅当不存在才用 web_panel.py 内 _DEFAULT_HTML)。因此"点不动/JS 失效"类前端 bug 的修复必须改 web_panel.html, 改 _DEFAULT_HTML 无效。诊断显示主页侧边栏/仪表盘数据区为空且 nav()/rf_dash() 为 undefined, 疑似 web_panel.html 内主 JS 块未执行(待进一步定位), 与之前的点击问题相关, 尚未修复。
+2026-07-07   ✨ UX 统一(主菜单): main.py 主循环新增 _first_menu 标志, 任何操作执行完回到主菜单重绘前先 input("按回车返回主菜单...") 暂停(首次进入不暂停)。解决操作结果被主菜单大段重绘淹没、看不清的问题; 覆盖所有分支与子菜单返回主菜单的场景。py_compile 通过(基于 basedpyright 的若干类型 ERROR 为历史既有, 非本次引入, 不影响运行)。
+
+2026-07-07   🧹 全平台支持移除(仅保留 B站): [⚠️ 本条已被后续用户指令推翻] 用户随后明确"不需要限制只能有B站, 其他平台也可以, 只是刷视频正常只针对B站, 其他暂时不支持", 故改为多平台代码保留、默认B站。详见下方 2026-07-07 🔀 多平台恢复。
+
+2026-07-07   🔀 网页端换成 3.0.1 + 多平台框架(借鉴 BiliNote): 用户要求把网页端换成 G:\code\bilibili_learning_bot-3.0.1 的 web_panel.py / web_panel.html(整体覆盖 work 版, 已验证在 work 环境可正常启动监听 8080), 并"加新功能"。新功能: (1)项目图标——沿用 /app-icon 路由(返回 image.png)+ favicon + 侧边栏头像, 并加非交互自动确认免责声明守卫(后台启动不再依赖 BILI_DISCLAIMER_SKIP); (2)多平台框架——services/platform_adapter.py 重写为借鉴 BiliNote-v2.4.4-source 的多平台识别/归一化/下载骨架(SUPPORTED_PLATFORMS=bilibili/youtube/douyin/kuaishou/web/local, 平台识别正则借鉴 url_parser.py, 代理处理借鉴 ProxyConfigManager, yt_dlp 下载借鉴 YoutubeDownloader, ffmpeg 借鉴 local_downloader), 产品策略默认仅B站完整分析、其他标注"暂不支持"; web_panel.py 新增 /api/platform/probe(多平台识别), 完善 /api/action/analyze-video(真正调用 analyze_bilibili_video_input, 非B站返回400暂不支持); 三处配置恢复 platform_adapter 段(ui_platforms 默认列出全平台但仅B站可分析); web_panel.html 加平台选择器(默认显示全部平台, 含 initPlatPicker/_getAnalyzePlatform/probePlatformVideo)。Flask 测试客户端实测: probe B站200ok、YouTube/抖音200ok标注暂不支持; analyze B站200触发、YouTube400暂不支持。备份: bilibili_learning_bot_backup/2026-07-07_pre-3.0.1-merge/。
+
+## J 命令新增详情 (2026-07-06)
+
+### 📝 出题考试 (quiz_generator.py)
+- CLI: J→1 进入出题菜单, 选择视频BV号或知识库文件作为内容来源
+- 支持自定义: 题目数量(3/5/10/15/20)、难度(简单/中等/困难)、题型(混合/选择/简答/判断/闪卡)、风格(标准试卷/互动问答/模拟考试/思维导图/学习卡片)
+- 支持自定义提示词和4个预设模板(默认通用/正式考试/闪卡学习/讨论引导)
+- Web: /api/quiz/generate POST, /api/quiz/options GET
+- 导出到 html_exports/quizzes/
+
+### 🔬 深入了解 (deep_dive.py)
+- CLI: J→2 进入深入了解菜单, 输入主题, 选择学习模式
+- 两种模式: 联网搜索(推荐, 调用Bing/搜狗/DuckDuckGo) 或 B站视频学习
+- 用户可指定搜索/观看数量(默认10, 最大50)
+- AI先分析主题生成搜索关键词, 再分别搜索资料, 最后生成综合学习报告
+- Web: /api/deep-dive/run POST
+- 自动归档到知识库 KnowledgeBase/深入学习/
+- 导出到 html_exports/deep_dives/
+
+### 🔧 代码修改清单
+- ✨ 新增 services/quiz_generator.py (约350行)
+- ✨ 新增 services/deep_dive.py (约320行)
+- 📝 修改 main.py: 导入 show_learning_tools_menu, 新增 J 命令
+- 📝 修改 cli/app.py: 主菜单增加 J 选项, 新增 show_learning_tools_menu() 函数
+- 📝 修改 web_panel.py: 新增 /api/quiz/generate + /api/quiz/options + /api/deep-dive/run 路由
+- 📝 修改 web_panel.html: 工具页面新增出题考试和深入了解两个功能卡片 + JS函数
+
+## dev_refs/ 参考文件夹创建 (2026-07-06)
+
+创建 `dev_refs/` 专门存放所有功能和流程的 API 接口相关代码规范，
+方便后续开发时 AI 自动阅读，不乱用 API，懂得借鉴已有代码。
+
+### 文件清单:
+- `dev_refs/README.md` — 文件夹索引和使用说明
+- `dev_refs/01-config-system.md` — 配置系统：config.json、API Key、路径、日志
+- `dev_refs/02-llm-calling.md` — LLM 调用规范：3种方式、多级降级、注意事项
+- `dev_refs/03-bilibili-api.md` — B站 API：WBI签名、BiliClient、字幕、Cookie
+- `dev_refs/04-web-panel-api.md` — Web面板API：Flask路由、JS模板、页面结构
+- `dev_refs/05-web-search.md` — 网络搜索：多引擎搜索、AI验证
+- `dev_refs/06-file-io.md` — 文件I/O：JsonStore、原子写入、路径管理
+- `dev_refs/07-service-template.md` — 新服务模块模板：完整代码骨架、集成步骤
+- `dev_refs/08-architecture-flows.md` — 架构与流程：项目结构、数据流、设计模式
+
+================================================================================
+  十、开发注意事项
+================================================================================
+
+1. 【配置修改】修改配置后必须调用 save_config(config) 持久化
+2. 【全局变量】修改全局变量后需调用 _reload_all_globals(config) 同步
+3. 【JSON写入】所有关键JSON文件必须使用 tmp+replace 原子写入 (防止断电数据损坏)
+4. 【Mixin模式】AgentBrain 使用 Mixin 组合, 新增功能需新增 mixin 类并注册到 _mixin_imports.py
+5. 【异步调用】所有涉及网络的操作必须在 async 函数中, 使用 asyncio.run() 包装
+6. 【API重试】B站API调用应包含重试/退避逻辑
+7. 【内容安全】所有AI生成的回复需经过 security/guard.py 审查
+8. 【单实例锁】机器人启动时通过 utils/lock.py 确保只有一个实例运行
+9. 【多账号】通过环境变量 BILI_ACCOUNT_DATA_DIR 和 BILI_ACCOUNT_NAME 隔离不同账号数据
+10.【更新本文件】每次完成任务后必须更新本文件！

@@ -254,6 +254,24 @@ _CONFIG_PATHS = {
     "CURIOSITY_DEEP_DIVE_PROB":            (("curiosity_search", "prob_trigger"), 0.3),
     "CURIOSITY_DEEP_DIVE_COOLDOWN_MINUTES":(("curiosity_search", "cooldown_minutes"), 120),
 
+    # BiliNote inspired features
+    "CHAPTER_LOCK_ENABLED":       (("chapter_lock", "enabled"), True),
+    "CHAPTER_LOCK_MIN_MINUTES":   (("chapter_lock", "min_duration_minutes"), 15),
+    "CHAPTER_LOCK_MAX_CHAPTERS":  (("chapter_lock", "max_chapters_per_video"), 12),
+    "CHAPTER_LOCK_STRATEGY":      (("chapter_lock", "chapter_strategy"), "ai_split"),
+    "MINDMAP_ENABLED":            (("mindmap", "enabled"), True),
+    "MINDMAP_AUTO_GENERATE":      (("mindmap", "auto_generate"), True),
+    "MINDMAP_OUTPUT_DIR":         (("mindmap", "output_dir"), "MindMaps/"),
+    "MINDMAP_PROMPT":             (("mindmap", "prompt"), ""),
+    "MINDMAP_INCLUDE_IMAGES":     (("mindmap", "include_images"), True),
+    "DOC_EXPORT_ENABLED":         (("document_export", "enabled"), True),
+    "DOC_EXPORT_DIR":             (("document_export", "output_dir"), "Word/"),
+    "DOC_EXPORT_FOLDER":          (("document_export", "folder_name"), "Word"),
+    "DOC_EXPORT_PROMPT":          (("document_export", "prompt"), ""),
+    "NOTE_STYLE_ENABLED":         (("note_style", "enabled"), True),
+    "NOTE_STYLE_ACTIVE":          (("note_style", "active_style"), "balanced"),
+    "RAG_QA_ENABLED":             (("rag_qa", "enabled"), False),
+
     # 心理分析引擎
     "PSYCHO_ENGINE_ENABLED":            (("psycho_engine", "enabled"), True),
     "PSYCHO_DEEP_ANALYZE_INTERVAL":     (("psycho_engine", "deep_analyze_interval_videos"), 100),
@@ -368,7 +386,8 @@ KB_METADATA_FILE = os.path.join(BASE_DIR, "knowledge_metadata.json")
 # 见文件顶部的 _CONFIG_PATHS 映射表和 __getattr__ 函数。
 # 旧静态赋值已删除，NO_HUMAN_DELAY 等变量现在每次访问时实时从 config 字典读取。
 
-DEFAULT_CONFIG = config  # 引用默认配置模板
+# DEFAULT_CONFIG 从 core.config 导入真正的默认模板（而非运行时 config 对象）
+from core.config import DEFAULT_CONFIG  # noqa: E402
 
 # ══════════════════════════════════════════════════════════
 # JSON 辅助
@@ -395,7 +414,7 @@ def _save_json_file(path, data):
 
 
 def save_search_history(query, results_count):
-    """保存搜索记录"""
+    """保存搜索记录（原子写入）"""
     try:
         history = []
         if os.path.exists(SEARCH_HISTORY_FILE):
@@ -408,7 +427,11 @@ def save_search_history(query, results_count):
         })
         if len(history) > 100:
             history = history[-100:]
-        with open(SEARCH_HISTORY_FILE, 'w', encoding='utf-8') as f:
+        tmp_path = f"{SEARCH_HISTORY_FILE}.tmp"
+        with open(tmp_path, 'w', encoding='utf-8') as f:
             json.dump(history, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, SEARCH_HISTORY_FILE)
+    except OSError as e:
+        print(f"[WARN] 保存搜索历史失败: {e}", flush=True)
     except Exception as e:
         log(f"保存搜索记录失败: {e}", "WARN")

@@ -57,9 +57,11 @@ class BotSettings:
     video_mode: str = "smart"
     video_max_duration_seconds: int = 900
     video_frame_count: int = 12
+    frame_anchor_mode: str = "bilinote"
     video_download_interest_threshold: float = 7.0
     video_download_dir: str = ""
     video_delete_after_understand: bool = True
+    video_quality: str = "best"  # 下载画质: best/1080p/720p/480p/360p
     ai_marker: str = "（内容由AI生成并由AI回复）"
     enable_web_search: bool = True
     enable_proactive: bool = True
@@ -236,9 +238,17 @@ def load_settings() -> BotSettings:
         video_mode=video_mode,
         video_max_duration_seconds=_int(video.get("max_duration_seconds"), 900, 1, 24 * 3600),
         video_frame_count=_int(video.get("frame_count"), 12, 1, 60),
+        frame_anchor_mode=str(video.get("frame_anchor_mode", "bilinote")).strip().lower()
+        if str(video.get("frame_anchor_mode", "bilinote")).strip().lower() in {"bilinote", "legacy"}
+        else "bilinote",
         video_download_interest_threshold=_float(video.get("download_interest_threshold"), 7.0, 0.0, 10.0),
         video_download_dir=str(video.get("download_dir", "")).strip(),
         video_delete_after_understand=_bool(video.get("delete_video_after_understand"), True),
+        video_quality=(
+            str(video.get("quality", "best")).strip().lower()
+            if str(video.get("quality", "best")).strip().lower() in {"best", "1080p", "720p", "480p", "360p"}
+            else "best"
+        ),
         ai_marker=os.getenv("BILI_AI_MARKER") or str(behavior.get("ai_marker", "（内容由AI生成并由AI回复）")),
         enable_web_search=_bool(automation.get("enable_web_search"), True),
         enable_proactive=_bool(automation.get("enable_proactive"), True),
@@ -273,14 +283,16 @@ def public_config(settings: BotSettings) -> dict[str, Any]:
             "favorite": settings.allow_favorite,
             "dynamic": settings.allow_dynamic,
         },
-        "video": {
-            "mode": settings.video_mode,
-            "max_duration_seconds": settings.video_max_duration_seconds,
-            "frame_count": settings.video_frame_count,
-            "download_interest_threshold": settings.video_download_interest_threshold,
-            "download_dir": settings.video_download_dir,
-            "delete_video_after_understand": settings.video_delete_after_understand,
-        },
+            "video": {
+                "mode": settings.video_mode,
+                "max_duration_seconds": settings.video_max_duration_seconds,
+                "frame_count": settings.video_frame_count,
+                "frame_anchor_mode": settings.frame_anchor_mode,
+                "download_interest_threshold": settings.video_download_interest_threshold,
+                "download_dir": settings.video_download_dir,
+                "delete_video_after_understand": settings.video_delete_after_understand,
+                "quality": settings.video_quality,
+            },
         "proactive": {
             "video_count": settings.proactive_video_count,
             "comment_count": settings.proactive_comment_count,

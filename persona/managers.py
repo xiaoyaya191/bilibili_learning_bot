@@ -426,8 +426,8 @@ class SelfEvolutionManager:
         import re as _re
         
         api_cfg = self._cfg.get("api", {})
-        base_url = api_cfg.get("base_url", "")
-        api_key = api_cfg.get("api_key", "")
+        base_url = api_cfg.get("unified_base_url") or api_cfg.get("base_url", "")
+        api_key = api_cfg.get("unified_api_key") or api_cfg.get("api_key", "")
         model = api_cfg.get("model_brain", "")
         
         if not base_url or not api_key:

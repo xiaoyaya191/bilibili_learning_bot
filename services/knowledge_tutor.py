@@ -23,15 +23,36 @@ from datetime import datetime
 # 延迟导入，避免循环依赖
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "Data"
-KNOWLEDGE_BASE_DIR = BASE_DIR / "KnowledgeBase"
+
+
+def _resolve_kb_dir() -> Path:
+    """从 config.json 解析知识库目录，未配置则回退到默认 KnowledgeBase。"""
+    try:
+        cfg_path = BASE_DIR / "config.json"
+        if cfg_path.exists():
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            kb = (cfg.get("knowledge_base_dir")
+                  or (cfg.get("knowledge", {}) or {}).get("base_dir"))
+            if kb:
+                p = Path(kb)
+                if not p.is_absolute():
+                    p = BASE_DIR / p
+                return p
+    except Exception:
+        pass
+    return BASE_DIR / "KnowledgeBase"
+
+
+KNOWLEDGE_BASE_DIR = _resolve_kb_dir()
 
 
 def _get_llm_client():
     """获取 LLM 客户端（延迟导入）"""
     try:
-        from bili_core.llm import ModelClient
-        from bili_core.settings import load_settings
-        from bili_core.state import BotState
+        from xingye_bot.llm import ModelClient
+        from xingye_bot.settings import load_settings
+        from xingye_bot.state import BotState
         settings = load_settings()
         return ModelClient(settings, BotState())
     except Exception:
@@ -232,7 +253,7 @@ class KnowledgeTutor:
             if not fc:
                 continue
             fname = os.path.basename(fp)
-            bv_match = re.match(r'^\[BV[0-9A-Za-z]{10}\]\s*-\s*(.+)\.md$', fname)
+            bv_match = re.match(r'^\[(BV[0-9A-Za-z]{10})\]\s*-\s*(.+)\.md$', fname)
             ftitle = bv_match.group(2).strip() if bv_match else fname
 
             truncated = fc[:per_file_limit]
@@ -364,7 +385,7 @@ class KnowledgeTutor:
             if not fc:
                 continue
             fname = os.path.basename(fp)
-            bv_match = re.match(r'^\[BV[0-9A-Za-z]{10}\]\s*-\s*(.+)\.md$', fname)
+            bv_match = re.match(r'^\[(BV[0-9A-Za-z]{10})\]\s*-\s*(.+)\.md$', fname)
             ftitle = bv_match.group(2).strip() if bv_match else fname
             if not bvid and bv_match:
                 bvid = bv_match.group(1)

@@ -44,7 +44,10 @@ class BrainLoopMixin:
             from services.interest_engine import get_engine
             engine = get_engine()
             interests_new = engine.get_keywords()
-        except Exception:
+        except ImportError:
+            interests_new = []
+        except Exception as e:
+            log(f"兴趣引擎加载异常: {e}", "WARN")
             interests_new = []
         all_interests = list(dict.fromkeys(interests_old + interests_new))
         if all_interests:
@@ -74,6 +77,13 @@ class BrainLoopMixin:
         log(f"私信互动: {'已启用' if PRIVATE_MESSAGE_ENABLED else '⏸️ 已关闭'} | {'自动发送' if PRIVATE_MESSAGE_AUTO_REPLY else '仅拟不发送'} | 检查间隔: {PRIVATE_MESSAGE_CHECK_INTERVAL}秒", "DM")
         log(f"日记: {'自动' if DIARY_ENABLED and DIARY_AUTO_ENABLED else '手动/关闭'} | 自我进化: {'自动应用' if EVOLUTION_ENABLED and EVOLUTION_AUTO_ENABLED and EVOLUTION_AUTO_APPLY else '手动/仅记录'}", "EVOLVE")
         print("="*80)
+
+        # ── 智能省token模式（实时读取 config，避免 import * 缓存）──
+        _smart_token = bool(config.get("system", {}).get("smart_token_mode", False))
+        _fast_model = (config.get("models", {}).get("fast") or MODEL_BRAIN) if _smart_token else MODEL_BRAIN
+        if _smart_token:
+            log(f"💡 智能省token模式已启用：跳过封面/ASR、用快速模型({_fast_model})、"
+                f"关闭Agent深度搜索/好奇心探索/AI推荐/心理深度分析/知识验证", "INFO")
 
         # 🔵 Cookie 预热：模拟人类打开App行为，先访问一次首页暖机
         if config.get("speed", {}).get("no_human_delay", False):
@@ -160,7 +170,7 @@ class BrainLoopMixin:
 
                 # ── 🤖 Agent深度搜索：定期触发，深入了解某个主题 ──
                 # [FIX] 启动守卫：前3轮主循环硬跳过（防止旧pyc缓存/冷却bug导致启动即触发）
-                if AGENT_ENABLED and AGENT_DIVE_ENABLED and _loop_count > 3:
+                if AGENT_ENABLED and AGENT_DIVE_ENABLED and _loop_count > 3 and not _smart_token:
                     agent_dive_elapsed = (datetime.now() - self.last_agent_run_at).total_seconds() / 60
                     # [FIX] 必须至少看过3个视频+冷却到期+精力够+25%随机
                     if (self.videos_processed >= 3 and agent_dive_elapsed >= max(AGENT_COOLDOWN_MINUTES, 5)
@@ -262,8 +272,9 @@ class BrainLoopMixin:
                     video_url = f"https://www.bilibili.com/video/{bvid}"
                     log(f"📖 复习目标:《{title}》- @{up}", "REVISIT")
                     # 🔍 知识验证：回顾时联网核实知识的真实性和时效性（带异常回调）
-                    task = asyncio.create_task(self.verify_knowledge_file(bvid, title))
-                    task.add_done_callback(_safe_task_callback("verify_knowledge_file"))
+                    if not _smart_token:
+                        task = asyncio.create_task(self.verify_knowledge_file(bvid, title))
+                        task.add_done_callback(_safe_task_callback("verify_knowledge_file"))
                     # 顺便浏览该UP的视频（副作用：记录到浏览历史）
                     await self.maybe_browse_up_videos(force_up_uid=up_uid if up_uid else None, up_name_hint=up)
                 else:
@@ -286,7 +297,8 @@ class BrainLoopMixin:
                         rec_target = None
                         if (self.recommend_engine 
                             and self._psycho_profile_analysis_count > PSYCHO_MIN_VIEWS_BEFORE_RECOMMEND 
-                            and random.random() < PSYCHO_RECOMMEND_PROB):
+                            and random.random() < PSYCHO_RECOMMEND_PROB
+                            and not _smart_token):
                             rec_modes = ["surprise", "explore", "anticocoon", "trend"]
                             # 轮换模式，避免重复
                             if self._last_recommend_mode:
@@ -418,8 +430,12 @@ class BrainLoopMixin:
                     interest_reason = "全量模式(所有视频都看)"
                 else:
                     # cover_and_title 模式：封面分析 + AI兴趣判断
-                    vis_desc, vis_score = await self.analyze_vision(pic_url)
-                    log(f"封面速览: {vis_desc} [印象分:{vis_score}]", "EYE")
+                    if _smart_token:
+                        # [SMART] 省token：跳过封面视觉分析，仅用标题/标签做兴趣判断
+                        vis_desc, vis_score = "省token模式·跳过封面分析", 0
+                    else:
+                        vis_desc, vis_score = await self.analyze_vision(pic_url)
+                        log(f"封面速览: {vis_desc} [印象分:{vis_score}]", "EYE")
                     # [ASR] 缓存封面描述供 ASR AI预判
                     self._current_video_cover_desc = vis_desc
                     # [DEF] 避雷系统检查
@@ -462,7 +478,9 @@ class BrainLoopMixin:
                     nonlocal subtitle_text
                     mode_label = normalize_mode(VIDEO_UNDERSTANDING_MODE) if normalize_mode else VIDEO_UNDERSTANDING_MODE
                     log(f"开始研究视频内容... 当前视频理解模式: {mode_label}", "BRAIN")
-                    success, result = await self.understand_video_for_decision(bvid, title=title)
+                    success, result = await self.understand_video_for_decision(
+                        bvid, title=title,
+                        force_mode="subtitle_only" if _smart_token else None)
                     if success:
                         subtitle_text = result
                         log(f"视频理解GET: {subtitle_text[:80].strip()}...", "SUCCESS")
@@ -513,7 +531,7 @@ class BrainLoopMixin:
 
                 try:
                     resp = await self._call_ai_with_retry(
-                        model=MODEL_BRAIN,
+                        model=_fast_model,
                         messages=[
                             {"role": "system", "content": sys_prompt},
                             {"role": "user", "content": context}
@@ -579,7 +597,7 @@ class BrainLoopMixin:
                         if metrics.get("diversity_score", 1.0) < PSYCHO_COCOON_WARNING_THRESHOLD:
                             log(f"[STATS] 内容多样性提醒: {metrics.get('cocoon_risk')} | 多样性={metrics.get('diversity_score')} | 稀少领域={metrics.get('underrepresented_areas', [])}", "WARN")
                     # 触发深度AI分析
-                    if self._psycho_profile_analysis_count % PSYCHO_DEEP_ANALYZE_INTERVAL == 0:
+                    if self._psycho_profile_analysis_count % PSYCHO_DEEP_ANALYZE_INTERVAL == 0 and not _smart_token:
                         task = asyncio.create_task(self.psycho_profile.deep_analyze())
                         task.add_done_callback(_safe_task_callback("deep_analyze"))
                         self.psycho_profile.detect_interest_shifts()
@@ -745,7 +763,7 @@ class BrainLoopMixin:
                     task.add_done_callback(_safe_task_callback("agent_goal1"))
 
                 # 🧭 好奇心驱动深度搜索：遇到感兴趣/不了解的内容，B站搜索深入学（动态2-10个视频）
-                if CURIOSITY_DEEP_DIVE_ENABLED and score >= CURIOSITY_DEEP_DIVE_MIN_SCORE:
+                if CURIOSITY_DEEP_DIVE_ENABLED and not _smart_token and score >= CURIOSITY_DEEP_DIVE_MIN_SCORE:
                     dive_cooldown_ok = (datetime.now() - self._last_curiosity_dive_at).total_seconds() / 60 >= CURIOSITY_DEEP_DIVE_COOLDOWN_MINUTES
                     today_str = datetime.now().strftime("%Y%m%d")
                     if self._curiosity_dive_date != today_str:
@@ -951,7 +969,7 @@ class BrainLoopMixin:
                     if len(self._recent_watched_titles) > 100:
                         self._recent_watched_titles = self._recent_watched_titles[-50:]
                     # AI关键词建议检查（每N个视频一次）
-                    if engine.should_suggest_keywords():
+                    if not _smart_token and engine.should_suggest_keywords():
                         recent_titles = getattr(self, "_recent_watched_titles", [])[-15:]
                         prompt = engine.generate_suggest_prompt(recent_titles)
                         try:
@@ -973,7 +991,7 @@ class BrainLoopMixin:
                     pass  # 引擎追踪失败不阻塞主流程
 
                 # 📚 知识库定期审查：每N个视频后随机抽查归档质量
-                if KNOWLEDGE_REVIEW_INTERVAL > 0:
+                if KNOWLEDGE_REVIEW_INTERVAL > 0 and not _smart_token:
                     self._knowledge_review_countdown -= 1
                     if self._knowledge_review_countdown <= 0:
                         self._knowledge_review_countdown = KNOWLEDGE_REVIEW_INTERVAL
