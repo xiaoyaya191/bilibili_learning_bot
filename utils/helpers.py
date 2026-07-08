@@ -5,6 +5,7 @@ import json
 import re
 import random
 from datetime import datetime
+from pathlib import Path
 
 from core.config import config
 
@@ -128,27 +129,68 @@ def find_ffmpeg() -> str | None:
     """查找 ffmpeg 可执行文件路径。
     1) 系统 PATH（shutil.which）
     2) imageio-ffmpeg 内嵌（pip install imageio-ffmpeg）
+    3) Windows 常见路径（C:/ffmpeg/bin、winget 安装目录）
+    4) 脚本/项目同目录
     结果缓存避免重复查找。"""
     global _FFMPEG_CACHE
     if _FFMPEG_CACHE and (os.path.isfile(_FFMPEG_CACHE) or shutil.which(_FFMPEG_CACHE)):
         return _FFMPEG_CACHE
 
+    def _try_path(path: str) -> bool:
+        """验证路径是否可用并缓存"""
+        import subprocess as _sp
+        try:
+            _sp.run([path, '-version'], capture_output=True, check=True)
+            global _FFMPEG_CACHE
+            _FFMPEG_CACHE = path
+            return True
+        except Exception:
+            return False
+
     # 1) 系统 PATH
     for candidate in ["ffmpeg", "ffmpeg.exe"]:
         path = shutil.which(candidate)
-        if path:
-            _FFMPEG_CACHE = path
+        if path and _try_path(path):
             return path
 
     # 2) imageio-ffmpeg 内嵌
     try:
         import imageio_ffmpeg
         exe = imageio_ffmpeg.get_ffmpeg_exe()
-        if exe and (os.path.isfile(exe) or shutil.which(exe)):
-            _FFMPEG_CACHE = exe
+        if exe and (os.path.isfile(exe) or shutil.which(exe)) and _try_path(exe):
             return exe
     except (ImportError, RuntimeError):
         pass
+
+    # 3) Windows 常见安装路径
+    windows_paths = [
+        Path("C:/ffmpeg/bin/ffmpeg.exe"),
+        Path("C:/Windows/ffmpeg.exe"),
+    ]
+    for p in windows_paths:
+        if p.exists() and _try_path(str(p)):
+            return str(p)
+
+    # 4) winget 安装路径递归查找
+    try:
+        winget_base = Path(os.environ.get('LOCALAPPDATA', ''), 'Microsoft/WinGet/Packages')
+        if winget_base.exists():
+            for exe in winget_base.rglob('ffmpeg.exe'):
+                if _try_path(str(exe)):
+                    return str(exe)
+                break  # 只试第一个
+    except Exception:
+        pass
+
+    # 5) 脚本/项目同目录
+    try:
+        script_dir = Path(__file__).parent.parent  # 项目根目录
+    except Exception:
+        script_dir = Path(os.getcwd())
+    for name in ('ffmpeg.exe', 'ffmpeg'):
+        local = script_dir / name
+        if local.exists() and _try_path(str(local)):
+            return str(local)
 
     return None
 
@@ -171,7 +213,6 @@ def find_ffprobe() -> str | None:
         import imageio_ffmpeg
         exe = imageio_ffmpeg.get_ffmpeg_exe()
         if exe:
-            # ffprobe 与 ffmpeg 同目录
             ffmpeg_dir = os.path.dirname(exe)
             for name in ["ffprobe", "ffprobe.exe"]:
                 probe_path = os.path.join(ffmpeg_dir, name)
@@ -180,6 +221,26 @@ def find_ffprobe() -> str | None:
                     return probe_path
     except (ImportError, RuntimeError):
         pass
+
+    # 3) Windows 常见安装路径
+    windows_paths = [
+        Path("C:/ffmpeg/bin/ffprobe.exe"),
+        Path("C:/Windows/ffprobe.exe"),
+    ]
+    for p in windows_paths:
+        if p.exists():
+            _FFPROBE_CACHE = str(p)
+            return str(p)
+
+    # 4) 如果找到了 ffmpeg，尝试同目录查找 ffprobe
+    ffmpeg_path = _FFMPEG_CACHE
+    if ffmpeg_path:
+        ffmpeg_dir = os.path.dirname(ffmpeg_path)
+        for name in ["ffprobe", "ffprobe.exe"]:
+            probe_path = os.path.join(ffmpeg_dir, name)
+            if os.path.isfile(probe_path):
+                _FFPROBE_CACHE = probe_path
+                return probe_path
 
     return None
 

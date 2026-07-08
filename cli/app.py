@@ -11,6 +11,8 @@ import sys
 import atexit
 import time
 import shutil
+from pathlib import Path
+import tempfile
 import qrcode
 import httpx
 import uuid
@@ -354,6 +356,74 @@ DEFAULT_CONFIG = {
         "chat": "",
         "vision": "",
         "fast": ""
+    },
+    "knowledge": {
+        "auto_reclassify_enabled": True,
+        "auto_reclassify_interval_minutes": 10,
+        "auto_reclassify_clean_empty": True
+    },
+    "knowledge_verify": {
+        "enabled": True,
+        "use_web_search": True,
+        "min_reliability_score": 0.7,
+        "auto_fix": True
+    },
+    "curiosity_search": {
+        "enabled": True,
+        "max_videos_per_dive": 10,
+        "dive_videos_default": 3,
+        "dive_videos_mid": 5,
+        "dive_videos_max": 10,
+        "trigger_min_score": 7.5,
+        "prob_trigger": 0.3,
+        "cooldown_minutes": 120
+    },
+    "dry_goods": {
+        "enabled": False,
+        "min_score": 7.5,
+        "folder_name": "highlights"
+    },
+    "platform_adapter": {
+        "enabled": True,
+        "ui_platforms": ["bilibili", "youtube", "douyin", "kuaishou", "web", "local"],
+        "supported": ["bilibili", "youtube", "douyin", "kuaishou", "web", "local"],
+        "prefer_platform_subtitles": True,
+        "subtitle_langs": ["zh-Hans", "zh", "zh-CN", "en"],
+        "download_format": "bv*+ba/best/best",
+        "proxy": "",
+        "allow_web_local_files": False,
+    },
+    "ai_subtitle_verify": {
+        "enabled": True,
+        "knowledge_review_interval": 10,
+        "knowledge_review_sample_size": 3
+    },
+    "cooldown": {
+        "startup_cooldown_min": 5,
+        "startup_cooldown_max": 10,
+        "post_comment_cooldown_min": 3,
+        "post_comment_cooldown_max": 8,
+        "post_dm_cooldown_min": 3,
+        "post_dm_cooldown_max": 8
+    },
+    "psycho_engine": {
+        "enabled": True,
+        "deep_analyze_interval_videos": 100,
+        "heuristic_update_interval": 15,
+        "cocoon_detect_interval": 15,
+        "cocoon_warning_threshold": 0.35,
+        "recommend_prob_per_round": 0.08,
+        "min_views_before_recommend": 10,
+        "max_surprise_daily": 5,
+        "max_explore_daily": 5,
+        "max_anticocoon_daily": 3,
+        "min_actions_for_deep_analysis": 50,
+        "deep_analysis_cooldown_seconds": 14400,
+        "max_actions_in_log": 2000,
+        "max_recommendation_log": 200,
+        "aversion_auto_blacklist_threshold": 3,
+        "aversion_score_block_threshold": 0.7,
+        "aversion_score_warn_threshold": 0.4
     }
 }
 
@@ -416,7 +486,11 @@ def configure_openai_client():
 
 
 def is_api_configured():
-    return bool(UNIFIED_API_KEY and UNIFIED_BASE_URL and MODEL_BRAIN)
+    api_cfg = config.get("api", {})
+    api_key = UNIFIED_API_KEY or api_cfg.get("unified_api_key", "")
+    base_url = UNIFIED_BASE_URL or api_cfg.get("unified_base_url", "")
+    model = MODEL_BRAIN or api_cfg.get("model_brain", "")
+    return bool(api_key and base_url and model)
 
 def get_vision_api_key():
     """获取视觉模型 API Key（独立配置优先，否则回退统一配置）"""
@@ -493,6 +567,7 @@ VIDEO_DOWNLOAD_INTEREST_THRESHOLD = config.get("video", {}).get("download_intere
 VIDEO_DOWNLOAD_DIR = config.get("video", {}).get("download_dir", "")
 VIDEO_DELETE_AFTER_UNDERSTAND = config.get("video", {}).get("delete_video_after_understand", True)
 VIDEO_FILTER_MODE = config.get("video", {}).get("filter_mode", "cover_and_title")  # watch_all / cover_and_title
+VIDEO_QUALITY = config.get("video", {}).get("quality", "best")  # 下载画质: best/1080p/720p/480p/360p
 # [VISION] 视觉理解配置
 VISION_COVER_ENABLED = config.get("vision", {}).get("cover_enabled", True)
 VISION_FRAMES_ENABLED = config.get("vision", {}).get("frames_enabled", True)
@@ -717,8 +792,8 @@ def show_main_menu():
     print(f"""
     ╔══════════════════════════════════════════════════════════╗
     ║           bilibili_learning_bot - B站学习互动机器人     ║
-    ║               版本: v3.0.0 全功能增强版                  ║
-    ║       特性: 智能兴趣引擎+投币管控+19种HTML风格+19种视觉风格   ║
+    ║               版本: v3.0.2 B站视频学习版                ║
+    ║  特性: B站视频分析+智能兴趣引擎+投币管控+19种风格+知识库   ║
     ╠══════════════════════════════════════════════════════════╣
     ╚══════════════════════════════════════════════════════════╝
 
@@ -737,11 +812,11 @@ def show_main_menu():
     {Fore.LIGHTCYAN_EX}A.{Style.RESET_ALL} 🔊 ASR开关快速切换 (当前: {'开启' if ASR_ENABLED else '关闭'})
     {Fore.MAGENTA}M.{Style.RESET_ALL} 😊 AI心情管理
     {Fore.LIGHTCYAN_EX}D.{Style.RESET_ALL} [GOLD] 干货归档 (高分内容单独保存)
-    {Fore.LIGHTCYAN_EX}V.{Style.RESET_ALL} 📹 手动视频分析 (输入链接/标题/UP主，AI客观解析)
+    {Fore.LIGHTCYAN_EX}V.{Style.RESET_ALL} 📹 手动视频分析 (B站 BV号/链接/标题/UP主 · 可导出 Word/PDF/PPT)
     {Fore.LIGHTMAGENTA_EX}K.{Style.RESET_ALL} 🔄 知识库重温 (选择已学视频，重新看/优化)
     {Fore.LIGHTCYAN_EX}T.{Style.RESET_ALL} 🎓 知识辅导 (讲解/问答/二次创作/生成HTML)
     {Fore.LIGHTCYAN_EX}U.{Style.RESET_ALL} 📚 UP主主页批量学习 (获取UP主主页视频, AI逐个学习)
-    {Fore.LIGHTCYAN_EX}W.{Style.RESET_ALL} 🎨 视频->网页 (将已学视频生成HTML网页)
+    {Fore.LIGHTCYAN_EX}W.{Style.RESET_ALL} 🎨 视频->网页/导出 (指定视频生成HTML，并可导出 Word/PDF/PPT)
     {Fore.CYAN}H.{Style.RESET_ALL} 🔍 搜索历史 (查看B站搜索记录)
     {Fore.CYAN}B.{Style.RESET_ALL} 📊 后台任务 (查看后台异步任务状态)
     {Fore.RED}R.{Style.RESET_ALL} 🔄 恢复出厂设置 (清除所有配置/登录/数据/web导出)
@@ -757,6 +832,9 @@ def show_main_menu():
     {Fore.YELLOW}Y.{Style.RESET_ALL} ⏱️ 视频间隔设置 (当前: {VIDEO_INTERVAL_MIN}-{VIDEO_INTERVAL_MAX}秒)
     {Fore.LIGHTCYAN_EX}P.{Style.RESET_ALL} 🎯 兴趣偏好设置 (智能引擎 v2.0)
     {Fore.YELLOW}X.{Style.RESET_ALL} 🪙 投币限制设置 (每日上限/评分阈值/概率/冷却)
+    {Fore.CYAN}J.{Style.RESET_ALL} 🛠️ 学习工具 (📝 出题考试 | 🔬 深入了解)
+    {Fore.MAGENTA}MM.{Style.RESET_ALL} 🧠 思维导图 (知识库/单视频 → 交互HTML)
+    {Fore.GREEN}WB.{Style.RESET_ALL} 🌐 打开网页端 (自动启动并打开浏览器)
     {Fore.RED}0.{Style.RESET_ALL} ❌ 退出程序
 
     {Fore.CYAN}当前配置状态:{Style.RESET_ALL}
@@ -785,7 +863,76 @@ def show_main_menu():
 
     {Fore.CYAN}• 字幕严格校验:{Style.RESET_ALL} {Fore.GREEN + "✓ 已启用" + Style.RESET_ALL if SUBTITLE_STRICT_CHECK else Fore.LIGHTBLACK_EX + "💤 已关闭(默认)" + Style.RESET_ALL}
     {Fore.CYAN}• 安静模式:{Style.RESET_ALL} {Fore.GREEN + "✓ 已开启" + Style.RESET_ALL if QUIET_MODE else Fore.LIGHTBLACK_EX + "💤 已关闭" + Style.RESET_ALL}
+    {Fore.CYAN}• 省token模式:{Style.RESET_ALL} {Fore.GREEN + "💡 智能省token" + Style.RESET_ALL if config.get("system", {}).get("smart_token_mode", False) else Fore.YELLOW + "💤 未启用 (当前模式)" + Style.RESET_ALL}
     """)
+
+
+def open_web_panel():
+    """打开网页端：若未运行则后台启动 web_panel.py，再打开浏览器。"""
+    import socket
+    import subprocess
+    import webbrowser
+
+    port = int(os.getenv('WEB_PORT', '7860'))
+    url = f"http://127.0.0.1:{port}/"
+
+    def _port_open(host, p):
+        try:
+            with socket.create_connection((host, p), timeout=1.5):
+                return True
+        except OSError:
+            return False
+
+    # 1) 若已在运行，直接打开浏览器
+    if _port_open('127.0.0.1', port):
+        print(f"{Fore.GREEN}[OK] 网页端已在运行: {url}{Style.RESET_ALL}")
+    else:
+        # 2) 后台启动 web_panel.py（跳过终端免责确认）
+        print(f"{Fore.CYAN}[INFO] 网页端未运行，正在后台启动...{Style.RESET_ALL}")
+        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        script = os.path.join(base, 'web_panel.py')
+        if not os.path.exists(script):
+            print(f"{Fore.RED}[ERROR] 找不到网页端脚本: {script}{Style.RESET_ALL}")
+            return
+        env = dict(os.environ)
+        env['BILI_DISCLAIMER_SKIP'] = '1'
+        log_path = os.path.join(base, 'web_panel_stdout.log')
+        try:
+            with open(log_path, 'ab') as lf:
+                if os.name == 'nt':
+                    proc = subprocess.Popen(
+                        [sys.executable, script],
+                        env=env, stdout=lf, stderr=subprocess.STDOUT,
+                        creationflags=subprocess.CREATE_NO_WINDOW,
+                    )
+                else:
+                    proc = subprocess.Popen(
+                        [sys.executable, script],
+                        env=env, stdout=lf, stderr=subprocess.STDOUT,
+                        start_new_session=True,
+                    )
+            print(f"{Fore.GREEN}[OK] 已启动网页端进程 (PID={proc.pid}){Style.RESET_ALL}")
+        except Exception as e:
+            print(f"{Fore.RED}[ERROR] 启动网页端失败: {e}{Style.RESET_ALL}")
+            return
+
+        # 3) 轮询等待端口就绪（最多约 20 秒）
+        ok = False
+        for _ in range(40):
+            time.sleep(0.5)
+            if _port_open('127.0.0.1', port):
+                ok = True
+                break
+        if not ok:
+            print(f"{Fore.YELLOW}[WARN] 等待超时，网页端可能仍在启动，请稍后手动打开 {url}{Style.RESET_ALL}")
+            return
+
+    # 4) 打开浏览器
+    try:
+        webbrowser.open(url)
+        print(f"{Fore.GREEN}[OK] 已在浏览器打开: {url}{Style.RESET_ALL}")
+    except Exception as e:
+        print(f"{Fore.YELLOW}[WARN] 无法自动打开浏览器，请手动访问 {url} ({e}){Style.RESET_ALL}")
 
 def show_mood_menu():
     """AI心情管理菜单 - 随机心情 / 自定义心情"""
@@ -878,6 +1025,313 @@ def show_mood_menu():
         if choice in ("1","2","3","4","5"):
             save_config(config)
 
+async def _mindmap_from_video_input(cfg):
+    """🧠 思维导图：输入视频(链接/BV/标题/UP主) → 抓取字幕 → 生成思维导图。
+    复用手动视频分析的解析与字幕获取逻辑，而非只从已有知识库导出。"""
+    try:
+        from brain.video_analysis import AgentBrain, _extract_bvid, _resolve_b23_short
+        from api.subtitles import fetch_bilibili_subtitles
+        from core.config import COOKIE_FILE
+        from services.mindmap_export import export_mindmap
+    except Exception as e:
+        print(f"{Fore.RED}[ERROR] 思维导图模块加载失败: {e}{Style.RESET_ALL}")
+        return
+
+    print(f"\n{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}|               🧠 思维导图 - 输入视频生成                       |{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
+    print(f"{Fore.YELLOW}[INFO] 支持: B站视频链接 | BV号 | 视频标题 | UP主名字{Style.RESET_ALL}")
+    print(f"{Fore.YELLOW}[INFO] 此模式会抓取视频字幕并直接生成思维导图（不写入知识库）{Style.RESET_ALL}")
+
+    user_input = input(f"\n{Fore.CYAN}请输入视频链接/标题/UP主名字: {Style.RESET_ALL}").strip()
+    if not user_input:
+        print(f"{Fore.YELLOW}[WARN] 输入为空，已取消{Style.RESET_ALL}")
+        return
+
+    # ── 第一步：解析 BV ──
+    bvid = None
+    title = None
+    up_name = None
+    raw_bvid = _extract_bvid(user_input)
+    if raw_bvid:
+        if 'b23.tv' in user_input.lower():
+            resolved = await _resolve_b23_short(raw_bvid)
+            bvid = resolved or raw_bvid
+        else:
+            bvid = raw_bvid
+
+    # ── 第二步：标题/UP 搜索 ──
+    if not bvid:
+        print(f"{Fore.CYAN}正在B站搜索: {user_input}...{Style.RESET_ALL}")
+        try:
+            brain = AgentBrain()
+            brain.bili._load_credential()
+            results = await brain.bili.search_bilibili(user_input, limit=12)
+        except Exception as e:
+            print(f"{Fore.RED}[ERROR] 搜索失败: {e}{Style.RESET_ALL}")
+            return
+        if not results:
+            print(f"{Fore.RED}[ERROR] 未找到相关视频或UP主{Style.RESET_ALL}")
+            return
+        print(f"\n{Fore.GREEN}找到 {len(results)} 个相关结果，请选择:{Style.RESET_ALL}")
+        for i, r in enumerate(results):
+            print(f"  {Fore.YELLOW}{i+1:>2}.{Style.RESET_ALL} {(r.get('title','?') or '')[:50]}  @{r.get('author','?')}")
+        print(f"  {Fore.YELLOW} 0.{Style.RESET_ALL} 取消")
+        sel = input(f"{Fore.CYAN}请选择视频编号 (1-{len(results)}): {Style.RESET_ALL}").strip()
+        if not sel or sel == "0":
+            print(f"{Fore.YELLOW}[WARN] 已取消{Style.RESET_ALL}")
+            return
+        try:
+            idx = int(sel) - 1
+            chosen = results[idx]
+            bvid = chosen.get('bvid')
+            title = chosen.get('title', '')
+            up_name = chosen.get('author', '')
+        except (ValueError, IndexError):
+            print(f"{Fore.RED}[ERROR] 无效编号{Style.RESET_ALL}")
+            return
+
+    # ── 第三步：获取视频信息(标题/UP) ──
+    if bvid and (not title or not up_name):
+        try:
+            brain = AgentBrain()
+            brain.bili._load_credential()
+            meta = await brain.bili._wbi_get('https://api.bilibili.com/x/web-interface/view',
+                                             params={'bvid': bvid})
+            vinfo = meta.json()
+            if vinfo.get('code') == 0:
+                vdata = vinfo['data']
+                title = title or vdata.get('title', '')
+                up_name = up_name or vdata.get('owner', {}).get('name', '未知')
+        except Exception:
+            pass
+    if not bvid:
+        print(f"{Fore.RED}[ERROR] 无法解析视频 BV 号{Style.RESET_ALL}")
+        return
+    title = title or bvid
+
+    # ── 加载 Cookie（用于获取AI字幕）──
+    cookies = None
+    if os.path.exists(COOKIE_FILE):
+        try:
+            with open(COOKIE_FILE, 'r', encoding='utf-8') as f:
+                cookies = json.load(f)
+            print(f"{Fore.GREEN}[LOGIN] 已加载本地登录Cookie (UID: {cookies.get('DedeUserID','?')}){Style.RESET_ALL}")
+        except Exception:
+            cookies = None
+    else:
+        sibling_dirs = [
+            ("bilibili_learning_bot", "Data/bilibili_cookies.json"),
+            ("bilibili_learning_bot-2.2.1", "Data/bilibili_cookies.json"),
+            ("bilibili_learning_bot-3.0.1", "Data/bilibili_cookies.json"),
+            ("bilibili_learning_bot-2.2.2/bilibili_learning_bot-3.0.0", "Data/bilibili_cookies.json"),
+            ("bilibili_claw", "Data/bilibili_cookies.json"),
+            ("batch_unfollow", "Data/bilibili_cookies.json"),
+        ]
+        for sib_dir, sib_file in sibling_dirs:
+            sibling_cookie = os.path.join(os.path.dirname(BASE_DIR), sib_dir, sib_file)
+            if os.path.exists(sibling_cookie):
+                try:
+                    with open(sibling_cookie, 'r', encoding='utf-8') as f:
+                        cookies = json.load(f)
+                    print(f"{Fore.GREEN}[LOGIN] 已从 {sib_dir} 加载Cookie{Style.RESET_ALL}")
+                    break
+                except Exception:
+                    pass
+
+    # ── 抓取字幕 + 简介 ──
+    print(f"{Fore.CYAN}获取视频信息 + 字幕...{Style.RESET_ALL}")
+    try:
+        ok, subs, desc, _ai = await fetch_bilibili_subtitles(bvid, cookies_obj=cookies, title=title)
+    except Exception as e:
+        print(f"{Fore.RED}[ERROR] 字幕获取失败: {e}{Style.RESET_ALL}")
+        return
+    if not ok or not subs:
+        print(f"{Fore.YELLOW}[WARN] 未获取到字幕，将仅用视频简介生成思维导图{Style.RESET_ALL}")
+        subs = ""
+
+    # ── 组装 markdown 基础结构（标题 + 元信息）──
+    md = f"# {title}\n\n"
+    md += f"- 视频链接: https://www.bilibili.com/video/{bvid}\n"
+    if up_name:
+        md += f"- UP主: @{up_name}\n"
+
+    # ── 尝试用 AI 把字幕/简介归纳为结构化大纲 ──
+    print(f"{Fore.CYAN}[AI] 正在用 AI 归纳思维导图大纲...{Style.RESET_ALL}")
+    outline = await asyncio.get_event_loop().run_in_executor(
+        None, lambda: _ai_summarize_subs_to_outline(title, up_name, desc, subs, cfg)
+    )
+    if outline:
+        md += "\n" + outline + "\n"
+    else:
+        # 回退：简介 + 字幕平铺
+        md += f"\n## 视频简介\n"
+        _has_desc = False
+        for line in (desc or '').splitlines():
+            if line.strip():
+                md += f"- {line.strip()}\n"
+                _has_desc = True
+        if not _has_desc:
+            md += "- (无简介)\n"
+        md += f"\n## 字幕要点\n"
+        _n = 0
+        for line in (subs or '').splitlines():
+            s = line.strip()
+            if not s:
+                continue
+            md += f"- {s[:400]}\n"
+            _n += 1
+            if _n >= 400:
+                break
+        if _n == 0:
+            md += "- (无字幕内容)\n"
+
+    # ── 写入临时 md 并导出思维导图 ──
+    fd, tmp = tempfile.mkstemp(suffix='.md', prefix='mm_video_')
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            f.write(md)
+        out = export_mindmap(tmp, cfg=cfg)
+        print(f"{Fore.GREEN}[OK] 思维导图已生成: {out}{Style.RESET_ALL}")
+    finally:
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+
+
+def _ai_summarize_subs_to_outline(title, up_name, desc, subs, cfg):
+    """用本项目 OpenAI 客户端把字幕/简介归纳为结构化思维导图大纲（## 主分支 / ### 子分支 / - 要点）。
+    失败或未配置 AI 时返回 None，调用方回退到字幕平铺。"""
+    api_cfg = cfg.get("api", {}) if isinstance(cfg, dict) else {}
+    api_key = (api_cfg.get("unified_api_key") or "").strip() or UNIFIED_API_KEY
+    base_url = (api_cfg.get("unified_base_url") or "").strip() or UNIFIED_BASE_URL
+    model = (api_cfg.get("model_brain") or "").strip() or MODEL_BRAIN
+    if not (api_key and base_url and model):
+        print(f"  {Fore.YELLOW}[WARN] 未配置 AI（密钥/地址/模型缺失），回退字幕平铺{Style.RESET_ALL}")
+        return None
+    parts = []
+    if desc and desc.strip():
+        parts.append("【视频简介】\n" + desc.strip())
+    if subs and subs.strip():
+        parts.append("【视频字幕】\n" + subs.strip())
+    material = "\n\n".join(parts)
+    if not material.strip():
+        return None
+    material = material[:9000]
+    system = (
+        "你是一个知识整理与思维导图助手。请根据提供的视频简介与字幕内容，"
+        "归纳生成一份结构化的思维导图大纲。\n"
+        "硬性要求：\n"
+        "1. 只输出 Markdown，从【二级标题】开始（## 主分支 / ### 子分支），不要使用一级标题 #。\n"
+        "2. 用标题层级（## / ###）和要点列表（- 内容）表达结构；子分支下用 - 列出具体要点。\n"
+        "3. 按主题合理归纳、合并同类项，提炼核心观点/事实/逻辑脉络；不要逐句平铺字幕，剔除寒暄、口误、重复、无信息量的填充词。\n"
+        "4. 不要使用代码块围栏，不要输出任何额外解释文字，只输出大纲本身。\n"
+        "5. 若内容不足以归纳，至少给出 3-5 个合理的知识分支。"
+    )
+    user = f"视频标题：{title}\nUP主：{up_name or '未知'}\n\n{material}"
+    try:
+        client = OpenAI(api_key=api_key, base_url=base_url, timeout=120.0)
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            temperature=0.3,
+        )
+        out = resp.choices[0].message.content
+        if out and out.strip():
+            return out.strip()
+    except Exception as e:
+        print(f"  {Fore.YELLOW}[WARN] AI 大纲归纳失败，回退字幕平铺: {e}{Style.RESET_ALL}")
+    return None
+
+
+def show_mindmap_menu():
+    """🧠 思维导图：把已学知识（单个视频 / 整个知识库）或输入视频导出为可交互 HTML 思维导图。"""
+    try:
+        from services.mindmap_export import export_mindmap
+    except Exception as e:
+        print(f"{Fore.RED}[ERROR] 思维导图模块加载失败: {e}{Style.RESET_ALL}")
+        input("按回车返回...")
+        return
+    cfg = config
+    while True:
+        print(f"""
+    ╔══════════════════════════════════════════════════════════╗
+    ║                🧠 思维导图导出                            ║
+    ╚══════════════════════════════════════════════════════════╝
+
+    {Fore.CYAN}把已学知识/输入视频导出为可交互思维导图（浏览器打开，可折叠/缩放）{Style.RESET_ALL}
+    {Fore.GREEN}1.{Style.RESET_ALL} 整个知识库 → 批量思维导图 (全部 .md)
+    {Fore.GREEN}2.{Style.RESET_ALL} 选择单个已学视频 → 导出该视频思维导图
+    {Fore.GREEN}3.{Style.RESET_ALL} 🆕 输入视频 (链接/BV/标题/UP主) → 抓取字幕并生成思维导图
+    {Fore.RED}0.{Style.RESET_ALL} 返回主菜单
+        """)
+        sub = input(f"{Fore.CYAN}请选择: {Style.RESET_ALL}").strip()
+        if sub == "0":
+            break
+        elif sub == "1":
+            md_files = sorted(Path(KNOWLEDGE_BASE_DIR).rglob("*.md"))
+            if not md_files:
+                print(f"{Fore.YELLOW}[INFO] 知识库为空，无法导出{Style.RESET_ALL}")
+                input("按回车返回...")
+                continue
+            ok = 0
+            fail = 0
+            print(f"{Fore.CYAN}[INFO] 正在批量导出 {len(md_files)} 个文件...{Style.RESET_ALL}")
+            for p in md_files:
+                try:
+                    out = export_mindmap(p, cfg=cfg)
+                    ok += 1
+                    print(f"  {Fore.GREEN}✓{Style.RESET_ALL} {out}")
+                except Exception as e:
+                    fail += 1
+                    print(f"  {Fore.RED}✗{Style.RESET_ALL} {p}: {e}")
+            print(f"{Fore.GREEN}[OK] 批量思维导图完成：成功 {ok}，失败 {fail}{Style.RESET_ALL}")
+            input("按回车返回...")
+        elif sub == "2":
+            md_files = sorted(Path(KNOWLEDGE_BASE_DIR).rglob("*.md"))
+            if not md_files:
+                print(f"{Fore.YELLOW}[INFO] 知识库为空{Style.RESET_ALL}")
+                input("按回车返回...")
+                continue
+            print(f"{Fore.CYAN}知识库文件 (共 {len(md_files)} 个):{Style.RESET_ALL}")
+            for i, p in enumerate(md_files, 1):
+                rel = p.relative_to(Path(KNOWLEDGE_BASE_DIR))
+                print(f"  {Fore.YELLOW}{i}.{Style.RESET_ALL} {rel}")
+            sel = input(f"{Fore.CYAN}输入编号 (0=取消): {Style.RESET_ALL}").strip()
+            if not sel or sel == "0":
+                continue
+            try:
+                idx = int(sel) - 1
+                target = md_files[idx]
+            except (ValueError, IndexError):
+                print(f"{Fore.RED}[ERROR] 无效编号{Style.RESET_ALL}")
+                input("按回车返回...")
+                continue
+            try:
+                out = export_mindmap(target, cfg=cfg)
+                print(f"{Fore.GREEN}[OK] 思维导图已生成: {out}{Style.RESET_ALL}")
+                input("按回车返回...")
+            except Exception as e:
+                print(f"{Fore.RED}[ERROR] 导出失败: {e}{Style.RESET_ALL}")
+                input("按回车返回...")
+        elif sub == "3":
+            try:
+                asyncio.run(_mindmap_from_video_input(cfg))
+            except KeyboardInterrupt:
+                print(f"\n{Fore.YELLOW}[WARN] 用户中断{Style.RESET_ALL}")
+            except Exception as e:
+                import traceback
+                print(f"{Fore.RED}[ERROR] 生成失败: {e}{Style.RESET_ALL}")
+                traceback.print_exc()
+            input("按回车返回...")
+        else:
+            print(f"{Fore.YELLOW}[INFO] 无效选项{Style.RESET_ALL}")
+
+
 def show_config_menu():
     """显示配置菜单"""
     global UNIFIED_API_KEY, UNIFIED_BASE_URL, MODEL_BRAIN, MODEL_VISION, MODEL_HTML, openai
@@ -922,6 +1376,7 @@ def show_config_menu():
     {Fore.MAGENTA}10.{Style.RESET_ALL} [TIME]  会话限制（定时/计数停止）
     {Fore.MAGENTA}D.{Style.RESET_ALL} [REFRESH] 备用API提供商（跨服务降级）
     {Fore.LIGHTCYAN_EX}M.{Style.RESET_ALL} [LIST] 获取可用模型列表
+    {Fore.GREEN}P.{Style.RESET_ALL} 🏭 选择厂商预设 (内置官方格式，自动填地址/模型)
     {Fore.RED}0.{Style.RESET_ALL} ↩️  返回主菜单
         """)
 
@@ -973,6 +1428,8 @@ def show_config_menu():
             configure_fallback_provider()
         elif choice.upper() == "M":
             _fetch_available_models()
+        elif choice.upper() == "P":
+            configure_provider_preset()
         else:
             print(f"{Fore.RED}[ERROR] 无效选项，请重新选择！{Style.RESET_ALL}")
 
@@ -998,7 +1455,12 @@ def _fetch_available_models():
         if resp.status_code != 200:
             print(f"{Fore.RED}[ERROR] HTTP {resp.status_code}: {resp.text[:300]}{Style.RESET_ALL}")
             return
-        data = resp.json()
+        try:
+            data = resp.json()
+        except ValueError:
+            print(f"{Fore.RED}[ERROR] 响应不是JSON: {resp.text[:300]}{Style.RESET_ALL}")
+            print(f"{Fore.YELLOW}  请确认 API 地址通常需要以 /v1 结尾，例如 https://example.com/v1{Style.RESET_ALL}")
+            return
         models_data = data.get("data") or data.get("models") or []
         if not models_data:
             print(f"{Fore.YELLOW}[WARN] 接口返回空模型列表{Style.RESET_ALL}")
@@ -1147,7 +1609,7 @@ def configure_fallback_provider():
 
 def configure_api_key():
     global UNIFIED_API_KEY, openai
-    print(f"\n{Fore.CYAN}当前API密钥: {UNIFIED_API_KEY}{Style.RESET_ALL}")
+    print(f"\n{Fore.CYAN}当前API密钥: {mask_secret(UNIFIED_API_KEY)}{Style.RESET_ALL}")
     new_key = input(f"{Fore.YELLOW}请输入新的API密钥 (直接回车保持原样): {Style.RESET_ALL}").strip()
     if new_key:
         config["api"]["unified_api_key"] = new_key
@@ -1214,6 +1676,59 @@ def configure_html_model():
         MODEL_HTML = ""
     save_config(config)
     print(f"{Fore.GREEN}[OK] HTML生成模型已更新并自动保存！{'当前: ' + (MODEL_HTML or MODEL_BRAIN)}{Style.RESET_ALL}")
+
+def configure_provider_preset():
+    """选择内置厂商预设，自动填入官方 OpenAI 兼容的 Base URL 与默认模型。"""
+    from core.config import PROVIDER_PRESETS
+    global UNIFIED_BASE_URL, MODEL_BRAIN, MODEL_VISION, MODEL_HTML
+    print(f"\n{Fore.CYAN}━━━ 选择厂商预设 (内置官方 OpenAI 兼容格式) ━━━{Style.RESET_ALL}")
+    keys = list(PROVIDER_PRESETS.keys())
+    for i, k in enumerate(keys, 1):
+        p = PROVIDER_PRESETS[k]
+        cur = " ✓当前" if config.get("active_preset") == k else ""
+        print(f"  {Fore.GREEN}{i}.{Style.RESET_ALL} {p['name']}{cur}")
+        print(f"     地址: {p['base_url']}  思考: {p['chat']}  视觉: {p['vision']}")
+    print(f"  {Fore.YELLOW}0.{Style.RESET_ALL} ↩️  取消")
+    sel = input(f"{Fore.CYAN}选择厂商 (序号, 回车取消): {Style.RESET_ALL}").strip()
+    if not sel:
+        return
+    if sel == "0":
+        return
+    try:
+        idx = int(sel) - 1
+    except ValueError:
+        print(f"{Fore.RED}[ERROR] 无效序号{Style.RESET_ALL}")
+        return
+    if idx < 0 or idx >= len(keys):
+        print(f"{Fore.RED}[ERROR] 序号超出范围{Style.RESET_ALL}")
+        return
+    key = keys[idx]
+    p = PROVIDER_PRESETS[key]
+    config["api"]["unified_base_url"] = p["base_url"]
+    config["api"]["model_brain"] = p["chat"]
+    config["api"]["model_vision"] = p["vision"]
+    config["api"]["model_html"] = p.get("fast") or p["chat"]
+    config["active_preset"] = key
+    # 同步模块级全局变量
+    UNIFIED_BASE_URL = p["base_url"]
+    MODEL_BRAIN = p["chat"]
+    MODEL_VISION = p["vision"]
+    MODEL_HTML = p.get("fast") or p["chat"]
+    try:
+        import core.config as _cfg
+        import core.globals as _glo
+        _cfg.UNIFIED_BASE_URL = UNIFIED_BASE_URL
+        _glo.UNIFIED_BASE_URL = UNIFIED_BASE_URL
+    except Exception:
+        pass
+    configure_openai_client()
+    save_config(config)
+    print(f"{Fore.GREEN}[OK] 已应用预设: {p['name']}{Style.RESET_ALL}")
+    print(f"  Base URL : {p['base_url']}")
+    print(f"  思考模型 : {p['chat']}")
+    print(f"  视觉模型 : {p['vision']}")
+    print(f"  HTML模型 : {config['api']['model_html']}")
+    print(f"{Fore.YELLOW}[提示] 请确认已配置对应厂商的 API Key（选项 1）{Style.RESET_ALL}")
 
 def configure_vision_api_key():
     """设置视觉模型独立 API 密钥"""
@@ -1294,6 +1809,7 @@ def configure_video_settings():
     print(f"当前下载时长上限: {VIDEO_MAX_DURATION_SECONDS} 秒")
     print(f"当前固定抽帧数量: {VIDEO_FRAME_COUNT} 张")
     print(f"当前视觉抽帧数量: {VISION_FRAME_COUNT} 张")
+    print(f"当前下载画质: {VIDEO_QUALITY} (best=自动最高/1080p/720p/480p/360p)")
     print(f"当前智能下载阈值: {VIDEO_DOWNLOAD_INTEREST_THRESHOLD}")
     print(f"当前下载路径: {VIDEO_DOWNLOAD_DIR or '默认 Data/video_cache'}")
     print(f"\n{Fore.MAGENTA}[SMART_FRAME] AI智能抽帧:{Style.RESET_ALL}")
@@ -1353,6 +1869,17 @@ def configure_video_settings():
                 print(f"{Fore.YELLOW}[WARN] 抽帧数量超出范围，已保持原样{Style.RESET_ALL}")
         except ValueError:
             print(f"{Fore.YELLOW}[WARN] 抽帧数量不是整数，已保持原样{Style.RESET_ALL}")
+
+    # [QUALITY] 下载画质选择（默认 best=自动最高画质）
+    cur_quality = (config.get("video", {}) or {}).get("quality", "best")
+    raw_quality = input(f"{Fore.YELLOW}请输入下载画质 (best=自动最高/1080p/720p/480p/360p, 当前: {cur_quality}, 回车保持): {Style.RESET_ALL}").strip().lower()
+    if raw_quality:
+        if raw_quality in {"best", "1080p", "720p", "480p", "360p"}:
+            video_cfg["quality"] = raw_quality
+            VIDEO_QUALITY = raw_quality
+            print(f"{Fore.GREEN}[OK] 下载画质已更新为 {raw_quality}{Style.RESET_ALL}")
+        else:
+            print(f"{Fore.YELLOW}[WARN] 画质无效 (仅支持 best/1080p/720p/480p/360p)，已保持原样{Style.RESET_ALL}")
 
     # [SMART_FRAME] AI智能抽帧设置
     print(f"\n{Fore.MAGENTA}--- AI智能抽帧设置 ---{Style.RESET_ALL}")
@@ -1419,6 +1946,15 @@ def configure_video_settings():
         video_cfg["download_dir"] = new_path
         VIDEO_DOWNLOAD_DIR = new_path
         print(f"{Fore.GREEN}[OK] 视频下载路径已更新: {new_path}{Style.RESET_ALL}")
+
+    cur_anchor = (config.get("video", {}) or {}).get("frame_anchor_mode", "bilinote")
+    anchor_input = input(f"{Fore.YELLOW}图文笔记模式 (bilinote=图文+目录 / legacy=经典仅理解, 当前: {cur_anchor}, 回车保持): {Style.RESET_ALL}").strip().lower()
+    if anchor_input:
+        if anchor_input in {"bilinote", "legacy"}:
+            video_cfg["frame_anchor_mode"] = anchor_input
+            print(f"{Fore.GREEN}[OK] 图文笔记模式已更新为 {anchor_input}{Style.RESET_ALL}")
+        else:
+            print(f"{Fore.YELLOW}[WARN] 仅支持 bilinote / legacy，已保持原样{Style.RESET_ALL}")
 
     if save_config(config):
         print(f"{Fore.GREEN}[OK] 视频设置已保存{Style.RESET_ALL}")
@@ -1952,6 +2488,42 @@ def show_coin_settings_menu():
     _reload_all_globals(config)
 
 
+def show_learning_tools_menu():
+    """学习工具子菜单 — 出题考试 + 深入了解"""
+    while True:
+        print(f"\n{Fore.CYAN}{'='*50}")
+        print("  🛠️ 学习工具")
+        print(f"{'='*50}{Style.RESET_ALL}")
+        print(f"  {Fore.GREEN}1.{Style.RESET_ALL} 📝 出题考试 — 从视频/知识库生成考题")
+        print(f"  {Fore.GREEN}2.{Style.RESET_ALL} 🔬 深入了解 — AI 深度学习指定主题")
+        print(f"  {Fore.RED}0.{Style.RESET_ALL} ↩️ 返回主菜单")
+        
+        choice = input(f"{Fore.CYAN}请选择 (1/2/0): {Style.RESET_ALL}").strip()
+        
+        if choice == "0":
+            break
+        elif choice == "1":
+            try:
+                from services.quiz_generator import quiz_menu_cli
+                import asyncio
+                asyncio.run(quiz_menu_cli())
+            except Exception as e:
+                print(f"{Fore.RED}[ERROR] 出题异常: {e}{Style.RESET_ALL}")
+                import traceback
+                traceback.print_exc()
+        elif choice == "2":
+            try:
+                from services.deep_dive import deep_dive_menu_cli
+                import asyncio
+                asyncio.run(deep_dive_menu_cli())
+            except Exception as e:
+                print(f"{Fore.RED}[ERROR] 深入了解异常: {e}{Style.RESET_ALL}")
+                import traceback
+                traceback.print_exc()
+        else:
+            print(f"{Fore.YELLOW}[INFO] 无效选项{Style.RESET_ALL}")
+
+
 def configure_energy_params():
     global MAX_ENERGY
     print(f"\n{Fore.CYAN}精力系统参数配置{Style.RESET_ALL}")
@@ -1975,7 +2547,7 @@ def show_current_config():
     print(f"{Fore.CYAN}════════════════════════════════════════════════════════════{Style.RESET_ALL}")
 
     print(f"\n{Fore.YELLOW}📡 API配置:{Style.RESET_ALL}")
-    print(f"  • API密钥: {UNIFIED_API_KEY[:15]}...{UNIFIED_API_KEY[-5:] if len(UNIFIED_API_KEY) > 20 else ''}")
+    print(f"  • API密钥: {mask_secret(UNIFIED_API_KEY)}")
     print(f"  • API地址: {UNIFIED_BASE_URL}")
     print(f"  • 思考模型: {MODEL_BRAIN}")
     print(f"  • 视觉模型: {MODEL_VISION}")
@@ -2716,7 +3288,8 @@ def _load_recent_journal_events(limit=20):
     try:
         with open(JOURNAL_FILE, "r", encoding="utf-8") as f:
             content = f.read()
-    except Exception:
+    except Exception as e:
+        print(f"{Fore.YELLOW}[WARN] 读取日记文件失败: {e}{Style.RESET_ALL}", flush=True)
         return []
 
     entries = []
@@ -3746,6 +4319,7 @@ async def video_to_html_bg():
         sibling_dirs = [
             ("bilibili_learning_bot", "Data/bilibili_cookies.json"),
             ("bilibili_learning_bot-2.2.1", "Data/bilibili_cookies.json"),
+            ("bilibili_learning_bot-3.0.1", "Data/bilibili_cookies.json"),
             ("bilibili_learning_bot-2.2.2/bilibili_learning_bot-3.0.0", "Data/bilibili_cookies.json"),
             ("bilibili_claw", "Data/bilibili_cookies.json"),
             ("batch_unfollow", "Data/bilibili_cookies.json"),
@@ -4556,6 +5130,12 @@ Link: {video_url}
             save_path.write_text(html, encoding='utf-8')
             print(f"{Fore.GREEN}[OK] 已保存到: {save_path.resolve()}{Style.RESET_ALL}")
 
+        # ── 附加导出：Word / PDF / PPT（与主流程共享同一视频内容 ctx）──
+        from services.document_export import export_video_content_interactive
+        await export_video_content_interactive(
+            title, up_name, video_url, ctx,
+            stats=stats, desc=desc, bvid=bvid, brain=brain)
+
         # 提示：预览服务器将在程序退出时自动关闭
         if preview_url:
             print(f"{Fore.LIGHTBLACK_EX}   💡 Flask预览服务器将持续运行 ({preview_url})，退出程序时自动停止{Style.RESET_ALL}")
@@ -4969,6 +5549,34 @@ def factory_reset_all():
             print(f"  {Fore.RED}✗{Style.RESET_ALL} 删除 KnowledgeBase/.html_exports 失败: {e}")
 
     # ═══════════════════════════════════════════════════════════
+    # 11.5) 思维导图导出目录 (MindMaps/)
+    mindmap_dir = os.path.join(BASE_DIR, "MindMaps")
+    if os.path.exists(mindmap_dir):
+        try:
+            _shu.rmtree(mindmap_dir, ignore_errors=True)
+            print(f"  {Fore.GREEN}✓{Style.RESET_ALL} 已删除: 思维导图目录 (MindMaps/)")
+            deleted_count += 1
+        except Exception as e:
+            print(f"  {Fore.RED}✗{Style.RESET_ALL} 思维导图目录删除失败: {e}")
+
+    # 11.6) Word 文档导出目录 (Word/)
+    docx_dirs = [os.path.join(BASE_DIR, "Word")]
+    try:
+        _de = config.get("document_export", {}) if isinstance(config, dict) else {}
+        _custom = _de.get("output_dir") or _de.get("folder_name")
+        if _custom:
+            docx_dirs.append(os.path.join(BASE_DIR, _custom))
+    except Exception:
+        pass
+    for _dd in docx_dirs:
+        if os.path.exists(_dd):
+            try:
+                _shu.rmtree(_dd, ignore_errors=True)
+                print(f"  {Fore.GREEN}✓{Style.RESET_ALL} 已删除: Word文档目录 ({os.path.basename(_dd)}/)")
+                deleted_count += 1
+            except Exception as e:
+                print(f"  {Fore.RED}✗{Style.RESET_ALL} Word文档目录删除失败: {e}")
+
     # 12) 重新生成默认配置文件
     # ═══════════════════════════════════════════════════════════
     config = DEFAULT_CONFIG.copy()
@@ -5550,7 +6158,7 @@ def _reload_all_globals(new_config: dict):
     global ROUND_INTERVAL_MIN, ROUND_INTERVAL_MAX, VIDEO_INTERVAL_MIN, VIDEO_INTERVAL_MAX
     global VIDEO_UNDERSTANDING_MODE, VIDEO_MAX_DURATION_SECONDS, VIDEO_FRAME_COUNT
     global VIDEO_DOWNLOAD_INTEREST_THRESHOLD, VIDEO_DOWNLOAD_DIR
-    global VIDEO_DELETE_AFTER_UNDERSTAND, VIDEO_FILTER_MODE
+    global VIDEO_DELETE_AFTER_UNDERSTAND, VIDEO_FILTER_MODE, VIDEO_QUALITY
     global VISION_FRAMES_ENABLED, VISION_COMMENT_IMAGES_ENABLED, VISION_MAX_COMMENT_IMAGES, VISION_FRAME_COUNT
     global ASR_ENABLED, ASR_BACKEND, ASR_WHISPER_MODEL, ASR_LANGUAGE, ASR_SPEAKER_SEPARATION
     global ASR_MAX_AUDIO_DURATION, ASR_MIN_CONFIDENCE, ASR_SKIP_MUSIC, ASR_KEEP_AUDIO
@@ -5684,6 +6292,7 @@ def _reload_all_globals(new_config: dict):
     VIDEO_DOWNLOAD_DIR = vid.get("download_dir", "")
     VIDEO_DELETE_AFTER_UNDERSTAND = vid.get("delete_video_after_understand", True)
     VIDEO_FILTER_MODE = vid.get("filter_mode", "cover_and_title")
+    VIDEO_QUALITY = vid.get("quality", "best")
 
     vis = new_config.get("vision", {})
     VISION_COVER_ENABLED = vis.get("cover_enabled", True)

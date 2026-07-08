@@ -1,12 +1,12 @@
 services:
   bilibili-bot:
     # 发布到 Docker Hub 后，把 DOCKER_IMAGE 改成你的镜像名即可，例如 yourname/bilibili_learning_bot:latest
-    image: ${DOCKER_IMAGE:-bilibili_learning_bot:3.0.1}
+    image: ${DOCKER_IMAGE:-bilibili_learning_bot:3.0.2}
     build:
       context: .
       dockerfile: Dockerfile
       args:
-        APP_VERSION: ${APP_VERSION:-3.0.1}
+        APP_VERSION: ${APP_VERSION:-3.0.2}
     container_name: ${CONTAINER_NAME:-bilibili_learning_bot}
     restart: unless-stopped
     ports:
@@ -23,7 +23,7 @@ services:
       NO_PROXY: 127.0.0.1,localhost
       no_proxy: 127.0.0.1,localhost
       BOT_MODE: ${BOT_MODE:-web}
-      APP_VERSION: ${APP_VERSION:-3.0.1}
+      APP_VERSION: ${APP_VERSION:-3.0.2}
       # 默认空值表示不主动联网；发布者可填 GitHub raw VERSION 或自托管 version.txt。
       UPDATE_CHECK_URL: ${UPDATE_CHECK_URL:-}
       UPDATE_CHECK_TTL: ${UPDATE_CHECK_TTL:-3600}

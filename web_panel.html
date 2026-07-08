@@ -4,6 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
 <title>{{ACCOUNT_TITLE}}</title>
+<link rel="icon" href="/app-icon" type="image/png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@100;200;300;400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <script>if(typeof Chart==='undefined'){document.write('<script src="https://cdn.bootcdn.net/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"><\/script>')}</script>
 <script>if(typeof Chart==='undefined'){document.write('<script src="https://unpkg.com/chart.js@4.4.0/dist/chart.umd.min.js"><\/script>')}</script>
@@ -38,7 +42,7 @@
   --sidebar-border: #EBEBEB;
   --log-bg: #F5F5F5;
   --log-text: #333333;
-  --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
   --font-mono: 'SF Mono', 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
 }
 
@@ -265,6 +269,11 @@ a:hover{color:var(--accent-hover)}
 .btn-lg{padding:12px 28px;font-size:14px;border-radius:8px}
 .btn-grp{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px}
 .btn:disabled{opacity:.4;cursor:not-allowed}
+.mode-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:6px 0 2px}
+.mode-row label{font-size:13px;font-weight:700;color:var(--text-secondary)}
+.sel{background:var(--bg-secondary);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:7px 10px;font-size:13px;font-family:inherit;cursor:pointer;outline:none}
+.sel:focus{border-color:var(--accent)}
+.mode-hint{font-size:11px;color:var(--text-tertiary)}
 
 /* ── FORMS ── */
 .fg{margin-bottom:14px}
@@ -356,13 +365,6 @@ a:hover{color:var(--accent-hover)}
 .qr-wrap{text-align:center;padding:36px}
 .qr-wrap img{max-width:200px;border-radius:8px;border:1px solid var(--border)}
 .qr-wrap .qr-status{margin-top:16px;font-size:14px;font-weight:500;color:var(--text-secondary)}
-
-/* ── UPDATE NOTICE ── */
-.update-notice{margin-top:14px;padding:12px 14px;border:1px solid var(--border);border-radius:12px;background:var(--bg-card);font-size:13px;color:var(--text-secondary)}
-.update-notice.ok{border-color:var(--green);background:var(--green-bg);color:var(--green)}
-.update-notice.warn{border-color:var(--accent);background:var(--accent-bg);color:var(--accent)}
-.update-notice.err{border-color:var(--border);color:var(--text-tertiary)}
-.update-notice code{font-family:var(--font-mono);font-size:12px;background:var(--bg-secondary);padding:2px 6px;border-radius:6px;color:var(--text-primary)}
 
 /* ── TOAST ── */
 .toast{
@@ -584,7 +586,7 @@ body.theme-transition,body.theme-transition *{transition:background .4s ease,col
 <!-- SIDEBAR -->
 <aside class="sidebar" id="sidebar">
 <div class="sb-hd">
-<div class="sb-av"><i data-lucide="zap" style="width:18px;height:18px;stroke:#fff"></i></div><div><div class="sb-tt">{{ACCOUNT_HEADER}}</div><div class="sb-sub">B站 AI 管理系统</div></div>
+<div class="sb-av"><img src="/app-icon" alt="项目图标" style="width:22px;height:22px;border-radius:6px;object-fit:contain"></div><div><div class="sb-tt">{{ACCOUNT_HEADER}}</div><div class="sb-sub">B站 AI 管理系统</div></div>
 </div>
 <nav class="sb-nav">
 <div class="ns">总览</div>
@@ -607,6 +609,11 @@ body.theme-transition,body.theme-transition *{transition:background .4s ease,col
 <div class="ns">工具</div>
 <button class="ni" data-pg="tutor" onclick="nav('tutor',this)"><span class="ic"><i data-lucide="graduation-cap"></i></span>知识辅导</button>
 <button class="ni" data-pg="tools" onclick="nav('tools',this)"><span class="ic"><i data-lucide="wrench"></i></span>功能中心</button>
+<button class="ni" data-pg="mindmap" onclick="nav('mindmap',this)"><span class="ic"><i data-lucide="network"></i></span>思维导图</button>
+<button class="ni" data-pg="uplearn" onclick="nav('uplearn',this)"><span class="ic"><i data-lucide="users"></i></span>UP批量学习</button>
+<button class="ni" data-pg="video2web" onclick="nav('video2web',this);v2wRenderStyles()"><span class="ic"><i data-lucide="presentation"></i></span>视频转网页</button>
+<button class="ni" data-pg="customkb" onclick="nav('customkb',this);ckRefresh()"><span class="ic"><i data-lucide="file-text"></i></span>自定义知识</button>
+<button class="ni" data-pg="learn-tools" onclick="nav('learn-tools',this);qtSourceChange()"><span class="ic"><i data-lucide="graduation-cap"></i></span>学习工具</button>
 <button class="ni" data-pg="sys" onclick="nav('sys',this)"><span class="ic"><i data-lucide="database"></i></span>系统管理</button>
 <div class="ns">帮助</div>
 <button class="ni" data-pg="about" onclick="nav('about',this)"><span class="ic"><i data-lucide="info"></i></span>关于</button>
@@ -696,6 +703,14 @@ body.theme-transition,body.theme-transition *{transition:background .4s ease,col
 <div class="divider"></div>
 <div class="pc">
 <h3>运行状态</h3><div id="ctrlStatus" style="margin-bottom:16px"></div>
+<div class="mode-row">
+  <label for="botMode">启动模式：</label>
+  <select id="botMode" class="sel">
+    <option value="current">🎯 当前模式（完整功能，默认）</option>
+    <option value="smart">💡 智能省token（长时挂机/省钱）</option>
+  </select>
+  <span class="mode-hint">按已保存的配置运行</span>
+</div>
 <div class="btn-grp">
 <button class="btn btn-suc btn-lg" id="btnStart" onclick="startBot()">启动机器人</button>
 <button class="btn btn-dan btn-lg" id="btnStop" style="display:none" onclick="stopBot()">停止</button>
@@ -859,6 +874,15 @@ body.theme-transition,body.theme-transition *{transition:background .4s ease,col
 </div>
 <span id="safetyMsg" class="msg-inline"></span>
 </div>
+<div class="pc"><h3>快捷开关</h3>
+<p class="form-hint" style="margin-bottom:12px">对应主菜单 C / Q / Z / A 一键切换，写入 config.json（机器人下次启动生效）。</p>
+<div class="btn-grp">
+<button class="btn btn-out" id="btnToggleCover" onclick="toggleFlag('cover_enabled',this)">封面分析: 读取中…</button>
+<button class="btn btn-out" id="btnToggleQuick" onclick="toggleFlag('quick_mode',this)">快速模式: 读取中…</button>
+<button class="btn btn-out" id="btnToggleQuiet" onclick="toggleFlag('quiet_mode',this)">安静模式: 读取中…</button>
+<button class="btn btn-out" id="btnToggleAsr" onclick="toggleFlag('asr_enabled',this)">ASR: 读取中…</button>
+</div>
+</div>
 </div>
 </div>
 
@@ -878,8 +902,34 @@ body.theme-transition,body.theme-transition *{transition:background .4s ease,col
 <button class="btn btn-pr" onclick="sendDanmaku()">发送弹幕</button>
 </div>
 <div class="pc"><h3>手动视频分析</h3>
-<div class="fg"><label>BV号 / 视频链接</label><input id="analyzeBvid" placeholder="BV1xx411c7mD 或 完整链接"></div>
-<button class="btn btn-pr" onclick="analyzeVideo()">开始分析</button>
+<style>
+.plat-pick{display:flex;gap:6px;flex-wrap:wrap;margin:4px 0 10px}
+.pp-btn{padding:6px 10px;border:1px solid #d0d5dd;background:#f2f4f7;border-radius:8px;cursor:pointer;font-size:13px;color:#344054}
+.pp-btn.ac{background:#3b82f6;color:#fff;border-color:#3b82f6}
+</style>
+<div class="fg"><label>选择平台</label>
+<div class="plat-pick" id="platPick">
+<button type="button" class="pp-btn ac" data-p="bilibili">📺 B站</button>
+<button type="button" class="pp-btn" data-p="youtube">▶ YouTube</button>
+<button type="button" class="pp-btn" data-p="douyin">🎵 抖音</button>
+<button type="button" class="pp-btn" data-p="kuaishou">⚡ 快手</button>
+<button type="button" class="pp-btn" data-p="web">🌐 网页</button>
+<button type="button" class="pp-btn" data-p="local">📁 本地</button>
+</div></div>
+<div class="fg"><label id="analyzeLabel">BV号 / B站链接</label><input id="analyzeBvid" placeholder="BV1xx411c7mD 或 完整链接"></div>
+<div class="fg"><label>分析方式（对应主菜单 V 的 1-7）</label>
+<select id="analyzeMode">
+<option value="">默认智能流程（字幕不足时自动下载）</option>
+<option value="1">1. 仅字幕 — 不下载视频</option>
+<option value="2">2. 仅语音识别 (ASR)</option>
+<option value="3">3. 仅视觉抽帧</option>
+<option value="4">4. 字幕 + 语音识别</option>
+<option value="5">5. 字幕 + 视觉抽帧</option>
+<option value="6">6. 语音识别 + 视觉抽帧</option>
+<option value="7">7. 全部分析</option>
+</select></div>
+<div class="fg"><label>分析意图（可选，一句话告诉AI你想得到什么）</label><input id="analyzeIntent" placeholder="例如：帮我总结这期的关键知识点 / 分析UP主风格"></div>
+<div class="btn-grp"><button class="btn btn-pr" onclick="analyzeVideo()">🔍 开始分析</button><button class="btn btn-out" onclick="probePlatformVideo()">🌐 识别/预取</button></div>
 </div>
 <div class="pc"><h3>Agent 技能</h3>
 <div class="fg"><label>目标描述（用自然语言描述你想让AI做什么）</label><input id="agentGoal" placeholder="例如：搜索"深度学习入门"并总结前3个视频"></div>
@@ -992,6 +1042,159 @@ body.theme-transition,body.theme-transition *{transition:background .4s ease,col
 <div class="ph"><h1>关于系统</h1><p>版本信息 · 技术栈 · 联系方式</p></div>
 <div class="divider"></div>
 <div class="pc" id="aboutBox"></div>
+<div class="disclaimer">免责声明：本项目仅供学习参考，若因使用本项目产生的任何后果，本人一律概不负责。</div>
+</div>
+
+<!-- MINDMAP -->
+<div class="page" id="pg-mindmap">
+<div class="ph"><h1>思维导图</h1><p>知识库 → 可交互思维导图（可折叠 / 缩放）</p></div>
+<div class="divider"></div>
+<div class="pc"><h3>选择知识文件</h3>
+<p class="form-hint" style="margin-bottom:10px">把已学知识导出为可在浏览器打开的交互式思维导图。可多选导出，或一键导出整个知识库。</p>
+<div style="display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap">
+<select id="mmFileSelect" multiple size="10" class="tutor-select"></select>
+<div style="display:flex;flex-direction:column;gap:5px">
+<button class="btn btn-pr btn-sm" onclick="mmExportSelected()">导出选中</button>
+<button class="btn btn-out btn-sm" onclick="mmSelectAll()">全选</button>
+<button class="btn btn-out btn-sm" onclick="mmSelectNone()">取消</button>
+<button class="btn btn-out btn-sm" onclick="rf_mindmap()" style="margin-top:4px">刷新</button>
+</div>
+</div>
+<div class="btn-grp" style="margin-top:12px">
+<button class="btn btn-suc" onclick="mmExportLibrary()">📚 导出整个知识库（批量）</button>
+</div>
+<div id="mmMsg" style="margin-top:12px;font-size:13px"></div>
+</div>
+<div class="pc" id="mmResultBox" style="display:none"><h3>导出结果</h3><div id="mmResultContent" style="font-size:13px"></div></div>
+<div class="disclaimer">免责声明：本项目仅供学习参考，若因使用本项目产生的任何后果，本人一律概不负责。</div>
+</div>
+
+<!-- UPLEARN -->
+<div class="page" id="pg-uplearn">
+<div class="ph"><h1>UP主主页批量学习</h1><p>输入UP主名字/UID，挑选视频，让 AI 逐个学习并归档到知识库</p></div>
+<div class="divider"></div>
+<div class="pc"><h3>① 查找UP主</h3>
+<div style="display:flex;gap:8px;flex-wrap:wrap">
+<input id="upQuery" placeholder="UP主名字 或 UID" style="flex:1;min-width:200px">
+<button class="btn btn-pr btn-sm" onclick="upSearch()">🔍 搜索</button>
+</div>
+<div id="upList" style="margin-top:10px"></div>
+</div>
+<div class="pc" id="upVideoBox" style="display:none"><h3>② 选择要学习的视频</h3>
+<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+<span id="upInfo" class="form-hint"></span>
+<label class="form-hint">数量</label>
+<input id="upLimit" type="number" value="20" min="1" max="50" style="width:70px">
+<button class="btn btn-out btn-sm" onclick="upLoadVideos()">刷新列表</button>
+</div>
+<div id="upVideos" style="max-height:300px;overflow:auto;border:1px solid var(--bord);border-radius:8px;padding:8px"></div>
+<div class="fg" style="margin-top:10px"><label>分析方式（同 V）</label>
+<select id="upMode">
+<option value="">默认智能流程</option>
+<option value="1">1. 仅字幕</option><option value="2">2. 仅ASR</option><option value="3">3. 仅视觉</option>
+<option value="4">4. 字幕+ASR</option><option value="5">5. 字幕+视觉</option><option value="6">6. ASR+视觉</option>
+<option value="7">7. 全部</option>
+</select></div>
+<div class="fg"><label>分析意图（可选）</label><input id="upIntent" placeholder="例如：总结关键知识点"></div>
+<div class="btn-grp" style="margin-top:10px">
+<button class="btn btn-suc" onclick="upLearn()">▶ 开始学习选中视频</button>
+<button class="btn btn-out btn-sm" onclick="upCheckAll(true)">全选</button>
+<button class="btn btn-out btn-sm" onclick="upCheckAll(false)">取消</button>
+</div>
+</div>
+<div class="pc"><h3>③ 学习进度</h3>
+<div id="upLearnLog" style="font-size:13px;white-space:pre-wrap;background:var(--bg2);border-radius:8px;padding:10px;min-height:40px">尚未开始</div>
+</div>
+<div class="disclaimer">免责声明：本项目仅供学习参考，若因使用本项目产生的任何后果，本人一律概不负责。</div>
+</div>
+
+<!-- VIDEO2WEB -->
+<div class="page" id="pg-video2web">
+<div class="ph"><h1>视频 → 网页 / 导出</h1><p>输入视频，AI 生成精美学习网页（幻灯片风格），可预览 / 下载 / 导出 Word·PDF</p></div>
+<div class="divider"></div>
+<div class="pc"><h3>① 选择视频</h3>
+<div class="fg"><label>BV号 / 链接 / 标题 / UP主</label><input id="v2wInput" placeholder="BV1xx411c7mD 或 完整链接"></div>
+</div>
+<div class="pc"><h3>② 选择视觉风格</h3>
+<div id="v2wStyleGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px"></div>
+</div>
+<div class="pc"><h3>③ 生成</h3>
+<div class="btn-grp"><button class="btn btn-pr" onclick="v2wGenerate()">🎨 生成学习网页</button></div>
+<div id="v2wMsg" style="margin-top:10px;font-size:13px"></div>
+</div>
+<div class="pc" id="v2wResult" style="display:none"><h3>④ 结果</h3>
+<div class="btn-grp">
+<button class="btn btn-pr btn-sm" onclick="v2wPreview()">👁 预览网页</button>
+<button class="btn btn-out btn-sm" onclick="v2wDownloadHtml()">⬇ 下载 HTML</button>
+<button class="btn btn-out btn-sm" onclick="v2wExport('docx')">📄 导出 Word</button>
+<button class="btn btn-out btn-sm" onclick="v2wExport('pdf')">📕 导出 PDF</button>
+</div>
+<div id="v2wTitle" style="margin-top:8px;font-size:13px"></div>
+</div>
+<div class="disclaimer">免责声明：本项目仅供学习参考，若因使用本项目产生的任何后果，本人一律概不负责。</div>
+</div>
+
+<!-- CUSTOMKB -->
+<div class="page" id="pg-customkb">
+<div class="ph"><h1>自定义知识管理</h1><p>手动维护专属知识库（增删改查 / 搜索），供 AI 学习时调用</p></div>
+<div class="divider"></div>
+<div class="pc"><h3>知识条目</h3>
+<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+<input id="ckSearch" placeholder="搜索内容..." style="flex:1;min-width:180px">
+<button class="btn btn-out btn-sm" onclick="ckSearchDo()">🔍 搜索</button>
+<button class="btn btn-out btn-sm" onclick="ckRefresh()">刷新</button>
+<button class="btn btn-pr btn-sm" onclick="ckShowForm(null)">➕ 新增</button>
+</div>
+<table class="tbl" id="ckTable"><thead><tr><th>标题</th><th>分类</th><th>大小</th><th>操作</th></tr></thead><tbody></tbody></table>
+</div>
+<div class="pc" id="ckFormBox" style="display:none"><h3 id="ckFormTitle">新增知识</h3>
+<div class="fg"><label>标题</label><input id="ckTitle"></div>
+<div class="fg"><label>分类</label><input id="ckCat" value="自定义知识" placeholder="如：数学 / 编程"></div>
+<div class="fg"><label>内容（Markdown 支持）</label><textarea id="ckContent" rows="10" placeholder="输入知识内容..."></textarea></div>
+<div class="btn-grp"><button class="btn btn-suc btn-sm" onclick="ckSave()">💾 保存</button>
+<button class="btn btn-out btn-sm" onclick="ckHideForm()">取消</button></div>
+</div>
+<div class="pc" id="ckViewBox" style="display:none"><h3 id="ckViewTitle">详情</h3>
+<pre id="ckViewContent" style="white-space:pre-wrap;max-height:400px;overflow:auto;background:var(--bg2);padding:10px;border-radius:8px"></pre>
+<button class="btn btn-out btn-sm" onclick="ckHideView()">关闭</button>
+</div>
+<div class="disclaimer">免责声明：本项目仅供学习参考，若因使用本项目产生的任何后果，本人一律概不负责。</div>
+</div>
+
+<!-- LEARN TOOLS -->
+<div class="page" id="pg-learn-tools">
+<div class="ph"><h1>学习工具</h1><p>AI 出题考试 · 深入了解主题（联网 / 视频）</p></div>
+<div class="divider"></div>
+<div class="pc"><h3>📝 出题考试</h3>
+<div class="fg"><label>内容来源</label>
+<select id="qtSource" onchange="qtSourceChange()">
+<option value="video">B站视频（BV号）</option>
+<option value="knowledge">知识库已有内容</option>
+</select></div>
+<div class="fg" id="qtBvidBox"><label>BV号</label><input id="qtBvid" placeholder="BV1xx411c7mD"></div>
+<div class="fg" id="qtKbBox" style="display:none"><label>知识库文件</label><select id="qtKb"></select></div>
+<div style="display:flex;gap:8px;flex-wrap:wrap">
+<div class="fg"><label>题数</label><select id="qtCount"><option>3</option><option selected>5</option><option>10</option><option>15</option><option>20</option></select></div>
+<div class="fg"><label>难度</label><select id="qtDiff"><option value="easy">简单</option><option value="medium" selected>中等</option><option value="hard">困难</option></select></div>
+<div class="fg"><label>题型</label><select id="qtType"><option value="mixed" selected>混合</option><option value="single">单选</option><option value="multiple">多选</option><option value="judge">判断</option><option value="fill">填空</option><option value="essay">问答</option></select></div>
+<div class="fg"><label>风格</label><select id="qtStyle"><option value="standard" selected>标准</option><option value="exam">考试风</option><option value="fun">趣味</option><option value="srs">费曼</option></select></div>
+</div>
+<div class="fg"><label>自定义提示词（可选）</label><input id="qtPrompt" placeholder="例如：面向小学生 / 偏重数据分析"></div>
+<button class="btn btn-pr" onclick="qtGenerate()">📝 生成考题</button>
+<div id="qtMsg" style="margin-top:8px;font-size:13px"></div>
+</div>
+<div class="pc"><h3>🔬 深入了解</h3>
+<div class="fg"><label>想了解的主题</label><input id="ddTopic" placeholder="例如：Transformer 注意力机制"></div>
+<div class="fg"><label>学习模式</label><select id="ddMode"><option value="search" selected>联网搜索（推荐）</option><option value="bilibili">B站视频</option></select></div>
+<div class="fg"><label>数量</label><input id="ddCount" type="number" value="10" min="1" max="50"></div>
+<div class="fg"><label>补充说明（可选）</label><input id="ddCtx" placeholder="如：入门级别 / 需要代码示例"></div>
+<button class="btn btn-pr" onclick="ddRun()">🔬 开始深入了解</button>
+<div id="ddMsg" style="margin-top:8px;font-size:13px"></div>
+</div>
+<div class="pc" id="ltResult" style="display:none"><h3>结果</h3>
+<div class="btn-grp"><button class="btn btn-pr btn-sm" onclick="ltPreview()">👁 预览</button></div>
+<pre id="ltContent" style="white-space:pre-wrap;max-height:500px;overflow:auto;background:var(--bg2);padding:10px;border-radius:8px"></pre>
+</div>
 <div class="disclaimer">免责声明：本项目仅供学习参考，若因使用本项目产生的任何后果，本人一律概不负责。</div>
 </div>
 
@@ -1145,12 +1348,33 @@ document.getElementById('btnStart').style.display=d.bot_running?'none':'';
 document.getElementById('btnStop').style.display=d.bot_running?'':'none';
 }
 async function startBot(){
-var r=await api('POST','/api/bot/start');toast(r.message,r.ok?'ok':'err');upCtrlUI();if(r.ok){userScrolledUp=false;pollLog();rf_dash()}
+var sel=document.getElementById('botMode');
+var mode=sel?sel.value:'current';
+if(mode!=='smart'&&mode!=='current')mode='current';
+var r=await api('POST','/api/bot/start',{mode:mode});
+if(r.ok){
+  var label=mode==='smart'?'智能省token':'当前';
+  toast('已以「'+label+'」模式启动','ok');
+  userScrolledUp=false;pollLog();rf_dash();
+  var lb=document.getElementById('botLog');if(lb){lb.scrollTop=lb.scrollHeight;lb.scrollIntoView({behavior:'smooth',block:'nearest'});}
+}else{
+  toast(r.message||'启动失败','err');
+}
+upCtrlUI();
+}
+var _botModeSynced=false;
+async function syncBotMode(){
+if(_botModeSynced)return;_botModeSynced=true;
+try{var c=await api('GET','/api/config');var m=(c&&c.system&&c.system.smart_token_mode)?'smart':'current';var sel=document.getElementById('botMode');if(sel)sel.value=m;}catch(e){}
 }
 async function stopBot(){
 var r=await api('POST','/api/bot/stop');toast(r.message,r.ok?'ok':'err');upCtrlUI();if(r.ok)rf_dash()
 }
-async function restartBot(){await stopBot();setTimeout(startBot,1200)}
+async function restartBot(){
+toast('正在重启机器人...','ok');
+await stopBot();
+setTimeout(startBot,1200);
+}
 async function clearLog(){await api('POST','/api/bot/clear');document.getElementById('botLog').textContent='日志已清空';userScrolledUp=false;pollLog()}
 async function pollLog(){
 if(logPoll)clearInterval(logPoll);
@@ -1321,12 +1545,27 @@ else loadConfQuick();
 }
 async function loadConf(){try{var r=await api('GET','/api/config');_confData=r;document.getElementById('confEd').value=JSON.stringify(r,null,2)}catch(e){toast('加载失败','err')}}
 async function saveConf(){try{var v=JSON.parse(document.getElementById('confEd').value);var r=await api('POST','/api/config',v);toast(r.message,r.ok?'ok':'err');_confData=v;if(_confMode=='quick')loadConfQuick()}catch(e){toast('JSON格式错误: '+e.message,'err')}}
+async function applyPreset(){
+var sel=document.getElementById('cqPreset');if(!sel)return;
+var key=sel.value;if(!key)return;
+try{var ps=await api('GET','/api/ai/presets');var p=(ps.presets&&ps.presets[key])||ps[key];if(!p)return;
+document.getElementById('cqBaseUrl').value=p.base_url||'';
+var mb=document.getElementById('cqModelBrain');if(mb){
+  if(mb.tagName==='SELECT'){var _f=false;for(var i=0;i<mb.options.length;i++){if(mb.options[i].value===p.chat){_f=true;break;}}if(!_f){var _no=document.createElement('option');_no.value=p.chat;_no.textContent=p.chat;mb.appendChild(_no);}}
+  mb.value=p.chat||'';
+}
+document.getElementById('cqModelVision').value=p.vision||'';
+modelListState=0;
+toast('已填入预设: '+(p.name||key),'ok');
+}catch(e){toast('读取预设失败: '+e.message,'err')}
+}
 async function loadConfQuick(){
 if(!_confData){var r=await api('GET','/api/config');_confData=r}
 var c=_confData;
 var h='';
 // API
 h+='<fieldset class="fs"><legend>🔑 API 设置</legend>';
+h+='<div class="fg"><label>厂商预设 (一键填入官方格式)</label><select id="cqPreset" onchange="applyPreset()"><option value="">— 自定义 / OpenAI 兼容 —</option></select></div>';
 h+='<div class="fg"><label>API Key</label><input id="cqApiKey" value="'+(c.api?c.api.unified_api_key||'':'')+'" placeholder="sk-..." onchange="modelListState=0"></div>';
 h+='<div class="fg"><label>Base URL</label><input id="cqBaseUrl" value="'+(c.api?c.api.unified_base_url||'':'')+'" placeholder="https://api.openai.com/v1" onchange="modelListState=0"></div>';
 h+='<div class="fg"><label>模型(对话) <button class="btn btn-sm btn-out" onclick="fetchModels()" style="margin-left:8px;font-size:10px" id="btnFetchModels">📡 获取模型列表</button></label>';
@@ -1390,6 +1629,7 @@ h+='<div class="fg"><label>ASR语音识别</label><select id="cqAsr"><option val
 h+='<div class="fg"><label>视觉理解</label><select id="cqVision"><option value="1"'+(c.vision&&c.vision.cover_enabled!==false?' selected':'')+'>启用</option><option value="0"'+(c.vision&&c.vision.cover_enabled===false?' selected':'')+'>禁用</option></select></div>';
 h+='</fieldset>';
 document.getElementById('confQuickContent').innerHTML=h;
+try{var _ps=await api('GET','/api/ai/presets');var _sel=document.getElementById('cqPreset');if(_sel&&_ps){var _pr=_ps.presets||_ps;for(var _k in _pr){var _o=document.createElement('option');_o.value=_k;_o.textContent=_pr[_k].name;_sel.appendChild(_o);}if(_ps.active_preset)_sel.value=_ps.active_preset;}}catch(e){}
 }
 async function saveConfQuick(){
 try{
@@ -1402,6 +1642,7 @@ c.api.unified_base_url=document.getElementById('cqBaseUrl').value.trim();
 var selModel=document.getElementById('cqModelBrain');
 c.api.model_brain=(selModel.tagName==='SELECT'?selModel.value:selModel.value).trim();
 c.api.model_vision=document.getElementById('cqModelVision').value.trim();
+var _psel=document.getElementById('cqPreset');if(_psel)c.api.active_preset=_psel.value;
 // Interaction
 c.interaction=c.interaction||{};
 c.interaction.max_energy=parseInt(document.getElementById('cqMaxEnergy').value)||100;
@@ -1553,27 +1794,19 @@ var d=await api('GET','/api/info');
 function aboutCard(label,value,mono){
 return '<div class="info-card"><div class="il">'+label+'</div><div class="iv'+(mono?' style="font-family:var(--font-mono);font-size:13px"':'')+'">'+value+'</div></div>';
 }
-var up=d.update||{};
-var updateHtml='';
-if(up.has_update){
-  updateHtml='<div class="update-notice warn">发现新版 v'+esc(up.latest||'-')+'，当前 v'+esc(d.version||up.current||'-')+'。Docker 部署可执行 <code>docker compose pull && docker compose up -d</code> 更新。</div>';
-}else if(up.error){
-  updateHtml='<div class="update-notice err">当前 v'+esc(d.version||up.current||'-')+'，暂时无法检查更新：'+esc(up.error)+'</div>';
-}else{
-  updateHtml='<div class="update-notice ok">当前已是最新版 v'+esc(d.version||up.current||'-')+'</div>';
-}
 document.getElementById('aboutBox').innerHTML='<div class="info-grid">'+
-aboutCard('系统版本','v'+esc(d.version||'0.0.0'))+
-aboutCard('最新版本',up.latest?('v'+esc(up.latest)):'-')+
+aboutCard('系统版本',d.version||'3.0.2')+
 aboutCard('面板运行时长',d.uptime)+
 aboutCard('Python 版本',d.python_version||'-')+
 aboutCard('运行平台',d.platform||'-')+
 aboutCard('工作目录',d.cwd||'-',true)+
-aboutCard('机器人状态',d.bot_running?'运行中':'已停止')+
-'</div>'+updateHtml+
+aboutCard('机器人状态',d.bot_running?'● 运行中':'○ 已停止')+
+aboutCard('AI 接口',d.api_configured?'已配置':'未配置')+
+aboutCard('当前模型',d.model_brain||'-',true)+
+'</div>'+
 '<div class="sec-divider"></div>'+
 '<p style="font-size:14px;color:var(--text-secondary);line-height:2"><strong style="color:var(--text-primary);font-weight:500">B站 AI 智能管理系统</strong><br>基于大语言模型 · 视频理解 · 评论互动 · 私信回复 · 知识沉淀 · 自我进化</p>'+
-'<div style="margin-top:16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap"><span style="color:var(--text-secondary);font-size:13px">作者联系方式：</span><span style="display:inline-flex;align-items:center;gap:6px;background:var(--accent-bg);padding:8px 16px;border-radius:8px;color:var(--accent);font-weight:500;font-size:14px;letter-spacing:.5px">QQ: 3781960338</span><span style="display:inline-flex;align-items:center;gap:6px;background:var(--accent-bg);padding:8px 16px;border-radius:8px;color:var(--accent);font-weight:500;font-size:14px;letter-spacing:.5px">交流群: 1056941856</span></div>';
+'<p style="margin-top:12px;font-size:13px;color:var(--text-secondary);line-height:1.8">本页信息均读取自你的 Data/config.json 真实配置，未使用任何占位假数据。</p>';
 }catch(e){}
 }
 
@@ -1634,6 +1867,14 @@ document.getElementById("engVideoIntMax").value=e.video_interval_max||5;
 var cm=r.comment_mode||"real";
 var radios=document.getElementsByName("cmtMode");
 for(var i=0;i<radios.length;i++){if(radios[i].value===cm)radios[i].checked=true}
+// 加载快捷开关状态
+try{
+var f=await api('GET','/api/action/flags');
+fl(f.cover_enabled,'btnToggleCover','封面分析');
+fl(f.quick_mode,'btnToggleQuick','快速模式');
+fl(f.quiet_mode,'btnToggleQuiet','安静模式');
+fl(f.asr_enabled,'btnToggleAsr','ASR');
+}catch(e){}
 }catch(e){}
 }
 async function toggleAiMarker(){
@@ -1737,16 +1978,46 @@ for(var i=0;i<its.length;i++){var u=its[i];h+="<tr><td>"+(i+1)+"</td><td>"+(u.fa
 h+="</table>";document.getElementById("upfuTab").innerHTML=h}catch(e){}}
 
 // ── TOOLS ──
-function rf_tools(){rf_kbStats();loadAsrHighlight()}
+function rf_tools(){rf_kbStats();loadAsrHighlight();initPlatPicker()}
 async function sendDanmaku(){
 var b=document.getElementById("danmakuBvid").value.trim(),t=document.getElementById("danmakuText").value.trim();
 if(!b||!t){toast("请填写BV号和弹幕内容","err");return}
 if(t.length>20){toast("弹幕不能超过20字","err");return}
 var r=await api("POST","/api/action/send-danmaku",{bvid:b,text:t});toast(r.message,r.ok?"ok":"err")}
+function initPlatPicker(){
+  var btns=document.querySelectorAll('.pp-btn');
+  btns.forEach(function(b){
+    b.onclick=function(){
+      btns.forEach(function(x){x.classList.remove('ac')});
+      b.classList.add('ac');
+      var p=b.dataset.p;
+      var labels={'bilibili':'BV号 / B站链接','youtube':'YouTube 链接','douyin':'抖音分享链接','kuaishou':'快手分享链接','web':'网页 URL','local':'本地文件路径'};
+      var phs={'bilibili':'例如：BV1GJ411x7h7 或 B站链接','youtube':'例如：https://www.youtube.com/watch?v=...','douyin':'粘贴抖音分享链接','kuaishou':'粘贴快手分享链接','web':'例如：https://example.com','local':'例如：C:\\video\\demo.mp4'};
+      document.getElementById('analyzeLabel').textContent=labels[p]||'视频链接';
+      document.getElementById('analyzeBvid').placeholder=phs[p]||'输入视频链接';
+    };
+  });
+}
+function _getAnalyzePlatform(){
+  var ab=document.querySelector('.pp-btn.ac');
+  return ab?ab.dataset.p:'bilibili';
+}
+async function probePlatformVideo(){
+  var b=document.getElementById("analyzeBvid").value.trim();
+  if(!b){toast("请输入视频输入","err");return}
+  var p=_getAnalyzePlatform();
+  var r=await api("POST","/api/platform/probe",{url:b,platform:p});
+  var msg=r.ok?("平台: "+r.platform+" | ID: "+(r.video_id||'-')+(r.title?" | "+r.title:"")+(r.supported_analysis===false?" | 暂不支持分析":"")):r.message;
+  toast(msg,r.ok?"ok":"err");
+}
 async function analyzeVideo(){
-var b=document.getElementById("analyzeBvid").value.trim();
-if(!b){toast("请输入BV号","err");return}
-var r=await api("POST","/api/action/analyze-video",{bvid:b});toast(r.message,r.ok?"ok":"err")}
+  var b=document.getElementById("analyzeBvid").value.trim();
+  if(!b){toast("请输入视频输入","err");return}
+  var p=_getAnalyzePlatform();
+  var m=document.getElementById("analyzeMode").value;
+  var it=document.getElementById("analyzeIntent").value.trim();
+  var r=await api("POST","/api/action/analyze-video",{bvid:b,platform:p,mode:m,intent:it});toast(r.message,r.ok?"ok":"err");
+}
 async function runAgent(){
 var g=document.getElementById("agentGoal").value.trim();
 if(!g){toast("请输入目标描述","err");return}
@@ -1932,6 +2203,245 @@ if(w){w.document.write(window._tutorHtmlContent);w.document.close()}
 else{toast("请允许弹窗以预览HTML","err")}
 }
 
+// ── MINDMAP ──
+function rf_mindmap(){
+var sel=document.getElementById("mmFileSelect");
+fetch("/api/kb/list-files").then(function(r){return r.json()}).then(function(d){
+if(!d.ok){toast(d.message,"err");return}
+sel.innerHTML='';
+for(var i=0;i<d.files.length;i++){
+var f=d.files[i],up=f.up_name?" @"+f.up_name:"";
+sel.innerHTML+='<option value="'+esc(f.rel_path)+'">['+f.category_path+'] '+esc(f.title)+up+' ('+f.size_kb+'KB)</option>';
+}
+}).catch(function(e){toast("加载文件列表失败","err")});
+}
+function mmSelectAll(){var s=document.getElementById("mmFileSelect");for(var i=0;i<s.options.length;i++)s.options[i].selected=true;}
+function mmSelectNone(){var s=document.getElementById("mmFileSelect");for(var i=0;i<s.options.length;i++)s.options[i].selected=false;}
+async function mmExportSelected(){
+var s=document.getElementById("mmFileSelect");var rps=[];
+for(var i=0;i<s.options.length;i++)if(s.options[i].selected)rps.push(s.options[i].value);
+if(rps.length===0){toast("请至少选择一个文件","err");return}
+var box=document.getElementById("mmResultBox"),c=document.getElementById("mmResultContent");
+box.style.display="";c.innerHTML='导出中...';
+var paths=[];var firstHtml="";
+for(var i=0;i<rps.length;i++){
+try{
+var r=await api("POST","/api/action/mindmap",{mode:"single",file:rps[i]});
+if(r.ok){paths.push(r.path);if(!firstHtml)firstHtml=r.html||"";}
+else paths.push('[失败] '+rps[i]+': '+r.message);
+}catch(e){paths.push('[异常] '+rps[i])}
+}
+var okc=paths.filter(function(p){return p&&p.indexOf('[')!==0;}).length;
+var h='<span class="tg tg-suc">导出完成：'+okc+'/'+rps.length+'</span><ul style="margin-top:8px">';
+for(var j=0;j<paths.length;j++)h+='<li>'+esc(paths[j])+'</li>';
+h+='</ul>'+(firstHtml?'<button class="btn btn-pr btn-sm" onclick="mmOpen()">在新窗口打开首个</button>':'');
+c.innerHTML=h;window._mmHtml=firstHtml;
+}
+async function mmExportLibrary(){
+try{
+var r=await api("POST","/api/action/mindmap",{mode:"library"});
+var box=document.getElementById("mmResultBox"),c=document.getElementById("mmResultContent");
+box.style.display="";
+if(!r.ok){c.innerHTML='<span class="tg tg-war">'+esc(r.message)+'</span>';return}
+var h='<span class="tg tg-suc">'+esc(r.message)+'</span><ul style="margin-top:8px">';
+for(var i=0;i<(r.files||[]).length;i++)h+='<li>'+esc(r.files[i])+'</li>';
+h+='</ul>';c.innerHTML=h;
+}catch(e){toast("导出失败: "+e.message,"err")}
+}
+function mmOpen(){
+if(!window._mmHtml){toast("没有可预览的思维导图","err");return}
+var w=window.open("","_blank");
+if(w){w.document.write(window._mmHtml);w.document.close()}else{toast("请允许弹窗","err")}
+}
+
+// ── BEHAVIOR FLAGS ──
+function fl(on,id,label){
+var b=document.getElementById(id);if(!b)return;
+b.textContent=label+': '+(on?'✓ 开启':'✗ 关闭');
+b.className='btn '+(on?'btn-suc':'btn-out');
+}
+async function toggleFlag(key,btn){
+try{
+var r=await api('POST','/api/action/toggle-flag',{key:key});
+toast(r.message,r.ok?'ok':'err');
+if(r.ok)fl(r.value,btn.id,btn.textContent.split(':')[0].trim());
+rf_behavior();
+}catch(e){toast('操作失败: '+e.message,'err')}
+}
+
+// ── GENERIC TASK POLLER ──
+function pollTask(tid, onMsg, onDone){
+  var iv=setInterval(async function(){
+    try{
+      var t=await api('GET','/api/action/task?id='+tid);
+      if(t.status==='notfound'){clearInterval(iv);toast('任务不存在','err');return;}
+      if(onMsg) onMsg(t.message||'');
+      if(t.status==='done'){clearInterval(iv);onDone(t.result||{});}
+      else if(t.status==='error'){clearInterval(iv);toast('失败: '+(t.error||''),'err');if(onMsg)onMsg('错误: '+(t.error||''));}
+    }catch(e){clearInterval(iv);toast('轮询失败: '+e.message,'err');}
+  },2000);
+}
+
+// ── UPLEARN ──
+async function upSearch(){
+  var q=document.getElementById('upQuery').value.trim();
+  if(!q){toast('请输入UP主','err');return}
+  var r=await api('POST','/api/action/up-search',{query:q});
+  var box=document.getElementById('upList');
+  if(!r.ok){toast(r.message,'err');return;}
+  if(!r.ups||!r.ups.length){box.innerHTML='<span class="tg tg-war">未找到UP主</span>';return}
+  box.innerHTML='';
+  r.ups.forEach(function(u){
+    var fans=u.fans>=10000?(u.fans/10000).toFixed(1)+'w':u.fans;
+    box.innerHTML+='<label style="display:block;padding:8px;border:1px solid var(--bord);border-radius:8px;margin-bottom:6px;cursor:pointer">'
+      +'<input type="radio" name="upRadio" value="'+u.uid+'" onclick="upLoadVideos('+u.uid+',\''+esc(u.name)+'\')"> '
+      +'<b>'+esc(u.name)+'</b> <span class="form-hint">UID:'+u.uid+' 粉丝:'+fans+'</span>'
+      +'<div class="form-hint">'+esc(u.sign||'')+'</div></label>';
+  });
+}
+async function upLoadVideos(uid, name){
+  if(uid===undefined){var el=document.querySelector('input[name=upRadio]:checked');if(!el){toast('请先选择UP主','err');return;}uid=parseInt(el.value);name=el.parentNode.textContent.split('UID')[0].replace(/^.*?/,'').trim();}
+  var limit=parseInt(document.getElementById('upLimit').value||20);
+  var r=await api('POST','/api/action/up-videos',{uid:uid,limit:limit});
+  if(!r.ok){toast(r.message,'err');return;}
+  document.getElementById('upVideoBox').style.display='';
+  document.getElementById('upInfo').textContent='@'+(r.up&&r.up.name?r.up.name:name)+' · 投稿 '+(r.up?r.up.video_count:'?')+' 个';
+  var vbox=document.getElementById('upVideos');vbox.innerHTML='';
+  (r.videos||[]).forEach(function(v){
+    var play=v.play>=10000?(v.play/10000).toFixed(1)+'w':v.play;
+    vbox.innerHTML+='<label style="display:block;padding:5px 0"><input type="checkbox" class="upvid" value="'+esc(v.bvid)+'"> '+esc(v.title)+' <span class="form-hint">▶'+play+'</span></label>';
+  });
+  if(!r.videos||!r.videos.length)vbox.innerHTML='<span class="form-hint">该UP主没有投稿视频</span>';
+}
+function upCheckAll(on){var c=document.getElementsByClassName('upvid');for(var i=0;i<c.length;i++)c[i].checked=on;}
+function upLearn(){
+  var c=document.getElementsByClassName('upvid');var bvids=[];
+  for(var i=0;i<c.length;i++)if(c[i].checked)bvids.push(c[i].value);
+  if(!bvids.length){toast('请至少选择一个视频','err');return}
+  var mode=document.getElementById('upMode').value;
+  var intent=document.getElementById('upIntent').value.trim();
+  api('POST','/api/action/up-learn',{bvids:bvids,mode:mode,intent:intent}).then(function(r){
+    if(!r.ok){toast(r.message,'err');return;}
+    toast(r.message,'ok');
+    var log=document.getElementById('upLearnLog');
+    pollTask(r.task_id,function(m){log.textContent=m;},function(res){log.textContent='✅ 完成：成功 '+res.ok+'/'+res.total;toast('学习完成','ok');});
+  });
+}
+
+// ── VIDEO2WEB ──
+var V2W_STYLES=[['auto','🎲 自动'],['claude_slides','Claude幻灯片'],['dark','暗夜粒子'],['light','极简白昼'],['slide','幻灯片叙事'],['card','卡片画廊'],['claude','Claude暖橙'],['bento','Bento网格'],['glass','玻璃拟态'],['aurora','极光渐变'],['neobrutal','新野蛮主义'],['oled','深色OLED'],['cyberpunk','赛博朋克'],['neumorphism','新拟态'],['liquid_glass','液态玻璃'],['nostalgic','复古主义'],['linear','Linear风格'],['gradient_new','新变风'],['soft_pop','柔和流行'],['promptport','PromptPort']];
+var _v2wTheme='auto', _v2wHtml='', _v2wTitle='';
+function v2wRenderStyles(){
+  var g=document.getElementById('v2wStyleGrid');g.innerHTML='';
+  V2W_STYLES.forEach(function(s){
+    var sel=_v2wTheme===s[0];
+    g.innerHTML+='<div onclick="v2wPick(\''+s[0]+'\')" style="border:1px solid '+(sel?'var(--accent)':'var(--bord)')+';border-radius:8px;padding:8px;cursor:pointer;font-size:13px;background:'+(sel?'var(--bg2)':'transparent')+'">'+s[1]+'</div>';
+  });
+}
+function v2wPick(t){_v2wTheme=t;v2wRenderStyles();}
+async function v2wGenerate(){
+  var inp=document.getElementById('v2wInput').value.trim();
+  if(!inp){toast('请输入视频','err');return}
+  document.getElementById('v2wMsg').textContent='生成中，请稍候（AI 生成幻灯片可能需数十秒）...';
+  document.getElementById('v2wResult').style.display='none';
+  var r=await api('POST','/api/action/video2web',{bvid:inp,theme:_v2wTheme});
+  if(!r.ok){toast(r.message,'err');document.getElementById('v2wMsg').textContent=r.message;return;}
+  toast(r.message,'ok');
+  pollTask(r.task_id,function(m){document.getElementById('v2wMsg').textContent=m;},function(res){
+    _v2wHtml=res.html||'';_v2wTitle=res.title||'视频学习页';
+    document.getElementById('v2wTitle').textContent='标题: '+_v2wTitle+(res.path?(' | 已保存: '+res.path):'');
+    document.getElementById('v2wResult').style.display='';
+    document.getElementById('v2wMsg').textContent='✅ 生成完成';
+  });
+}
+function v2wPreview(){if(!_v2wHtml){toast('没有可预览的网页','err');return;}var w=window.open('','_blank');if(w){w.document.write(_v2wHtml);w.document.close()}else toast('请允许弹窗','err');}
+function v2wDownloadHtml(){if(!_v2wHtml){toast('没有可下载的网页','err');return;}var b=new Blob([_v2wHtml],{type:'text/html'});var a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=(_v2wTitle||'video')+'.html';a.click();}
+async function v2wExport(kind){
+  if(!_v2wHtml){toast('请先生成网页','err');return;}
+  toast('导出中...','ok');
+  try{
+    var r=await fetch('/api/action/export-'+kind,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({html:_v2wHtml,title:_v2wTitle})});
+    if(!r.ok){var e=await r.json().catch(function(){return{}});toast(e.message||'导出失败','err');return;}
+    var blob=await r.blob();var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=(_v2wTitle||'video')+'.'+kind;a.click();
+    toast('已导出 '+kind,'ok');
+  }catch(e){toast('导出失败: '+e.message,'err');}
+}
+
+// ── CUSTOMKB ──
+async function ckRefresh(){var r=await api('GET','/api/kb/custom-list');if(!r.ok){toast(r.message,'err');return;}ckRender(r.entries||[]);}
+function ckRender(entries){
+  var tb=document.querySelector('#ckTable tbody');tb.innerHTML='';
+  if(!entries.length){tb.innerHTML='<tr><td colspan="4" class="form-hint">暂无条目</td></tr>';return;}
+  entries.forEach(function(e){
+    tb.innerHTML+='<tr><td>'+esc(e.title)+'</td><td class="form-hint">'+esc(e.category)+'</td><td class="form-hint">'+e.size_kb+'KB</td>'
+      +'<td><button class="btn btn-out btn-sm" onclick="ckView(\''+esc(e.bvid)+'\',\''+esc(e.title)+'\')">查看</button> '
+      +'<button class="btn btn-out btn-sm" onclick="ckShowForm(\''+esc(e.bvid)+'\',\''+esc(e.title)+'\',\''+esc(e.category)+'\')">编辑</button> '
+      +'<button class="btn btn-out btn-sm" onclick="ckDelete(\''+esc(e.bvid)+'\',\''+esc(e.title)+'\')">删除</button></td></tr>';
+  });
+}
+async function ckSearchDo(){var q=document.getElementById('ckSearch').value.trim();if(!q){ckRefresh();return;}var r=await api('POST','/api/kb/custom-search',{q:q});if(!r.ok){toast(r.message,'err');return;}ckRender(r.entries||[]);}
+async function ckView(bvid,title){var r=await api('POST','/api/kb/custom-get',{bvid:bvid,title:title});if(!r.ok){toast(r.message,'err');return;}document.getElementById('ckViewTitle').textContent=title;document.getElementById('ckViewContent').textContent=r.content;document.getElementById('ckViewBox').style.display='';}
+function ckHideView(){document.getElementById('ckViewBox').style.display='none';}
+async function ckShowForm(bvid,title,cat){
+  document.getElementById('ckFormBox').style.display='';
+  document.getElementById('ckFormTitle').textContent=bvid?'编辑知识':'新增知识';
+  document.getElementById('ckTitle').value=title||'';
+  document.getElementById('ckCat').value=cat||'自定义知识';
+  document.getElementById('ckContent').value='';
+  document.getElementById('ckFormBox').dataset.bvid=bvid||'';
+  if(bvid){var r=await api('POST','/api/kb/custom-get',{bvid:bvid,title:title});if(r.ok){document.getElementById('ckContent').value=r.content;}}
+}
+function ckHideForm(){document.getElementById('ckFormBox').style.display='none';}
+async function ckSave(){
+  var bvid=document.getElementById('ckFormBox').dataset.bvid||'';
+  var title=document.getElementById('ckTitle').value.trim();
+  var cat=document.getElementById('ckCat').value.trim();
+  var content=document.getElementById('ckContent').value.trim();
+  if(!title){toast('标题不能为空','err');return;}
+  if(content.length<10){toast('内容至少10字','err');return;}
+  var r;
+  if(bvid){r=await api('POST','/api/kb/custom-update',{bvid:bvid,title:title,category:cat,content:content});}
+  else{r=await api('POST','/api/kb/custom-add',{title:title,category:cat,content:content});}
+  toast(r.message,r.ok?'ok':'err');
+  if(r.ok){ckHideForm();ckRefresh();}
+}
+async function ckDelete(bvid,title){
+  if(!confirm('确认删除该知识条目？'))return;
+  var r=await api('POST','/api/kb/custom-delete',{bvid:bvid,title:title});
+  toast(r.message,r.ok?'ok':'err');
+  if(r.ok)ckRefresh();
+}
+
+// ── LEARN TOOLS ──
+function qtSourceChange(){
+  var s=document.getElementById('qtSource').value;
+  document.getElementById('qtBvidBox').style.display=s==='video'?'':'none';
+  document.getElementById('qtKbBox').style.display=s==='knowledge'?'':'none';
+  if(s==='knowledge'){api('GET','/api/kb/list-files').then(function(d){var sel=document.getElementById('qtKb');sel.innerHTML='';if(d.ok)(d.files||[]).forEach(function(f){sel.innerHTML+='<option value="'+esc(f.rel_path)+'">['+f.category_path+'] '+esc(f.title)+'</option>';});});}
+}
+async function qtGenerate(){
+  var s=document.getElementById('qtSource').value;
+  var body={source_type:s,question_count:parseInt(document.getElementById('qtCount').value),difficulty:document.getElementById('qtDiff').value,question_type:document.getElementById('qtType').value,style:document.getElementById('qtStyle').value,custom_prompt:document.getElementById('qtPrompt').value.trim()};
+  if(s==='video'){body.bvid=document.getElementById('qtBvid').value.trim();if(!body.bvid){toast('请输入BV号','err');return;}}
+  else{body.kb_file_path=document.getElementById('qtKb').value;if(!body.kb_file_path){toast('请选择知识库文件','err');return;}}
+  document.getElementById('qtMsg').textContent='出题中...';
+  var r=await api('POST','/api/action/quiz',body);
+  if(!r.ok){toast(r.message,'err');document.getElementById('qtMsg').textContent=r.message;return;}
+  toast(r.message,'ok');
+  pollTask(r.task_id,function(m){document.getElementById('qtMsg').textContent=m;},function(res){window._ltContent=res.content||'';document.getElementById('ltContent').textContent=res.content||'';document.getElementById('ltResult').style.display='';document.getElementById('qtMsg').textContent='✅ 出题完成：'+res.title;});
+}
+async function ddRun(){
+  var topic=document.getElementById('ddTopic').value.trim();
+  if(!topic){toast('请输入主题','err');return;}
+  var body={topic:topic,mode:document.getElementById('ddMode').value, video_count:parseInt(document.getElementById('ddCount').value||10), context:document.getElementById('ddCtx').value.trim()};
+  document.getElementById('ddMsg').textContent='深入了解中...';
+  var r=await api('POST','/api/action/deep-dive',body);
+  if(!r.ok){toast(r.message,'err');document.getElementById('ddMsg').textContent=r.message;return;}
+  toast(r.message,'ok');
+  pollTask(r.task_id,function(m){document.getElementById('ddMsg').textContent=m;},function(res){window._ltContent=res.report||'';document.getElementById('ltContent').textContent=res.report||'';document.getElementById('ltResult').style.display='';document.getElementById('ddMsg').textContent='✅ 深入了解完成';});
+}
+function ltPreview(){if(!window._ltContent){toast('没有可预览的内容','err');return;}var w=window.open('','_blank');if(w){w.document.write('<pre style="white-space:pre-wrap;padding:20px;font-family:monospace">'+esc(window._ltContent)+'</pre>');w.document.close()}else toast('请允许弹窗','err');}
+
 // ── BACKGROUND ──
 function applyBg(){
 var cfg;try{cfg=JSON.parse(localStorage.getItem('xiongda_bg')||'{}')}catch(e){cfg={}};
@@ -2014,7 +2524,7 @@ nav=function(p,el){
 // ── INIT ──
 applyTheme();applyBg();
 lucide.createIcons({attrs:{'stroke-width':1.5}});
-rf_dash();auto();
+rf_dash();auto();syncBotMode();
 (function _preloadModels(){
   // 尝试预加载模型列表
   api('GET','/api/models/list').then(function(r){

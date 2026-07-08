@@ -154,6 +154,41 @@ class PrivateMessageManager:
 
         return new_messages
 
+    async def get_chat_target(self, bili=None):
+        """为主动聊天选择最近有私信往来的用户。"""
+        try:
+            sessions = await bili_session.get_sessions(self.credential, session_type=1)
+            session_list = sessions.get("session_list") or sessions.get("data", {}).get("session_list", [])
+        except Exception as e:
+            log(f"获取主动聊天目标失败: {e}", "WARN")
+            return None
+
+        candidates = []
+        for item in session_list:
+            talker_id = int(item.get("talker_id") or 0)
+            if not talker_id or talker_id == self.uid:
+                continue
+            last_msg = item.get("last_msg", {}) or {}
+            timestamp = int(last_msg.get("timestamp") or item.get("session_ts") or 0)
+            name = (
+                item.get("talker_uname")
+                or item.get("name")
+                or item.get("account_info", {}).get("name")
+                or str(talker_id)
+            )
+            profile = self.context_db.get_profile(talker_id)
+            last_reply_at = parse_iso_datetime(profile.get("last_reply_at"))
+            if last_reply_at:
+                elapsed = (datetime.now() - last_reply_at).total_seconds() / 60
+                if elapsed < BEHAVIOR_PRIVATE_REPLY_COOLDOWN_MINUTES:
+                    continue
+            candidates.append({"uid": talker_id, "name": name, "timestamp": timestamp, "raw": item})
+
+        if not candidates:
+            return None
+        candidates.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
+        return candidates[0]
+
     async def generate_reply(self, message_data):
         user_block = self.user_profile_mgr.build_prompt_block(message_data.get("sender_uid"), str(message_data.get("talker_id")))
         persona_block = self.persona_mgr.build_prompt_block()

@@ -1,6 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # ============================================================
-#  bilibili_learning_bot 3.0.1 - Termux (Android) 安装脚本
+#  bilibili_learning_bot 3.0.2 - Termux (Android) 安装脚本
 # ============================================================
 #  用法: bash install_termux.sh
 #  功能: 自动安装系统依赖 + Python 依赖，解决 PyYAML 编译问题
@@ -9,7 +9,7 @@
 set -e
 
 echo "========================================"
-echo " bilibili_learning_bot v3.0.1 安装脚本"
+echo " bilibili_learning_bot v3.0.2 安装脚本"
 echo " 环境: Termux (Android)"
 echo "========================================"
 echo ""

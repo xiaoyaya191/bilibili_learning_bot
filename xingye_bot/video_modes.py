@@ -14,10 +14,14 @@ from typing import Any
 
 import httpx
 
-from utils.subtitles import subtitle_priority
-
 from .llm import ModelClient
 from .settings import BotSettings, DATA_DIR
+from .grid_frames import (
+    extract_grid_frames,
+    grid_images_to_base64,
+    replace_markers_with_screenshots,
+    bilinote_prompt_suffix,
+)
 
 # imageio-ffmpeg 回退检测
 try:
@@ -29,6 +33,17 @@ except ImportError:
 
 CACHE_DIR = DATA_DIR / "video_cache"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
+
+# B站画质 qn 映射：下载抽帧时选用的清晰度。best=127 即自动最高画质（默认），
+# DASH(fnval=4048) 会按 qn 返回所请求的最高可用流，FLV 回退直接用 qn。
+VIDEO_QUALITY_MAP = {
+    "best": 127,   # 自动最高画质（默认，DASH 返回最高可用流）
+    "1080p": 80,   # 1080P 高清
+    "720p": 64,    # 720P 高清
+    "480p": 32,    # 480P 清晰
+    "360p": 16,    # 360P 流畅
+}
+VIDEO_QUALITY_OPTIONS = ["best", "1080p", "720p", "480p", "360p"]
 
 
 @dataclass
@@ -160,7 +175,17 @@ class VideoUnderstanding:
         video_path: Path | None = None
         try:
             video_path = await self.download_video(asset, cookies=cookies)
-            asset.frames = self.extract_frames(video_path, self.settings.video_frame_count)
+            if self.settings.frame_anchor_mode == "bilinote" and video_path:
+                grid_imgs = extract_grid_frames(video_path)
+                if grid_imgs:
+                    asset.frames = []
+                    summary = await self.summarize_with_grid(asset, video_path, grid_imgs, selected in {"hybrid", "smart"})
+                    if self.settings.video_delete_after_understand:
+                        self.delete_downloaded_video(video_path)
+                    return UnderstandingResult(selected, True, "", asset, summary, gate)
+                download_reason = "网格抽帧为空，回退字幕模式"
+            else:
+                asset.frames = self.extract_frames(video_path, self.settings.video_frame_count)
         except Exception as exc:
             download_reason = f"下载或抽帧失败，已降级到字幕模式：{exc}"
 
@@ -304,18 +329,50 @@ class VideoUnderstanding:
         return overlap > 0
 
     # ═══════════════════════════════════════════════════════════════
-    # ⬇️ download_video — 下载视频文件
+    # ⬇️ download_video — DASH 音视频分离下载 + ffmpeg 合并带声音
     # ═══════════════════════════════════════════════════════════════
+    def _resolve_quality(self) -> int:
+        """把配置中的画质档位解析为 B站 qn 值；默认 best=127（自动最高画质）。"""
+        raw = (getattr(self.settings, "video_quality", "best") or "best").strip().lower()
+        return VIDEO_QUALITY_MAP.get(raw, 127)
+
     async def download_video(self, asset: VideoAsset, cookies: dict[str, str] | None = None) -> Path:
+        """下载 B站视频，优先使用 DASH（音视频分离）+ ffmpeg 合并确保有声音。
+        无 ffmpeg 时回退到 FLV 一体流。"""
         if asset.duration and asset.duration > self.settings.video_max_duration_seconds:
             raise RuntimeError(f"视频时长 {asset.duration}s 超过下载上限 {self.settings.video_max_duration_seconds}s")
 
         headers = {"User-Agent": USER_AGENT, "Referer": asset.url, "Origin": "https://www.bilibili.com"}
-        async with httpx.AsyncClient(http2=True, headers=headers, cookies=cookies, timeout=90, follow_redirects=True) as client:
-            play = await client.get(
-                "https://api.bilibili.com/x/player/playurl",
-                params={"bvid": asset.bvid, "cid": asset.cid, "qn": 32, "fnval": 0, "fourk": 0},
-            )
+        wbi_keys = await self._get_wbi_keys(cookies=cookies)
+
+        # 查找 ffmpeg（合并音视频必需）
+        ffmpeg = (find_ffmpeg() if find_ffmpeg else None) or shutil.which("ffmpeg")
+
+        # 解析下载画质（默认最高）
+        qn = self._resolve_quality()
+
+        out_dir = self.download_root / asset.bvid
+        out_dir.mkdir(parents=True, exist_ok=True)
+        safe_title = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", asset.title).strip()[:80] or asset.bvid
+        out_path = out_dir / f"{asset.bvid}_{safe_title}.mp4"
+
+        async with httpx.AsyncClient(http2=True, headers=headers, cookies=cookies, timeout=180, follow_redirects=True) as client:
+            # ── 方案A: DASH 音视频分离 + ffmpeg 合并（有声音 + 高清）──
+            if ffmpeg:
+                try:
+                    result = await self._download_dash(client, asset, wbi_keys, ffmpeg, out_path, headers, qn)
+                    if result:
+                        return result
+                except Exception as e:
+                    # DASH 失败，回退到 FLV 模式
+                    pass
+
+            # ── 方案B: FLV 单流回退（音视频一体，无需 ffmpeg）──
+            flv_params = self._wbi_sign_params({
+                "bvid": asset.bvid, "cid": asset.cid,
+                "qn": qn, "fnval": 0, "fnver": 0, "fourk": 1,
+            }, wbi_keys)
+            play = await client.get("https://api.bilibili.com/x/player/wbi/playurl", params=flv_params)
             play.raise_for_status()
             play_data = play.json()
             durls = play_data.get("data", {}).get("durl", [])
@@ -323,16 +380,79 @@ class VideoUnderstanding:
                 raise RuntimeError("没有拿到可下载视频流，可能需要登录 Cookie")
             video_url = durls[0]["url"]
 
-            out_dir = self.download_root / asset.bvid
-            out_dir.mkdir(parents=True, exist_ok=True)
-            safe_title = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", asset.title).strip()[:80] or asset.bvid
-            out_path = out_dir / f"{asset.bvid}_{safe_title}.mp4"
-
             async with client.stream("GET", video_url, headers=headers) as resp:
                 resp.raise_for_status()
                 with out_path.open("wb") as f:
                     async for chunk in resp.aiter_bytes(1024 * 256):
                         f.write(chunk)
+        return out_path
+
+    async def _download_dash(self, client: httpx.AsyncClient, asset: VideoAsset,
+                             wbi_keys, ffmpeg_path: str, out_path: Path,
+                             headers: dict, qn: int = 127) -> Path | None:
+        """DASH 模式：分别下载视频流+音频流，ffmpeg 合并为带声音的 mp4。
+        qn 决定请求画质（默认 127=最高）。"""
+        dash_params = self._wbi_sign_params({
+            "bvid": asset.bvid, "cid": asset.cid,
+            "qn": qn, "fnval": 4048, "fnver": 0, "fourk": 1,
+        }, wbi_keys)
+        play = await client.get("https://api.bilibili.com/x/player/wbi/playurl", params=dash_params)
+        play.raise_for_status()
+        play_data = play.json()
+        if play_data.get("code") != 0:
+            return None  # 触发 FLV 回退
+
+        dash = play_data.get("data", {}).get("dash")
+        if not dash or not dash.get("video") or not dash.get("audio"):
+            return None  # 无 DASH 流，回退
+
+        video_url = dash["video"][0]["base_url"]
+        audio_url = dash["audio"][0]["base_url"]
+        quality = play_data["data"].get("quality", "?")
+
+        out_dir = out_path.parent
+        video_tmp = out_dir / f"{out_path.stem}_video.m4s"
+        audio_tmp = out_dir / f"{out_path.stem}_audio.m4s"
+
+        try:
+            # 下载视频流
+            async with client.stream("GET", video_url, headers=headers) as v_resp:
+                v_resp.raise_for_status()
+                with video_tmp.open("wb") as f:
+                    async for chunk in v_resp.aiter_bytes(1024 * 1024):  # 1MB chunks
+                        f.write(chunk)
+
+            # 下载音频流
+            async with client.stream("GET", audio_url, headers=headers) as a_resp:
+                a_resp.raise_for_status()
+                with audio_tmp.open("wb") as f:
+                    async for chunk in a_resp.aiter_bytes(1024 * 1024):
+                        f.write(chunk)
+
+            # ffmpeg 合并音视频
+            result = subprocess.run([
+                ffmpeg_path, "-y", "-hide_banner", "-loglevel", "error",
+                "-i", str(video_tmp), "-i", str(audio_tmp),
+                "-c:v", "copy",
+                "-c:a", "aac", "-b:a", "192k",
+                "-movflags", "+faststart",
+                str(out_path),
+            ], capture_output=True, text=True)
+
+            if result.returncode != 0:
+                # AAC 编码失败，回退到纯 copy 模式
+                subprocess.run([
+                    ffmpeg_path, "-y", "-hide_banner", "-loglevel", "error",
+                    "-i", str(video_tmp), "-i", str(audio_tmp),
+                    "-c", "copy",
+                    "-movflags", "+faststart",
+                    str(out_path),
+                ], check=True, capture_output=True)
+        finally:
+            # 清理临时音视频分片文件
+            video_tmp.unlink(missing_ok=True)
+            audio_tmp.unlink(missing_ok=True)
+
         return out_path
 
     # ═══════════════════════════════════════════════════════════════
@@ -349,18 +469,37 @@ class VideoUnderstanding:
             return self.extract_frames_with_opencv(video_path, frame_count, out_dir)
 
         duration = self.probe_duration(video_path)
-        interval = max(1, math.floor(duration / max(1, frame_count))) if duration else 5
+        # 根据时长和期望帧数计算合适的 fps 速率
+        # 不再使用 -frames:v（它无法增加 fps filter 已决定的帧数）
+        if duration and duration > 0:
+            # 让 fps filter 恰好产生 frame_count 帧: fps = frame_count / duration
+            # 但需要确保 interval 不会太大导致帧太少
+            fps_rate = frame_count / max(1, duration)
+            vf_filter = f"fps={fps_rate:.4f},scale=640:-1"
+        else:
+            # 无 duration 时回退: 每5秒一帧
+            vf_filter = "fps=1/5,scale=640:-1"
+
         pattern = str(out_dir / "frame_%03d.jpg")
         command = [
             ffmpeg,
             "-hide_banner", "-loglevel", "error", "-y",
             "-i", str(video_path),
-            "-vf", f"fps=1/{interval},scale=640:-1",
-            "-frames:v", str(frame_count),
+            "-vf", vf_filter,
+            "-vsync", "vfr",
             pattern,
         ]
-        subprocess.run(command, check=True)
-        return sorted(out_dir.glob("frame_*.jpg"))
+        try:
+            subprocess.run(command, check=True, capture_output=True, text=True, timeout=120)
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(
+                f"ffmpeg 抽帧失败 (rc={e.returncode}): {e.stderr.strip()[-300:]}"
+            ) from e
+
+        frames = sorted(out_dir.glob("frame_*.jpg"))
+        if not frames:
+            raise RuntimeError(f"ffmpeg 执行成功但未生成任何帧文件 (duration={duration}, frame_count={frame_count})")
+        return frames
 
     # ═══════════════════════════════════════════════════════════════
     # 🎞️ extract_frames_with_opencv — OpenCV 回退方案
@@ -397,24 +536,42 @@ class VideoUnderstanding:
         return paths
 
     # ═══════════════════════════════════════════════════════════════
-    # ⏱️ probe_duration — ffprobe 获取时长
+    # ⏱️ probe_duration — ffprobe/ffmpeg 获取时长
     # ═══════════════════════════════════════════════════════════════
     def probe_duration(self, video_path: Path) -> int:
+        """获取视频时长(秒)。优先 ffprobe，fallback 到 ffmpeg stderr 解析。"""
         ffprobe = (find_ffprobe() if find_ffprobe else None) or shutil.which("ffprobe")
-        if not ffprobe:
-            return 0
-        command = [
-            ffprobe,
-            "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            str(video_path),
-        ]
-        result = subprocess.run(command, check=False, text=True, capture_output=True)
-        try:
-            return int(float(result.stdout.strip()))
-        except ValueError:
-            return 0
+        if ffprobe:
+            command = [
+                ffprobe,
+                "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(video_path),
+            ]
+            result = subprocess.run(command, check=False, text=True, capture_output=True, timeout=15)
+            try:
+                return int(float(result.stdout.strip()))
+            except ValueError:
+                pass  # fall through to ffmpeg fallback
+
+        # fallback: 从 ffmpeg -i 的 stderr 解析 Duration
+        ffmpeg = (find_ffmpeg() if find_ffmpeg else None) or shutil.which("ffmpeg")
+        if ffmpeg:
+            try:
+                result = subprocess.run(
+                    [ffmpeg, "-i", str(video_path), "-f", "null", "-"],
+                    capture_output=True, text=True, timeout=30
+                )
+                import re
+                m = re.search(r"Duration:\s*(\d+):(\d+):(\d+)\.(\d+)", result.stderr)
+                if m:
+                    h, mi, s, ms = map(int, m.groups())
+                    return h * 3600 + mi * 60 + s + (1 if ms > 0 else 0)
+            except Exception:
+                pass
+
+        return 0
 
     # ═══════════════════════════════════════════════════════════════
     # 🧠 smart_gate — AI 智能筛选门
@@ -486,3 +643,28 @@ class VideoUnderstanding:
             {"role": "system", "content": "你是视频理解助手，必须同时参考画面证据和文本证据。"},
             {"role": "user", "content": content},
         ], model_role="vision", purpose="video-frame-understand")
+
+    # ═══════════════════════════════════════════════════════════════
+    # 🖼️📝 summarize_with_grid — BiliNote 式图文笔记（网格帧 + 标记回写）
+    # ═══════════════════════════════════════════════════════════════
+    async def summarize_with_grid(self, asset: VideoAsset, video_path: Path, grid_imgs: list, include_subtitles: bool) -> str:
+        """frame_anchor_mode='bilinote' 时调用：把网格图发给 LLM 生成图文笔记，
+        并把 `*Screenshot-[mm:ss]` / `*Content-[mm:ss]` 标记替换为真实截图。"""
+        grid_b64 = grid_images_to_base64(grid_imgs) if grid_imgs else []
+        text = (
+            "你正在为 B 站视频生成一份「图文笔记」。请结合网格截图、基础信息"
+            f"{'、字幕' if include_subtitles else ''}理解视频。\n"
+            f"标题：{asset.title}\nUP：{asset.up_name}\n时长：{asset.duration}s\n"
+            f"简介：{asset.description[:1000]}\n"
+            f"字幕：{(asset.subtitles if include_subtitles else '[本模式不使用字幕]')[:6000]}\n"
+            + bilinote_prompt_suffix()
+        )
+        content: list[dict[str, Any]] = [{"type": "text", "text": text}]
+        for b64 in grid_b64:
+            content.append({"type": "image_url", "image_url": {"url": b64}})
+        md = await self.model.chat([
+            {"role": "system", "content": "你是视频图文笔记助手，必须同时参考画面证据和文本证据，输出带目录、带配图的 Markdown。"},
+            {"role": "user", "content": content},
+        ], model_role="vision", purpose="video-bilinote-note")
+        md, _ = replace_markers_with_screenshots(md, video_path, inline=True)
+        return md

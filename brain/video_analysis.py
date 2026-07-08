@@ -1,5 +1,6 @@
 """brain/video_analysis.py — 手动视频分析"""
 import asyncio, json, os, re, time, random, httpx, hashlib
+from pathlib import Path as _Path
 from bilibili_api.video import Video
 from colorama import Fore, Style
 from core.config import config
@@ -10,6 +11,10 @@ from brain.agent_brain import AgentBrain
 from knowledge.classifier import KnowledgeBaseClassifier
 from api.subtitles import fetch_bilibili_subtitles, SYSTEM_PROMPT_BRAIN
 from core.config import get_bot_name
+from services.platform_adapter import (
+    extract_video_id,
+    resolve_bilibili_short_url,
+)
 
 from utils.helpers import _safe_task_callback
 
@@ -19,33 +24,14 @@ from utils.helpers import _safe_task_callback
 # ==============================================================================
 # [brain/agent_brain.py] AgentBrain
 def _extract_bvid(text: str):
-    """从文本中提取 BV 号。
-    支持: 完整URL、短链接、纯BV号
-    """
-    # 纯 BV 号
-    m = re.search(r'\b(BV[0-9A-Za-z]{10})\b', text)
-    if m:
-        return m.group(1)
-    # b23.tv 短链接
-    m = re.search(r'b23\.tv/([0-9A-Za-z]+)', text)
-    if m:
-        return m.group(1)
-    return None
+    """从文本中提取 BV 号；复用 B站适配层。"""
+    return extract_video_id(text, "bilibili") or None
 
 async def _resolve_b23_short(short_code: str) -> str:
-    """解析 b23.tv 短链接为完整 BV 号"""
-    import httpx
-    try:
-        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
-            resp = await client.get(f"https://b23.tv/{short_code}",
-                                    headers={"User-Agent": "Mozilla/5.0"})
-            url = str(resp.url)
-            m = re.search(r'BV[0-9A-Za-z]{10}', url)
-            if m:
-                return m.group(0)
-    except Exception as e:
-        log(f'非预期异常: {e}', 'WARN')
-    return ""
+    """解析 b23.tv 短链接为完整 BV 号。"""
+    url = short_code if short_code.startswith("http") else f"https://b23.tv/{short_code}"
+    resolved = resolve_bilibili_short_url(url)
+    return extract_video_id(resolved, "bilibili") or ""
 
 async def _manual_api_retry(api_call, name: str, fallback=None, max_retries=3, base_delay=1.5):
     """手动视频分析专用 API 重试包装器。
@@ -133,9 +119,111 @@ async def _ai_cross_check_subtitle_match(brain, title: str, subtitle_text: str):
 
     return True, 0.5, "验证异常-默认放行"
 
+async def analyze_bilibili_video_input(user_input: str, force_mode: str | None = "all", intent: str = ""):
+    """非交互 B站视频分析：供 Web 面板后台线程直接执行分析、评分和归档。"""
+    bvid = extract_video_id(user_input, "bilibili")
+    if not bvid:
+        return False, "未识别到有效 BV 号"
+
+    brain = AgentBrain()
+    try:
+        brain.bili._load_credential()
+    except Exception:
+        pass
+    if os.path.exists(COOKIE_FILE):
+        try:
+            with open(COOKIE_FILE, 'r', encoding='utf-8') as f:
+                brain.cookies = json.load(f)
+        except Exception:
+            pass
+
+    title = ""
+    up_name = "未知"
+    up_uid = 0
+    try:
+        meta = await brain.bili._wbi_get('https://api.bilibili.com/x/web-interface/view', params={'bvid': bvid})
+        vinfo = meta.json()
+        if vinfo.get('code') == 0:
+            vdata = vinfo.get('data', {})
+            title = vdata.get('title', '')
+            up_name = vdata.get('owner', {}).get('name', '未知')
+            up_uid = vdata.get('owner', {}).get('mid', 0)
+        else:
+            return False, f"获取视频信息失败: code={vinfo.get('code')}"
+    except Exception as e:
+        return False, f"获取视频信息失败: {e}"
+
+    video_url = f"https://www.bilibili.com/video/{bvid}"
+    success, subtitle_text = await brain.understand_video_for_decision(bvid, title=title, force_mode=force_mode)
+    if not success:
+        subtitle_text = f"[理解受限] {subtitle_text}"
+    if not subtitle_text or len(str(subtitle_text)) < 20:
+        return False, "未能获取足够的视频内容"
+
+    comment_text = "[未读取评论]"
+    danmaku_text = ""
+    aid = 0
+    try:
+        meta = await brain.bili._wbi_get('https://api.bilibili.com/x/web-interface/view', params={'bvid': bvid})
+        vinfo = meta.json()
+        aid = vinfo.get('data', {}).get('aid', 0) if vinfo.get('code') == 0 else 0
+    except Exception:
+        aid = 0
+    if aid:
+        try:
+            comment_text, _c_list = await brain._get_comments_context(aid)
+        except Exception:
+            comment_text = "[未读取评论]"
+        try:
+            danmaku_list = await brain.maybe_read_danmaku(bvid, force=True)
+            if danmaku_list:
+                danmaku_text = "【弹幕】\n" + "\n".join(dm.get('text', '') for dm in danmaku_list[:15])
+        except Exception:
+            danmaku_text = ""
+
+    objective_prompt = SYSTEM_PROMPT_BRAIN.replace("{bot_name}", get_bot_name()).replace("{memory_ups}", str(brain.get_known_up_names()))
+    objective_prompt += "\n\n【性格模式】客观分析模式：基于内容质量公正评分，不随机切换夸夸/吐槽。"
+    if intent:
+        objective_prompt += f"\n\n【用户额外要求】{intent}"
+    context = f"视频标题: {title}\nUP主: {up_name}\n【视频内容字幕】:{subtitle_text}\n{comment_text}\n{danmaku_text}"
+
+    score = 0
+    thought = ""
+    learning_topic = title[:15] if title else "手动分析"
+    try:
+        resp = await brain._call_ai_with_retry(
+            model=MODEL_BRAIN,
+            messages=[{"role": "system", "content": objective_prompt}, {"role": "user", "content": context}],
+            request_timeout=120,
+        )
+        raw = resp.choices[0].message.content
+        start, end = raw.find("{"), raw.rfind("}")
+        if start >= 0 and end >= start:
+            decision = json.loads(raw[start:end + 1])
+            score = float(decision.get('score', 0) or 0)
+            thought = decision.get('thought', '')
+            learning_topic = decision.get('learning_topic', '') or learning_topic
+    except Exception as e:
+        log(f"Web B站分析 AI评分失败: {e}", "WARN")
+        score = LEARN_MIN_SCORE
+        thought = "Web后台已获取视频内容，AI评分失败，按用户主动请求尝试归档。"
+
+    archived = False
+    if score >= LEARN_MIN_SCORE or learning_topic:
+        learn_text = str(subtitle_text)
+        if thought:
+            learn_text += f"\n\n【AI判断】{thought}"
+        if comment_text and comment_text != "[未读取评论]":
+            learn_text += f"\n\n{comment_text}"
+        if danmaku_text:
+            learn_text += f"\n\n{danmaku_text}"
+        _desc = getattr(brain, "_last_video_desc", "")
+        archived = await brain.learn_from_video(bvid, title, up_name, video_url, learn_text, learning_topic, video_desc=_desc, score=score)
+
+    return True, f"B站分析完成：{title}，评分 {score}/10，归档={'是' if archived else '否'}"
 
 
-async def manual_video_analysis():
+async def manual_video_analysis(force_platform: str | None = "bilibili"):
     """手动视频分析：用户输入链接/标题/UP主名，AI客观解析视频内容。"""
     print(f"\n{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
     print(f"{Fore.CYAN}|               📹 手动视频分析 - 客观AI解析                    |{Style.RESET_ALL}")
@@ -189,6 +277,7 @@ async def manual_video_analysis():
         sibling_dirs = [
             ("bilibili_learning_bot", "Data/bilibili_cookies.json"),
             ("bilibili_learning_bot-2.2.1", "Data/bilibili_cookies.json"),
+            ("bilibili_learning_bot-3.0.1", "Data/bilibili_cookies.json"),
             ("bilibili_learning_bot-2.2.2/bilibili_learning_bot-3.0.0", "Data/bilibili_cookies.json"),
             ("bilibili_claw", "Data/bilibili_cookies.json"),
             ("batch_unfollow", "Data/bilibili_cookies.json"),
@@ -691,6 +780,21 @@ async def manual_video_analysis():
             print(f"{Fore.YELLOW}[INFO] 可学习内容不足，跳过归档{Style.RESET_ALL}")
     else:
         print(f"\n{Fore.CYAN}[4/4] 评分 {score}/10 < {LEARN_MIN_SCORE}，内容质量一般，跳过学习归档{Style.RESET_ALL}")
+
+    # ── 附加导出：把本次视频内容导出为 Word / PDF / PPT（与 W 命令共用逻辑）──
+    try:
+        from services.document_export import export_video_content_interactive
+        _ctx = subtitle_text or ""
+        if comment_text and comment_text != "[未读取评论]":
+            _ctx += f"\n\n{comment_text}"
+        if danmaku_text:
+            _ctx += f"\n\n{danmaku_text}"
+        _desc = getattr(brain, "_last_video_desc", "") or ""
+        await export_video_content_interactive(
+            title, up_name, video_url, _ctx,
+            stats=None, desc=_desc, bvid=bvid, brain=brain)
+    except Exception as _ex:
+        print(f"{Fore.YELLOW}  ⚠ 附加导出已跳过: {_ex}{Style.RESET_ALL}")
 
     print(f"\n{Fore.GREEN}+============================================================+{Style.RESET_ALL}")
     print(f"{Fore.GREEN}|  手动视频分析完成！                                         |{Style.RESET_ALL}")

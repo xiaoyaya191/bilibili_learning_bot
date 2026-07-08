@@ -1,5 +1,5 @@
 # ============================================================
-# bilibili_learning_bot v3.0.0 依赖清单
+# bilibili_learning_bot v3.0.2 依赖清单
 # ============================================================
 # ⚠️ 版本已锁定为开发者环境精确版本，保证兼容性。
 #
@@ -11,6 +11,7 @@
 
 bilibili-api-python==17.4.1
 openai==2.33.0
+pydantic>=2.0.0
 httpx==0.28.1
 colorama==0.4.6
 qrcode==8.2
@@ -20,6 +21,7 @@ Flask==3.1.2
 flask-cors==6.0.2
 requests==2.32.5
 imageio-ffmpeg==0.6.0
+yt-dlp>=2025.6.30
 
 # Optional: ASR 语音识别
 # funasr==1.3.1

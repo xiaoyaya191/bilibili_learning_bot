@@ -13,7 +13,7 @@ RUN pip install --prefix=/install -r requirements.txt
 
 FROM python:3.11-slim
 
-ARG APP_VERSION=3.0.1
+ARG APP_VERSION=3.0.2
 WORKDIR /app
 
 ENV PYTHONDONTWRITEBYTECODE=1 \

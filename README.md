@@ -1,7 +1,7 @@
 # bilibili_learning_bot
 
 > **B站 AI 学习互动机器人** — 自动刷视频、学知识、评论互动、自我进化  
-> 版本: 3.0.1 | License: MIT  
+> 版本: 3.0.2 | License: MIT  
 > 项目介绍以及使用文档: https://bot1.bxya.top/
 
 
@@ -303,7 +303,7 @@ DOCKER_IMAGE=yourname/bilibili_learning_bot:latest docker compose up -d
 ```env
 DOCKER_IMAGE=yourname/bilibili_learning_bot:latest
 WEB_PORT=7860
-APP_VERSION=3.0.1
+APP_VERSION=3.0.2
 UPDATE_CHECK_URL=
 ```
 

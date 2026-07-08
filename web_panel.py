@@ -73,12 +73,12 @@ def _read_app_version() -> str:
     if env_version:
         return env_version.lstrip('v')
     try:
-        return VERSION_FILE.read_text(encoding='utf-8').strip().lstrip('v') or '0.0.0'
+        return VERSION_FILE.read_text(encoding='utf-8').strip().lstrip('v') or '3.0.2'
     except Exception:
-        return '0.0.0'
+        return '3.0.2'
 
 APP_VERSION = _read_app_version()
-DEFAULT_UPDATE_CHECK_URL = "https://raw.githubusercontent.com/xiaoyaya191/bilibili_learning_bot/main/VERSION"
+DEFAULT_UPDATE_CHECK_URL = ""
 UPDATE_CHECK_URL = os.getenv('UPDATE_CHECK_URL', DEFAULT_UPDATE_CHECK_URL).strip()
 UPDATE_CHECK_TTL = int(os.getenv('UPDATE_CHECK_TTL', '3600'))
 _update_cache = {"checked_at": 0.0, "data": None}
@@ -133,7 +133,9 @@ def _hash_password(password: str) -> str:
 def _verify_password(password: str, stored: str) -> bool:
     """验证密码是否匹配存储的哈希"""
     if not stored or not stored.startswith('$sha256$'):
-        # 兼容旧版明文密码：直接比较
+        # 兼容旧版明文密码：直接比较（已废弃，建议重新设置密码以启用加密存储）
+        import warnings
+        warnings.warn("检测到旧版明文密码存储，建议进入 Web 面板重新设置密码以启用安全哈希", DeprecationWarning)
         return password == stored
     _, _, salt, hash_hex = stored.split('$', 3)
     h = hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), 100_000)
@@ -321,7 +323,7 @@ def _bot_reader(pipe, prefix=""):
         except OSError as e:
             log_line(f"⚠ 关闭管道异常: {e}")
 
-def start_bot_process():
+def start_bot_process(mode=None):
     global bot_process, bot_running, bot_start_time
     if bot_running:
         return False, "机器人已在运行"
@@ -337,6 +339,14 @@ def start_bot_process():
         env["PYTHONUNBUFFERED"] = "1"
         # 设置环境变量跳过子进程的免责声明交互
         env["BILI_DISCLAIMER_SKIP"] = "1"
+        # 关键：自动启动模式——子进程直接以已配置模式运行机器人，
+        # 不再走交互菜单（此前只喂 "1\n" 会卡在二级"选择启动模式"子菜单，机器人永不真正运行）
+        env["BILI_AUTO_START"] = "1"
+        # 由网页端下拉选择启动模式（smart=智能省token / current=当前模式）
+        if mode == "smart":
+            env["BILI_AUTO_START_MODE"] = "smart"
+        elif mode == "current":
+            env["BILI_AUTO_START_MODE"] = "current"
 
         bot_process = subprocess.Popen(
             [sys.executable, str(agent_path)],
@@ -352,13 +362,6 @@ def start_bot_process():
         )
         bot_running = True
         bot_start_time = datetime.now()
-
-        # 自动输入"1"启动机器人模式（子进程在 _disclaimer_confirm 跳过后会进入主菜单）
-        try:
-            bot_process.stdin.write("1\n")
-            bot_process.stdin.flush()
-        except (BrokenPipeError, OSError):
-            pass
 
         threading.Thread(target=_bot_reader, args=(bot_process.stdout, ""), daemon=True).start()
         log_line("✅ 机器人进程已启动")
@@ -574,6 +577,11 @@ a:hover{color:var(--purple)}
 .btn-lg{padding:11px 24px;font-size:14px;border-radius:var(--rs2)}
 .btn-grp{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
 .btn:disabled{opacity:.4;cursor:not-allowed;transform:none!important;box-shadow:none!important}
+.mode-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:6px 0 2px}
+.mode-row label{font-size:13px;font-weight:700;color:var(--text2)}
+.sel{background:var(--bg2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:7px 10px;font-size:13px;font-family:inherit;cursor:pointer;outline:none}
+.sel:focus{border-color:var(--accent)}
+.mode-hint{font-size:11px;color:var(--text3)}
 
 /* ── FORMS ── */
 .fg{margin-bottom:14px}
@@ -836,6 +844,14 @@ a:hover{color:var(--purple)}
 <div class="ph"><h1>🎮 机器人控制</h1><p>启动/停止/重启</p></div>
 <div class="pc">
 <h3>🤖 运行状态</h3><div id="ctrlStatus" style="margin-bottom:12px"></div>
+<div class="mode-row">
+  <label for="botMode">启动模式：</label>
+  <select id="botMode" class="sel">
+    <option value="current">🎯 当前模式（完整功能，默认）</option>
+    <option value="smart">💡 智能省token（长时挂机/省钱）</option>
+  </select>
+  <span class="mode-hint">按已保存的配置运行</span>
+</div>
 <div class="btn-grp">
 <button class="btn btn-suc btn-lg" id="btnStart" onclick="startBot()">▶ 启动机器人</button>
 <button class="btn btn-dan btn-lg" id="btnStop" style="display:none" onclick="stopBot()">⏹ 停止</button>
@@ -1292,12 +1308,33 @@ document.getElementById('btnStart').style.display=d.bot_running?'none':'';
 document.getElementById('btnStop').style.display=d.bot_running?'':'none';
 }
 async function startBot(){
-var r=await api('POST','/api/bot/start');toast(r.message,r.ok?'ok':'err');upCtrlUI();if(r.ok){userScrolledUp=false;pollLog();rf_dash()}
+var sel=document.getElementById('botMode');
+var mode=sel?sel.value:'current';
+if(mode!=='smart'&&mode!=='current')mode='current';
+var r=await api('POST','/api/bot/start',{mode:mode});
+if(r.ok){
+  var label=mode==='smart'?'智能省token':'当前';
+  toast('已以「'+label+'」模式启动','ok');
+  userScrolledUp=false;pollLog();rf_dash();
+  var lb=document.getElementById('botLog');if(lb){lb.scrollTop=lb.scrollHeight;lb.scrollIntoView({behavior:'smooth',block:'nearest'});}
+}else{
+  toast(r.message||'启动失败','err');
+}
+upCtrlUI();
+}
+var _botModeSynced=false;
+async function syncBotMode(){
+if(_botModeSynced)return;_botModeSynced=true;
+try{var c=await api('GET','/api/config');var m=(c&&c.system&&c.system.smart_token_mode)?'smart':'current';var sel=document.getElementById('botMode');if(sel)sel.value=m;}catch(e){}
 }
 async function stopBot(){
 var r=await api('POST','/api/bot/stop');toast(r.message,r.ok?'ok':'err');upCtrlUI();if(r.ok)rf_dash()
 }
-async function restartBot(){await stopBot();setTimeout(startBot,1200)}
+async function restartBot(){
+toast('正在重启机器人...','ok');
+await stopBot();
+setTimeout(startBot,1200);
+}
 async function clearLog(){await api('POST','/api/bot/clear');document.getElementById('botLog').textContent='日志已清空';userScrolledUp=false;pollLog()}
 async function pollLog(){
 if(logPoll)clearInterval(logPoll);
@@ -1470,12 +1507,23 @@ else loadConfQuick();
 }
 async function loadConf(){try{var r=await api('GET','/api/config');_confData=r;document.getElementById('confEd').value=JSON.stringify(r,null,2)}catch(e){toast('加载失败','err')}}
 async function saveConf(){try{var v=JSON.parse(document.getElementById('confEd').value);var r=await api('POST','/api/config',v);toast(r.message,r.ok?'ok':'err');_confData=v;if(_confMode=='quick')loadConfQuick()}catch(e){toast('JSON格式错误: '+e.message,'err')}}
+async function applyPreset(){
+var sel=document.getElementById('cqPreset');if(!sel)return;
+var key=sel.value;if(!key)return;
+try{var ps=await api('GET','/api/ai/presets');var p=(ps.presets&&ps.presets[key])||ps[key];if(!p)return;
+document.getElementById('cqBaseUrl').value=p.base_url||'';
+document.getElementById('cqModelBrain').value=p.chat||'';
+document.getElementById('cqModelVision').value=p.vision||'';
+toast('已填入预设: '+(p.name||key),'ok');
+}catch(e){toast('读取预设失败: '+e.message,'err')}
+}
 async function loadConfQuick(){
 if(!_confData){var r=await api('GET','/api/config');_confData=r}
 var c=_confData;
 var h='';
 // API
 h+='<fieldset class="fs"><legend>🔑 API 设置</legend>';
+h+='<div class="fg"><label>厂商预设 (一键填入官方格式)</label><select id="cqPreset" onchange="applyPreset()"><option value="">— 自定义 / OpenAI 兼容 —</option></select></div>';
 h+='<div class="fg"><label>API Key</label><input id="cqApiKey" value="'+(c.api?c.api.unified_api_key||'':'')+'" placeholder="sk-..."></div>';
 h+='<div class="fg"><label>Base URL</label><input id="cqBaseUrl" value="'+(c.api?c.api.unified_base_url||'':'')+'" placeholder="https://api.openai.com/v1"></div>';
 h+='<div class="fg"><label>模型(对话)</label><input id="cqModelBrain" value="'+(c.api?c.api.model_brain||'':'')+'" placeholder="gpt-4o"></div>';
@@ -1528,6 +1576,7 @@ h+='<div class="fg"><label>ASR语音识别</label><select id="cqAsr"><option val
 h+='<div class="fg"><label>视觉理解</label><select id="cqVision"><option value="1"'+(c.vision&&c.vision.cover_enabled!==false?' selected':'')+'>启用</option><option value="0"'+(c.vision&&c.vision.cover_enabled===false?' selected':'')+'>禁用</option></select></div>';
 h+='</fieldset>';
 document.getElementById('confQuickContent').innerHTML=h;
+try{var _ps=await api('GET','/api/ai/presets');var _sel=document.getElementById('cqPreset');if(_sel&&_ps){var _pr=_ps.presets||_ps;for(var _k in _pr){var _o=document.createElement('option');_o.value=_k;_o.textContent=_pr[_k].name;_sel.appendChild(_o);}if(_ps.active_preset)_sel.value=_ps.active_preset;}}catch(e){}
 }
 async function saveConfQuick(){
 try{
@@ -1539,6 +1588,7 @@ c.api.unified_api_key=document.getElementById('cqApiKey').value.trim();
 c.api.unified_base_url=document.getElementById('cqBaseUrl').value.trim();
 c.api.model_brain=document.getElementById('cqModelBrain').value.trim();
 c.api.model_vision=document.getElementById('cqModelVision').value.trim();
+var _psel=document.getElementById('cqPreset');if(_psel)c.api.active_preset=_psel.value;
 // Interaction
 c.interaction=c.interaction||{};
 c.interaction.max_energy=parseInt(document.getElementById('cqMaxEnergy').value)||100;
@@ -2132,7 +2182,7 @@ if(msg){msg.textContent='✅ 已恢复默认';msg.style.color='var(--green)';set
 
 // ── INIT ──
 applyTheme();applyBg();
-rf_dash();auto();
+rf_dash();auto();syncBotMode();
 (async function(){try{var d=await api('GET','/api/info');document.getElementById('uptime').textContent=d.uptime}catch(e){}})();
 </script>
 </body>
@@ -2144,6 +2194,17 @@ rf_dash();auto();
 @app.route('/')
 def index():
     return _load_html()
+
+
+# 项目图标（网页左上角 logo / favicon）—— 从仓库根目录的 image.png 提供
+_ICON_FILE = BASE_DIR / "image.png"
+
+
+@app.route('/app-icon')
+def app_icon():
+    if _ICON_FILE.exists():
+        return Response(_ICON_FILE.read_bytes(), mimetype='image/png')
+    return Response(status=404)
 
 @app.route('/ppt')
 def ppt_panel():
@@ -2208,6 +2269,7 @@ def api_info():
         bot_running=bot_running,
         bot_start_time=bot_start_time.strftime('%Y-%m-%d %H:%M:%S') if bot_start_time else None,
         uptime=us,
+        version=APP_VERSION,
         api_configured=bool(api_key),
         bili_logged_in=bool(bili_token) or _has_valid_bili_cookies(),
         config_sections=len(config),
@@ -2230,7 +2292,6 @@ def api_info():
         python_version=sys.version.split()[0],
         platform=sys.platform,
         cwd=str(BASE_DIR),
-        version=APP_VERSION,
         update=check_update(False),
         asr_enabled=config.get('asr', {}).get('enabled', False),
         asr_backend=config.get('asr', {}).get('backend', 'funasr'),
@@ -2252,6 +2313,20 @@ def api_config():
         return jsonify(dict(ok=ok, message='配置已保存' if ok else '保存失败'))
     except Exception as e:
         return jsonify(dict(ok=False, message=str(e))), 400
+
+# ── 模型列表 ──
+@app.route('/api/ai/presets')
+def api_ai_presets():
+    try:
+        from core.config import PROVIDER_PRESETS
+    except Exception:
+        PROVIDER_PRESETS = {}
+    active = ""
+    try:
+        active = read_json(CONFIG_FILE, {}).get("active_preset", "")
+    except Exception:
+        pass
+    return jsonify(dict(presets=PROVIDER_PRESETS, active_preset=active))
 
 # ── 模型列表 ──
 @app.route('/api/models/list')
@@ -2290,8 +2365,15 @@ def api_models_list():
 # ── 机器人控制 ──
 @app.route('/api/bot/start', methods=['POST'])
 def api_bot_start():
-    ok, msg = start_bot_process()
-    return jsonify(dict(ok=ok, message=msg))
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+    except Exception:
+        data = {}
+    mode = data.get("mode", "current")
+    if mode not in ("smart", "current"):
+        mode = "current"
+    ok, msg = start_bot_process(mode=mode)
+    return jsonify(dict(ok=ok, message=msg, mode=mode))
 
 @app.route('/api/bot/stop', methods=['POST'])
 def api_bot_stop():
@@ -3125,27 +3207,694 @@ def api_kb_stats():
 # ── 功能操作 (桥接 CLI 功能) ──
 @app.route('/api/action/analyze-video', methods=['POST'])
 def api_action_analyze_video():
-    """手动视频分析 — 在后台线程中运行"""
+    """手动视频分析 — 多平台输入识别，B站完整分析，其他标注暂不支持。"""
     try:
         body = request.get_json(force=True)
-        bvid = (body.get('bvid') or '').strip()
-        if not bvid:
-            return jsonify(dict(ok=False, message='请输入 BV号')), 400
-        log_line(f"触发手动视频分析: {bvid}")
-        # 直接在子进程中调用 start_cli.py 的函数
+        raw = (body.get('bvid') or body.get('url') or '').strip()
+        platform = (body.get('platform') or 'auto').strip().lower()
+        if not raw:
+            return jsonify(dict(ok=False, message='请输入视频链接 / BV号')), 400
+        from services.platform_adapter import (
+            SUPPORTED_PLATFORMS,
+            PLATFORM_LABELS,
+            normalize_video_input,
+        )
+        norm = normalize_video_input(raw)
+        if platform not in ('auto', ''):
+            norm = dict(norm)
+            norm['platform'] = platform
+            norm['ok'] = norm['platform'] in SUPPORTED_PLATFORMS
+        plat = norm.get('platform')
+        if plat != 'bilibili':
+            label = PLATFORM_LABELS.get(plat, plat)
+            result = dict(norm)
+            result['ok'] = False
+            result['message'] = f'{label} 已识别，但当前阶段暂不支持分析（仅 B站可用）'
+            return jsonify(result), 400
+        bvid = norm.get('video_id') or raw
+        mode = (body.get('mode') or '').strip()
+        intent = (body.get('intent') or '').strip()
+        _mode_map = {"1": "subtitle_only", "2": "asr_only", "3": "vision_only",
+                     "4": "subtitle+asr", "5": "subtitle+vision", "6": "asr+vision", "7": "all"}
+        force_mode = _mode_map.get(mode, None)  # None = 默认智能流程
+        _mode_label = {'subtitle_only': '仅字幕', 'asr_only': '仅ASR', 'vision_only': '仅视觉',
+                       'subtitle+asr': '字幕+ASR', 'subtitle+vision': '字幕+视觉',
+                       'asr+vision': 'ASR+视觉', 'all': '全部', None: '智能流程'}.get(force_mode)
+        log_line(f"触发 B站视频分析: {bvid} (模式={_mode_label}, 意图={'有' if intent else '无'})")
+
         def _run_analysis():
             try:
                 sys.path.insert(0, str(BASE_DIR))
-                import start_cli
-                # 尝试调用手动分析
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                # 简单方式：通过命令行参数
-                log_line(f"[分析] 正在分析 {bvid}...")
+                import asyncio as _asyncio
+                from brain.video_analysis import analyze_bilibili_video_input
+                loop = _asyncio.new_event_loop()
+                _asyncio.set_event_loop(loop)
+                ok, msg = loop.run_until_complete(
+                    analyze_bilibili_video_input(bvid, force_mode=force_mode, intent=intent))
+                log_line(f"[分析] {'完成' if ok else '失败'}: {msg}")
             except Exception as e:
                 log_line(f"[分析] 失败: {e}")
+
         threading.Thread(target=_run_analysis, daemon=True).start()
-        return jsonify(dict(ok=True, message=f'已触发视频分析: {bvid}'))
+        result = dict(norm)
+        result['ok'] = True
+        result['message'] = f'已触发 B站视频分析: {bvid}（{_mode_label}）'
+        return jsonify(result)
+    except Exception as e:
+        return jsonify(dict(ok=False, message=str(e))), 400
+
+
+@app.route('/api/action/mindmap', methods=['POST'])
+def api_action_mindmap():
+    """思维导图导出 — 单文件或整个知识库 → 可交互 HTML（复用 services.mindmap_export）。"""
+    try:
+        body = request.get_json(force=True)
+        mode = (body.get('mode') or 'single').strip().lower()
+        rel = (body.get('file') or '').strip()
+        from services.knowledge_tutor import KNOWLEDGE_BASE_DIR
+        from services.mindmap_export import export_mindmap
+        cfg = read_json(CONFIG_FILE, {})
+        if mode == 'library':
+            md_files = sorted(KNOWLEDGE_BASE_DIR.rglob('*.md'))
+            if not md_files:
+                return jsonify(dict(ok=False, message='知识库为空，无法导出')), 400
+            ok_cnt = 0
+            out = []
+            for p in md_files:
+                try:
+                    o = export_mindmap(p, cfg=cfg)
+                    ok_cnt += 1
+                    out.append(o)
+                except Exception as e:
+                    out.append({'error': str(e), 'file': str(p)})
+            return jsonify(dict(ok=True, message=f'批量导出完成：成功 {ok_cnt}/{len(md_files)}',
+                                mode='library', files=out))
+        # single
+        if not rel:
+            return jsonify(dict(ok=False, message='请选择知识文件')), 400
+        target = (KNOWLEDGE_BASE_DIR / rel).resolve()
+        kb_root = KNOWLEDGE_BASE_DIR.resolve()
+        if target != kb_root and kb_root not in target.parents:
+            return jsonify(dict(ok=False, message='非法路径')), 400
+        if not target.exists():
+            return jsonify(dict(ok=False, message='文件不存在')), 400
+        out_path = export_mindmap(target, cfg=cfg)
+        html = Path(out_path).read_text(encoding='utf-8', errors='replace')
+        return jsonify(dict(ok=True, message='思维导图已生成', mode='single',
+                            path=out_path, html=html))
+    except Exception as e:
+        return jsonify(dict(ok=False, message=str(e))), 400
+
+
+@app.route('/api/action/toggle-flag', methods=['POST'])
+def api_action_toggle_flag():
+    """通用开关：封面分析 / 快速模式 / 安静模式 / ASR（写入 config.json，并尽力热重载本进程全局）。"""
+    try:
+        body = request.get_json(force=True)
+        key = (body.get('key') or '').strip()
+        allowed = {
+            'cover_enabled': ('vision', 'cover_enabled', 'VISION_COVER_ENABLED'),
+            'quick_mode': ('speed', 'no_human_delay', 'NO_HUMAN_DELAY'),
+            'quiet_mode': ('system', 'quiet_mode', 'QUIET_MODE'),
+            'asr_enabled': ('asr', 'enabled', 'ASR_ENABLED'),
+        }
+        if key not in allowed:
+            return jsonify(dict(ok=False, message='未知开关')), 400
+        section, field, gname = allowed[key]
+        config = read_json(CONFIG_FILE, {})
+        sec = config.setdefault(section, {})
+        new_val = not bool(sec.get(field, False))
+        sec[field] = new_val
+        write_json(CONFIG_FILE, config)
+        try:
+            import cli.app as _app
+            setattr(_app, gname, new_val)
+        except Exception:
+            pass
+        label = {'cover_enabled': '封面分析', 'quick_mode': '快速模式',
+                 'quiet_mode': '安静模式', 'asr_enabled': 'ASR语音识别'}[key]
+        return jsonify(dict(ok=True, key=key, value=new_val,
+                            message=f'{label}已{"开启" if new_val else "关闭"}'))
+    except Exception as e:
+        return jsonify(dict(ok=False, message=str(e))), 400
+
+
+@app.route('/api/action/flags')
+def api_action_flags():
+    """读取快捷开关当前状态（封面分析 / 快速模式 / 安静模式 / ASR）。"""
+    try:
+        config = read_json(CONFIG_FILE, {})
+        return jsonify(dict(
+            cover_enabled=bool(config.get('vision', {}).get('cover_enabled', False)),
+            quick_mode=bool(config.get('speed', {}).get('no_human_delay', False)),
+            quiet_mode=bool(config.get('system', {}).get('quiet_mode', False)),
+            asr_enabled=bool(config.get('asr', {}).get('enabled', False)),
+        ))
+    except Exception as e:
+        return jsonify(dict(ok=False, message=str(e))), 400
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 长任务机制（UP学习 / 视频转网页 / 出题 / 深入了解 都是耗时任务，前端轮询）
+# ─────────────────────────────────────────────────────────────────────────────
+import asyncio as _asyncio
+import threading
+import uuid as _uuid
+import re as _re
+import json as _json
+from datetime import datetime as _dt
+from flask import send_file
+
+TASKS = {}  # task_id -> {status, message, result, error}
+
+
+def _run_coro(coro):
+    loop = _asyncio.new_event_loop()
+    try:
+        _asyncio.set_event_loop(loop)
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+def _mode_map():
+    return {"1": "subtitle_only", "2": "asr_only", "3": "vision_only",
+            "4": "subtitle+asr", "5": "subtitle+vision", "6": "asr+vision", "7": "all"}
+
+
+# ── UP主搜索 / 视频列表 / 批量学习 ──
+@app.route('/api/action/up-search', methods=['POST'])
+def api_action_up_search():
+    """搜索UP主（按名字/UID）。"""
+    try:
+        body = request.get_json(force=True)
+        q = (body.get('query') or '').strip()
+        if not q:
+            return jsonify(dict(ok=False, message='请输入UP主名字或UID')), 400
+        try:
+            uid_candidate = int(q)
+            return jsonify(dict(ok=True, ups=[dict(uid=uid_candidate, name=q, sign='', fans=0, is_uid=True)]))
+        except ValueError:
+            pass
+        from bilibili_api import search as bili_search
+        data = _run_coro(bili_search.search_by_type(
+            q, search_type=bili_search.SearchObjectType.USER, page=1))
+        items = (data or {}).get('result') or []
+        out = []
+        for u in items[:10]:
+            out.append(dict(uid=int(u.get('mid') or u.get('uid', 0) or 0),
+                            name=u.get('uname') or u.get('name', ''),
+                            sign=(u.get('usign') or u.get('sign', ''))[:40],
+                            fans=u.get('fans', 0)))
+        return jsonify(dict(ok=True, ups=out))
+    except Exception as e:
+        return jsonify(dict(ok=False, message=str(e))), 400
+
+
+@app.route('/api/action/up-videos', methods=['POST'])
+def api_action_up_videos():
+    """获取UP主投稿视频列表。"""
+    try:
+        body = request.get_json(force=True)
+        uid = int(body.get('uid') or 0)
+        limit = int(body.get('limit') or 20)
+        if not uid:
+            return jsonify(dict(ok=False, message='缺少 uid')), 400
+        sys.path.insert(0, str(BASE_DIR))
+        from brain.agent_brain import AgentBrain
+        brain = AgentBrain()
+        brain.bili._load_credential()
+        info = _run_coro(brain.bili.get_up_info(uid)) or {}
+        vids = _run_coro(brain.bili.get_up_videos(uid, limit=min(limit, 50))) or []
+        return jsonify(dict(ok=True, up=info, videos=vids))
+    except Exception as e:
+        return jsonify(dict(ok=False, message=str(e))), 400
+
+
+@app.route('/api/action/up-learn', methods=['POST'])
+def api_action_up_learn():
+    """批量学习选中的UP主视频（后台任务，逐个调用视频分析）。"""
+    try:
+        body = request.get_json(force=True)
+        bvids = body.get('bvids') or []
+        mode = (body.get('mode') or '').strip()
+        intent = (body.get('intent') or '').strip()
+        if not bvids:
+            return jsonify(dict(ok=False, message='请至少选择一个视频')), 400
+        force_mode = _mode_map().get(mode)
+        tid = _uuid.uuid4().hex
+        TASKS[tid] = dict(status='running', message=f'准备学习 {len(bvids)} 个视频...', result=None, error=None)
+
+        def _work():
+            sys.path.insert(0, str(BASE_DIR))
+            from brain.video_analysis import analyze_bilibili_video_input
+            ok_cnt = 0
+            for i, bvid in enumerate(bvids, 1):
+                try:
+                    TASKS[tid]['message'] = f'[{i}/{len(bvids)}] 分析中: {bvid}'
+                    loop = _asyncio.new_event_loop()
+                    _asyncio.set_event_loop(loop)
+                    ok, msg = loop.run_until_complete(
+                        analyze_bilibili_video_input(bvid, force_mode=force_mode, intent=intent))
+                    loop.close()
+                    if ok:
+                        ok_cnt += 1
+                    TASKS[tid]['message'] = f'[{i}/{len(bvids)}] {"✓ 完成" if ok else "✗ 失败"}: {msg}'
+                except Exception as e:
+                    TASKS[tid]['message'] = f'[{i}/{len(bvids)}] 异常: {e}'
+            TASKS[tid]['status'] = 'done'
+            TASKS[tid]['result'] = dict(ok=ok_cnt, total=len(bvids))
+
+        threading.Thread(target=_work, daemon=True).start()
+        return jsonify(dict(ok=True, task_id=tid, message=f'已启动学习 {len(bvids)} 个视频'))
+    except Exception as e:
+        return jsonify(dict(ok=False, message=str(e))), 400
+
+
+# ── 视频 → 网页（多风格）/ 导出 ──
+@app.route('/api/action/video2web', methods=['POST'])
+def api_action_video2web():
+    """生成视频学习网页（幻灯片风格 HTML）。"""
+    try:
+        body = request.get_json(force=True)
+        raw = (body.get('bvid') or '').strip()
+        theme = (body.get('theme') or 'auto').strip()
+        if not raw:
+            return jsonify(dict(ok=False, message='请输入视频 BV号/链接')), 400
+        m = _re.search(r'(BV[0-9A-Za-z]{10})', raw)
+        bvid = m.group(1) if m else raw
+        tid = _uuid.uuid4().hex
+        TASKS[tid] = dict(status='running', message='AI 正在生成网页...', result=None, error=None)
+
+        def _work():
+            try:
+                cfg = read_json(CONFIG_FILE, {})
+                api_key = cfg.get('api', {}).get('unified_api_key', '') or os.getenv('BILI_AI_API_KEY', '')
+                base_url = cfg.get('api', {}).get('unified_base_url', '') or os.getenv('BILI_AI_BASE_URL', '')
+                model = cfg.get('api', {}).get('model_brain', '') or cfg.get('api', {}).get('model', '')
+                cookies = None
+                if COOKIE_FILE.exists():
+                    try:
+                        cookies = _json.loads(COOKIE_FILE.read_text(encoding='utf-8'))
+                    except Exception:
+                        cookies = None
+                sys.path.insert(0, str(BASE_DIR))
+                from services.video_to_ppt import generate_ppt_from_bvid
+                res = _run_coro(generate_ppt_from_bvid(
+                    bvid, api_key=api_key, base_url=base_url, model=model,
+                    cookies_obj=cookies, theme=theme, open_browser=False, auto_save=True))
+                if res.get('success'):
+                    TASKS[tid]['status'] = 'done'
+                    TASKS[tid]['result'] = dict(html=res.get('html_content', ''),
+                                                path=res.get('html_path', ''),
+                                                title=res.get('title', ''))
+                else:
+                    TASKS[tid]['status'] = 'error'
+                    TASKS[tid]['error'] = res.get('error', '生成失败')
+            except Exception as e:
+                TASKS[tid]['status'] = 'error'
+                TASKS[tid]['error'] = str(e)
+
+        threading.Thread(target=_work, daemon=True).start()
+        return jsonify(dict(ok=True, task_id=tid, message='已启动网页生成'))
+    except Exception as e:
+        return jsonify(dict(ok=False, message=str(e))), 400
+
+
+def _html_to_plain_text(html):
+    t = _re.sub(r'<script.*?</script>', '', html, flags=_re.S | _re.I)
+    t = _re.sub(r'<style.*?</style>', '', t, flags=_re.S | _re.I)
+    t = _re.sub(r'<[^>]+>', ' ', t)
+    for a, b in [('&nbsp;', ' '), ('&amp;', '&'), ('&lt;', '<'), ('&gt;', '>'), ('&quot;', '"')]:
+        t = t.replace(a, b)
+    t = _re.sub(r'[ \t]+', ' ', t)
+    t = _re.sub(r'\n\s*\n+', '\n\n', t)
+    return t.strip()
+
+
+@app.route('/api/action/export-docx', methods=['POST'])
+def api_action_export_docx():
+    """把生成的网页 HTML 导出为 Word（提取正文）。"""
+    try:
+        body = request.get_json(force=True)
+        html = body.get('html', '')
+        title = (body.get('title') or '视频学习页').strip() or '视频学习页'
+        from docx import Document
+        doc = Document()
+        doc.add_heading(title, level=0)
+        for line in _html_to_plain_text(html).split('\n'):
+            line = line.strip()
+            if not line:
+                doc.add_paragraph('')
+            else:
+                doc.add_paragraph(line)
+        out = DATA_DIR / 'DocumentExports'
+        out.mkdir(parents=True, exist_ok=True)
+        fn = out / (_re.sub(r'[^\w\-.\u4e00-\u9fff]+', '_', title)[:60] + '.docx')
+        doc.save(str(fn))
+        return send_file(str(fn), as_attachment=True, download_name=fn.name)
+    except ImportError:
+        return jsonify(dict(ok=False, message='缺少 python-docx，请先 pip install python-docx')), 500
+    except Exception as e:
+        return jsonify(dict(ok=False, message=str(e))), 400
+
+
+@app.route('/api/action/export-pdf', methods=['POST'])
+def api_action_export_pdf():
+    """把生成的网页 HTML 导出为 PDF（提取正文）。"""
+    try:
+        body = request.get_json(force=True)
+        html = body.get('html', '')
+        title = (body.get('title') or '视频学习页').strip() or '视频学习页'
+        from reportlab.lib.pagesizes import A4
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.ttfonts import TTFont
+        from reportlab.pdfgen import canvas
+        out = DATA_DIR / 'DocumentExports'
+        out.mkdir(parents=True, exist_ok=True)
+        fn = out / (_re.sub(r'[^\w\-.\u4e00-\u9fff]+', '_', title)[:60] + '.pdf')
+        c = canvas.Canvas(str(fn), pagesize=A4)
+        w, h = A4
+        # 尽量用中文字体
+        font_path = None
+        for cand in ['C:/Windows/Fonts/msyh.ttc', 'C:/Windows/Fonts/simhei.ttf',
+                     'C:/Windows/Fonts/simsun.ttc']:
+            if os.path.exists(cand):
+                font_path = cand
+                break
+        if font_path:
+            try:
+                pdfmetrics.registerFont(TTFont('cn', font_path))
+                c.setFont('cn', 11)
+            except Exception:
+                c.setFont('Helvetica', 11)
+        else:
+            c.setFont('Helvetica', 11)
+        y = h - 50
+        c.drawString(40, y, title[:60])
+        y -= 24
+        for line in _html_to_plain_text(html).split('\n'):
+            line = line.strip()
+            if not line:
+                y -= 8
+                continue
+            # 简单换行
+            while len(line) > 0:
+                chunk = line[:48]
+                line = line[48:]
+                if y < 50:
+                    c.showPage()
+                    y = h - 50
+                c.drawString(40, y, chunk)
+                y -= 16
+            y -= 4
+        c.save()
+        return send_file(str(fn), as_attachment=True, download_name=fn.name)
+    except ImportError:
+        return jsonify(dict(ok=False, message='缺少 reportlab，请先 pip install reportlab')), 500
+    except Exception as e:
+        return jsonify(dict(ok=False, message=str(e))), 400
+
+
+# ── 学习工具：出题 / 深入了解 ──
+@app.route('/api/action/quiz', methods=['POST'])
+def api_action_quiz():
+    """AI 出题考试。"""
+    try:
+        body = request.get_json(force=True)
+        source_type = body.get('source_type', 'video')
+        tid = _uuid.uuid4().hex
+        TASKS[tid] = dict(status='running', message='AI 正在出题...', result=None, error=None)
+
+        def _work():
+            try:
+                sys.path.insert(0, str(BASE_DIR))
+                from services.quiz_generator import generate_quiz
+                kw = dict(
+                    source_type=source_type,
+                    bvid=body.get('bvid', ''),
+                    kb_file_path=body.get('kb_file_path', ''),
+                    kb_file_content=body.get('kb_file_content', ''),
+                    question_count=int(body.get('question_count') or 5),
+                    difficulty=body.get('difficulty', 'medium'),
+                    question_type=body.get('question_type', 'mixed'),
+                    style=body.get('style', 'standard'),
+                    custom_prompt=body.get('custom_prompt', ''),
+                )
+                res = _run_coro(generate_quiz(**kw))
+                if res.get('success'):
+                    TASKS[tid]['status'] = 'done'
+                    TASKS[tid]['result'] = dict(content=res.get('quiz_content', ''),
+                                                path=res.get('saved_path', ''),
+                                                title=res.get('source_title', ''))
+                else:
+                    TASKS[tid]['status'] = 'error'
+                    TASKS[tid]['error'] = res.get('error', '出题失败')
+            except Exception as e:
+                TASKS[tid]['status'] = 'error'
+                TASKS[tid]['error'] = str(e)
+
+        threading.Thread(target=_work, daemon=True).start()
+        return jsonify(dict(ok=True, task_id=tid, message='已启动出题'))
+    except Exception as e:
+        return jsonify(dict(ok=False, message=str(e))), 400
+
+
+@app.route('/api/action/deep-dive', methods=['POST'])
+def api_action_deep_dive():
+    """AI 深入了解 / 深度学习。"""
+    try:
+        body = request.get_json(force=True)
+        topic = (body.get('topic') or '').strip()
+        if not topic:
+            return jsonify(dict(ok=False, message='请输入想了解的主题')), 400
+        tid = _uuid.uuid4().hex
+        TASKS[tid] = dict(status='running', message='AI 正在深入学习...', result=None, error=None)
+
+        def _work():
+            try:
+                sys.path.insert(0, str(BASE_DIR))
+                from services.deep_dive import run_deep_dive
+                res = _run_coro(run_deep_dive(
+                    topic=topic, mode=body.get('mode', 'search'),
+                    video_count=int(body.get('video_count') or 10),
+                    additional_context=body.get('context', '')))
+                if res.get('success'):
+                    TASKS[tid]['status'] = 'done'
+                    TASKS[tid]['result'] = dict(report=res.get('report', ''),
+                                                path=res.get('saved_path', ''))
+                else:
+                    TASKS[tid]['status'] = 'error'
+                    TASKS[tid]['error'] = res.get('error', '深入了解失败')
+            except Exception as e:
+                TASKS[tid]['status'] = 'error'
+                TASKS[tid]['error'] = str(e)
+
+        threading.Thread(target=_work, daemon=True).start()
+        return jsonify(dict(ok=True, task_id=tid, message='已启动深入了解'))
+    except Exception as e:
+        return jsonify(dict(ok=False, message=str(e))), 400
+
+
+@app.route('/api/action/task')
+def api_action_task():
+    """轮询长任务状态。"""
+    tid = request.args.get('id', '')
+    t = TASKS.get(tid)
+    if not t:
+        return jsonify(dict(status='notfound'))
+    return jsonify(t)
+
+
+# ── 自定义知识管理 CRUD ──
+def _custom_paths():
+    try:
+        from services.knowledge_tutor import KNOWLEDGE_BASE_DIR
+    except Exception:
+        from pathlib import Path as _P
+        KNOWLEDGE_BASE_DIR = _P(BASE_DIR) / 'KnowledgeBase'
+    return KNOWLEDGE_BASE_DIR / '自定义知识', BASE_DIR / 'knowledge_metadata.json'
+
+
+def _custom_init():
+    cdir, _ = _custom_paths()
+    cdir.mkdir(parents=True, exist_ok=True)
+    return cdir
+
+
+def _custom_sanitize(name):
+    return _re.sub(r'[\\/:*?"<>|\n\r]+', '_', name).strip()[:80] or 'untitled'
+
+
+def _custom_meta():
+    _, mpath = _custom_paths()
+    if mpath.exists():
+        try:
+            meta = _json.loads(mpath.read_text(encoding='utf-8'))
+        except Exception:
+            meta = {}
+    else:
+        meta = {}
+    meta.setdefault('file_index', {})
+    meta.setdefault('categories', {})
+    meta['file_index'].setdefault('自定义知识', [])
+    meta['categories'].setdefault('自定义知识', {})
+    return meta, mpath
+
+
+def _custom_find(bvid, title):
+    cdir = _custom_init()
+    fn = f"[{bvid}] - {_custom_sanitize(title)}.md"
+    fp = cdir / fn
+    if not fp.exists():
+        for f in cdir.iterdir():
+            if f.is_file() and bvid in f.name:
+                return f
+        return None
+    return fp
+
+
+@app.route('/api/kb/custom-list')
+def api_kb_custom_list():
+    try:
+        cdir = _custom_init()
+        meta, _ = _custom_meta()
+        out = []
+        for e in meta['file_index'].get('自定义知识', []):
+            bvid = e.get('bvid', '')
+            title = e.get('title', '无标题')
+            fp = _custom_find(bvid, title)
+            if not fp:
+                continue
+            out.append(dict(bvid=bvid, title=title, added=e.get('added', ''),
+                            category=e.get('category', '自定义知识'),
+                            size_kb=round(fp.stat().st_size / 1024, 1)))
+        return jsonify(dict(ok=True, entries=out))
+    except Exception as e:
+        return jsonify(dict(ok=False, message=str(e))), 400
+
+
+@app.route('/api/kb/custom-get', methods=['POST'])
+def api_kb_custom_get():
+    try:
+        body = request.get_json(force=True)
+        fp = _custom_find(body.get('bvid', ''), body.get('title', ''))
+        if not fp:
+            return jsonify(dict(ok=False, message='文件不存在')), 404
+        return jsonify(dict(ok=True, content=fp.read_text(encoding='utf-8', errors='replace'),
+                            filename=fp.name))
+    except Exception as e:
+        return jsonify(dict(ok=False, message=str(e))), 400
+
+
+@app.route('/api/kb/custom-add', methods=['POST'])
+def api_kb_custom_add():
+    try:
+        body = request.get_json(force=True)
+        title = (body.get('title') or '').strip()
+        content = (body.get('content') or '').strip()
+        category = (body.get('category') or '自定义知识').strip() or '自定义知识'
+        if not title:
+            return jsonify(dict(ok=False, message='标题不能为空')), 400
+        if len(content) < 10:
+            return jsonify(dict(ok=False, message='内容至少 10 字')), 400
+        cdir = _custom_init()
+        import hashlib as _hl
+        bvid = 'custom_' + _hl.md5(title.encode()).hexdigest()[:8]
+        now = _dt.now().isoformat()
+        fp = cdir / f"[{bvid}] - {_custom_sanitize(title)}.md"
+        full = (f"# 📝 {title}\n\n【信息】\n- 标题: {title}\n- 分类: {category}\n"
+                f"- 创建时间: {now}\n\n---\n\n## 内容\n\n{content}\n")
+        fp.write_text(full, encoding='utf-8')
+        meta, mpath = _custom_meta()
+        lst = [x for x in meta['file_index']['自定义知识'] if x.get('bvid') != bvid]
+        lst.append(dict(bvid=bvid, title=title, category=category, added=now))
+        meta['file_index']['自定义知识'] = lst
+        meta['last_updated'] = now
+        mpath.write_text(_json.dumps(meta, ensure_ascii=False, indent=2), encoding='utf-8')
+        return jsonify(dict(ok=True, bvid=bvid, title=title, message='已新增自定义知识'))
+    except Exception as e:
+        return jsonify(dict(ok=False, message=str(e))), 400
+
+
+@app.route('/api/kb/custom-update', methods=['POST'])
+def api_kb_custom_update():
+    try:
+        body = request.get_json(force=True)
+        bvid = body.get('bvid', '')
+        title = (body.get('title') or '').strip()
+        content = (body.get('content') or '').strip()
+        category = (body.get('category') or '自定义知识').strip() or '自定义知识'
+        if not bvid or not title:
+            return jsonify(dict(ok=False, message='缺少参数')), 400
+        fp = _custom_find(bvid, title)
+        if not fp:
+            return jsonify(dict(ok=False, message='文件不存在')), 404
+        now = _dt.now().isoformat()
+        full = (f"# 📝 {title}\n\n【信息】\n- 标题: {title}\n- 分类: {category}\n"
+                f"- 更新时间: {now}\n\n---\n\n## 内容\n\n{content}\n")
+        fp.write_text(full, encoding='utf-8')
+        meta, mpath = _custom_meta()
+        lst = [x for x in meta['file_index']['自定义知识'] if x.get('bvid') != bvid]
+        lst.append(dict(bvid=bvid, title=title, category=category, added=now))
+        meta['file_index']['自定义知识'] = lst
+        meta['last_updated'] = now
+        mpath.write_text(_json.dumps(meta, ensure_ascii=False, indent=2), encoding='utf-8')
+        return jsonify(dict(ok=True, message='已更新'))
+    except Exception as e:
+        return jsonify(dict(ok=False, message=str(e))), 400
+
+
+@app.route('/api/kb/custom-delete', methods=['POST'])
+def api_kb_custom_delete():
+    try:
+        body = request.get_json(force=True)
+        bvid = body.get('bvid', '')
+        fp = _custom_find(bvid, body.get('title', ''))
+        if fp and fp.exists():
+            fp.unlink()
+        meta, mpath = _custom_meta()
+        meta['file_index']['自定义知识'] = [
+            x for x in meta['file_index']['自定义知识'] if x.get('bvid') != bvid]
+        meta['last_updated'] = _dt.now().isoformat()
+        mpath.write_text(_json.dumps(meta, ensure_ascii=False, indent=2), encoding='utf-8')
+        return jsonify(dict(ok=True, message='已删除'))
+    except Exception as e:
+        return jsonify(dict(ok=False, message=str(e))), 400
+
+
+@app.route('/api/kb/custom-search', methods=['POST'])
+def api_kb_custom_search():
+    try:
+        body = request.get_json(force=True)
+        q = (body.get('q') or '').strip().lower()
+        if not q:
+            return api_kb_custom_list()
+        cdir = _custom_init()
+        out = []
+        for f in cdir.glob('*.md'):
+            txt = f.read_text(encoding='utf-8', errors='replace')
+            if q in txt.lower():
+                mh = _re.search(r'^#\s+(.*)$', txt, _re.M)
+                out.append(dict(filename=f.name, title=mh.group(1) if mh else f.name,
+                                size_kb=round(f.stat().st_size / 1024, 1)))
+        return jsonify(dict(ok=True, entries=out))
+    except Exception as e:
+        return jsonify(dict(ok=False, message=str(e))), 400
+
+
+@app.route('/api/platform/probe', methods=['POST'])
+def api_platform_probe():
+    """多平台视频链接识别与归一化（借鉴 BiliNote 平台识别机制）。"""
+    try:
+        body = request.get_json(force=True)
+        url = (body.get('url') or body.get('bvid') or '').strip()
+        if not url:
+            return jsonify(dict(ok=False, message='请输入视频链接 / BV号')), 400
+        from services.platform_adapter import fetch_platform_metadata
+        cfg = read_json(CONFIG_FILE, {})
+        result = fetch_platform_metadata(url, cfg=cfg)
+        return jsonify(result), (200 if result.get('ok') else 400)
     except Exception as e:
         return jsonify(dict(ok=False, message=str(e))), 400
 
@@ -3287,6 +4036,7 @@ def api_kb_tutor_chat():
 
         def _run():
             nonlocal result, error
+            loop = None
             try:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
@@ -3318,9 +4068,11 @@ def api_kb_tutor_chat():
                             tutor.chat_about_file(full_paths, message, history)
                         )
                     result = dict(mode='chat', reply=reply)
-                loop.close()
             except Exception as e:
                 error = str(e)
+            finally:
+                if loop is not None and not loop.is_closed():
+                    loop.close()
 
         t = threading.Thread(target=_run, daemon=True)
         t.start()
@@ -3497,9 +4249,12 @@ def _disclaimer_html():
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
 <title>免责声明 — B站 AI 管理系统</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;background:#f7f7f7;color:#0d0d0d;display:flex;align-items:center;justify-content:center;min-height:100vh;-webkit-font-smoothing:antialiased}
+body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;background:#f7f7f7;color:#0d0d0d;display:flex;align-items:center;justify-content:center;min-height:100vh;-webkit-font-smoothing:antialiased}
 .card{background:#fff;border:1px solid #e6e6e6;border-radius:16px;padding:40px 36px;max-width:480px;width:90%;text-align:center;box-shadow:0 4px 24px rgba(0,0,0,.06)}
 .card .icon{font-size:36px;margin-bottom:16px}
 .card h2{color:#D14343;font-size:20px;font-weight:600;margin-bottom:8px;letter-spacing:-.3px}
@@ -3564,9 +4319,12 @@ def _setup_html():
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
 <title>首次设置 · 管理面板</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;background:#f7f7f7;color:#0d0d0d;display:flex;align-items:center;justify-content:center;min-height:100vh;-webkit-font-smoothing:antialiased}
+body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;background:#f7f7f7;color:#0d0d0d;display:flex;align-items:center;justify-content:center;min-height:100vh;-webkit-font-smoothing:antialiased}
 .card{background:#fff;border:1px solid #e6e6e6;border-radius:16px;padding:40px 36px;max-width:420px;width:90%;text-align:center;box-shadow:0 4px 24px rgba(0,0,0,.06)}
 .card .icon{font-size:36px;margin-bottom:16px}
 .card h2{color:#0d0d0d;font-size:20px;font-weight:600;margin-bottom:6px;letter-spacing:-.3px}
@@ -3627,9 +4385,12 @@ def _login_html():
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
 <title>登录 · 管理面板</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;background:#f7f7f7;color:#0d0d0d;display:flex;align-items:center;justify-content:center;min-height:100vh;-webkit-font-smoothing:antialiased}
+body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;background:#f7f7f7;color:#0d0d0d;display:flex;align-items:center;justify-content:center;min-height:100vh;-webkit-font-smoothing:antialiased}
 .card{background:#fff;border:1px solid #e6e6e6;border-radius:16px;padding:40px 36px;max-width:400px;width:90%;text-align:center;box-shadow:0 4px 24px rgba(0,0,0,.06)}
 .card .icon{font-size:36px;margin-bottom:16px}
 .card h2{color:#0d0d0d;font-size:20px;font-weight:600;margin-bottom:6px;letter-spacing:-.3px}
@@ -3764,7 +4525,7 @@ def _check_auth():
 
     # 1. 先检查免责声明
     if not session.get('disclaimer_agreed'):
-        if request.endpoint in ('disclaimer_page', 'api_disclaimer_confirm', 'static'):
+        if request.endpoint in ('disclaimer_page', 'api_disclaimer_confirm', 'static', 'app_icon'):
             return None
         if request.path.startswith('/api/disclaimer'):
             return None
@@ -3777,7 +4538,7 @@ def _check_auth():
     web_cfg = config.get('web', {})
     has_credentials = bool(web_cfg.get('username')) and bool(web_cfg.get('password'))
     if not has_credentials:
-        allowed = ('setup_page', 'api_auth_setup', 'api_auth_logout', 'static')
+        allowed = ('setup_page', 'api_auth_setup', 'api_auth_logout', 'static', 'app_icon')
         if request.endpoint in allowed:
             return None
         if request.path in ('/setup', '/api/auth/setup', '/api/auth/logout'):
@@ -3787,7 +4548,7 @@ def _check_auth():
     # 3. 检查登录状态
     if session.get('panel_authenticated'):
         return None
-    allowed = ('login_page', 'api_auth_login', 'api_auth_setup', 'api_auth_logout', 'static')
+    allowed = ('login_page', 'api_auth_login', 'api_auth_setup', 'api_auth_logout', 'static', 'app_icon')
     if request.endpoint in allowed:
         return None
     if request.path in ('/login', '/api/auth/login', '/api/auth/logout', '/api/auth/status'):
@@ -3804,7 +4565,10 @@ def main():
 
     # ── 免责声明确认（从bat启动时BILI_DISCLAIMER_SKIP=1可跳过）──
     if not os.getenv('BILI_DISCLAIMER_SKIP'):
-        _disclaimer_confirm_terminal()
+        if sys.stdin.isatty():
+            _disclaimer_confirm_terminal()
+        else:
+            print("[Disclaimer] 非交互环境，自动确认免责声明。", flush=True)
     # 终端已确认免责声明，直接标记 session 跳过网页端再次确认
     with app.test_request_context():
         session['disclaimer_agreed'] = True

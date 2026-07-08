@@ -5,6 +5,13 @@
     "model_brain": "gpt-4.1-mini",
     "model_vision": "gpt-4.1-mini"
   },
+  "model_presets": {
+    "gpt4o": {"chat": "gpt-4o", "vision": "gpt-4o", "fast": "gpt-4o-mini", "base_url": "https://api.openai.com/v1"},
+    "claude": {"chat": "claude-sonnet-4-20250514", "vision": "claude-sonnet-4-20250514", "fast": "claude-haiku-3-5-20250514", "base_url": "https://api.anthropic.com/v1"},
+    "gemini": {"chat": "gemini-2.5-pro", "vision": "gemini-2.5-pro", "fast": "gemini-2.5-flash", "base_url": "https://generativelanguage.googleapis.com/v1beta"},
+    "deepseek": {"chat": "deepseek-chat", "vision": "deepseek-chat", "fast": "deepseek-chat", "base_url": "https://api.deepseek.com/v1"}
+  },
+  "active_preset": "",
   "models": {
     "chat": "gpt-4.1-mini",
     "vision": "gpt-4.1-mini",
@@ -68,7 +75,8 @@
     "frame_count": 12,
     "download_interest_threshold": 7.0,
     "download_dir": "",
-    "delete_video_after_understand": true
+    "delete_video_after_understand": true,
+    "quality": "best"
   },
   "reply_safety": {
     "enabled": true,
@@ -180,6 +188,63 @@
     "min_score": 7.5,
     "folder_name": "highlights"
   },
+  "chapter_lock": {
+    "enabled": true,
+    "min_duration_minutes": 15,
+    "model": "auto",
+    "max_chapters_per_video": 12,
+    "chapter_strategy": "ai_split"
+  },
+  "mindmap": {
+    "enabled": true,
+    "auto_generate": true,
+    "output_dir": "Data/MindMaps/",
+    "theme": "default",
+    "max_depth": 3,
+    "inline_assets": false,
+    "include_images": true
+  },
+  "export": {
+    "formats": ["markdown", "mindmap"],
+    "auto_export_on_save": true
+  },
+  "note_style": {
+    "enabled": true,
+    "active_style": "balanced",
+    "styles": {
+      "academic": {"name": "学术严谨", "prompt_suffix": "请使用学术论文风格，引用原文数据，标注时间戳。", "output_language": "zh-CN"},
+      "conversational": {"name": "口语化", "prompt_suffix": "请用通俗易懂的口语化表达，像朋友聊天一样解释概念。", "output_language": "zh-CN"},
+      "key_points": {"name": "重点提取", "prompt_suffix": "只提取核心观点和关键数据，忽略铺垫和废话，用 bullet points。", "output_language": "zh-CN"},
+      "balanced": {"name": "平衡模式", "prompt_suffix": "结构清晰、重点突出、适当保留细节。", "output_language": "zh-CN"}
+    }
+  },
+  "rag_qa": {
+    "enabled": false,
+    "model": "auto",
+    "max_context_chunks": 5,
+    "enable_function_calling": true,
+    "sources": ["knowledge_base", "single_video"]
+  },
+  "version_history": {
+    "enabled": false,
+    "max_versions": 5,
+    "diff_on_regenerate": true
+  },
+  "platform_adapter": {
+    "enabled": true,
+    "ui_platforms": ["bilibili", "youtube", "douyin", "kuaishou", "web", "local"],
+    "supported": ["bilibili", "youtube", "douyin", "kuaishou", "web", "local"],
+    "prefer_platform_subtitles": true,
+    "subtitle_langs": ["zh-Hans", "zh", "zh-CN", "en"],
+    "download_format": "bv*+ba/best/best",
+    "proxy": "",
+    "allow_web_local_files": false
+  },
+  "browser_extension": {
+    "enabled": false,
+    "port": 9527,
+    "subtitle_direct_capture": true
+  },
   "active_chat": {
     "enabled": true,
     "prob_initiate": 0.06,
@@ -224,5 +289,9 @@
     "aversion_auto_blacklist_threshold": 3,
     "aversion_score_block_threshold": 0.7,
     "aversion_score_warn_threshold": 0.4
+  },
+  "system": {
+    "quiet_mode": false,
+    "smart_token_mode": false
   }
 }

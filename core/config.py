@@ -8,12 +8,13 @@ import sys
 import json
 import hashlib, base64, secrets
 from colorama import Fore, Style
-from utils.display import mask_secret
 from utils.storage import get_backup_dir
+from utils.display import mask_secret
 
 # ===== 路径常量 =====
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_DIR = os.path.join(BASE_DIR, "Data")
+_DATA_DIR_OVERRIDE = os.getenv("BILI_ACCOUNT_DATA_DIR", "").strip()
+DATA_DIR = os.path.join(BASE_DIR, _DATA_DIR_OVERRIDE) if _DATA_DIR_OVERRIDE else os.path.join(BASE_DIR, "Data")
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 BOT_LOCK_FILE = os.path.join(DATA_DIR, "bot.lock")
 BACKUP_DIR = get_backup_dir()
@@ -34,6 +35,19 @@ KNOWLEDGE_BASE_DIR = os.path.join(BASE_DIR, "KnowledgeBase")
 HIGHLIGHTS_DIR = os.path.join(BASE_DIR, "highlights")
 
 os.makedirs(DATA_DIR, exist_ok=True)
+
+# ===== 知识库目录解析 =====
+# 支持通过 config.json 的 knowledge_base_dir / knowledge.base_dir 自定义知识库目录，
+# 未配置时回退到默认的 BASE_DIR/KnowledgeBase。
+def resolve_knowledge_base_dir(cfg=None):
+    """从配置解析知识库目录；未配置回退默认 KnowledgeBase。"""
+    if cfg is None:
+        cfg = config
+    if cfg and isinstance(cfg, dict):
+        kb = cfg.get("knowledge_base_dir") or cfg.get("knowledge", {}).get("base_dir")
+        if kb:
+            return os.path.join(BASE_DIR, kb) if not os.path.isabs(kb) else kb
+    return os.path.join(BASE_DIR, "KnowledgeBase")
 
 # ===== 敏感词加密 =====
 CIPHER_KEY_FILE = os.path.join(BASE_DIR, ".cipher_key")
@@ -78,6 +92,49 @@ def _cipher_decrypt(ciphertext: str, key: bytes = None) -> str:
 
 os.makedirs(KNOWLEDGE_BASE_DIR, exist_ok=True)
 
+# ===== 厂商预设（内置官方 OpenAI 兼容格式）=====
+# 默认就是 OpenAI 兼容（/v1/chat/completions），各厂商填入其官方 base_url 与默认模型名。
+# 选了预设 = 自动填好 Base URL + 思考/视觉/快速模型；API Key 仍需用户自己填。
+# base_url / 模型名均来自各厂商官方文档（2026-07 核实）。
+PROVIDER_PRESETS = {
+    "openai": {
+        "name": "OpenAI 兼容 (自定义/其他)",
+        "chat": "gpt-4o", "vision": "gpt-4o", "fast": "gpt-4o-mini",
+        "base_url": "https://api.openai.com/v1", "format": "openai",
+        "note": "通用 OpenAI 兼容格式，适用于任何兼容 /v1/chat/completions 的服务（本地 Ollama、vLLM、第三方中转等）。",
+    },
+    "deepseek": {
+        "name": "DeepSeek 官网",
+        "chat": "deepseek-v4-flash", "vision": "deepseek-v4-flash", "fast": "deepseek-v4-flash",
+        "base_url": "https://api.deepseek.com/v1", "format": "openai",
+        "note": "DeepSeek 官方 API。base_url 用 https://api.deepseek.com 或 https://api.deepseek.com/v1 均可（v1 与模型版本无关）。默认 deepseek-v4-flash（便宜快）；要更强推理用 deepseek-v4-pro；开启思考模式传 thinking=true。⚠️ deepseek-chat/deepseek-reasoner 将于 2026/07/24 弃用，请尽快切到 v4 系列。DeepSeek 暂无独立视觉模型，视觉/图片任务可能不支持。",
+    },
+    "qwen": {
+        "name": "阿里云百炼 (通义千问 Qwen)",
+        "chat": "qwen-plus", "vision": "qwen-vl-max", "fast": "qwen-turbo",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "format": "openai",
+        "note": "百炼 DashScope OpenAI 兼容端点。视觉模型可用 qwen-vl-max / qwen2.5-vl-72b-instruct；长文本用 qwen-long。",
+    },
+    "volcengine": {
+        "name": "火山方舟 (豆包 Doubao)",
+        "chat": "doubao-seed-1.6-250615", "vision": "doubao-vision-pro-250615", "fast": "doubao-seed-1.6-flash",
+        "base_url": "https://ark.cn-beijing.volcesengine.com/api/v3", "format": "openai",
+        "note": "火山方舟 Ark OpenAI 兼容端点；model 填你的推理接入点 ID（或豆包模型 ID，如 doubao-seed-1.6-250615）。",
+    },
+    "moonshot": {
+        "name": "Moonshot (Kimi)",
+        "chat": "moonshot-v1-8k", "vision": "moonshot-v1-8k", "fast": "moonshot-v1-8k",
+        "base_url": "https://api.moonshot.cn/v1", "format": "openai",
+        "note": "Kimi 开放平台，OpenAI 兼容。",
+    },
+    "zhipu": {
+        "name": "智谱 AI (GLM)",
+        "chat": "glm-4-plus", "vision": "glm-4v-plus", "fast": "glm-4-flash",
+        "base_url": "https://open.bigmodel.cn/api/paas/v4", "format": "openai",
+        "note": "智谱 BigModel OpenAI 兼容端点。",
+    },
+}
+
 # ===== 默认配置模板 =====
 DEFAULT_CONFIG = {
     "api": {
@@ -89,6 +146,8 @@ DEFAULT_CONFIG = {
         "vision_api_key": "",
         "vision_base_url": ""
     },
+    "model_presets": PROVIDER_PRESETS,
+    "active_preset": "",
     "interaction": {
         "coin_threshold": 8.0, "fav_threshold": 8.5, "interest_threshold": 6.5,
         "learn_min_score": 6.0, "learn_min_duration_seconds": 60,
@@ -105,7 +164,7 @@ DEFAULT_CONFIG = {
         "round_interval_min": 60, "round_interval_max": 180,
         "video_interval_min": 1, "video_interval_max": 5
     },
-    "persona": {"active_persona": "默认人格", "prompt_name": "AI小助手"},
+    "persona": {"active_persona": "默认人格", "prompt_name": "AI小助手", "self_description": ""},
     "mood": {
         "default_mood": "平静", "mood_volatility": 1.0,
         "random_enabled": False, "random_interval_minutes": 5,
@@ -114,7 +173,9 @@ DEFAULT_CONFIG = {
     "video": {
         "mode": "smart", "max_duration_seconds": 900, "frame_count": 12,
         "download_interest_threshold": 7.0, "download_dir": "",
-        "delete_video_after_understand": True, "filter_mode": "cover_and_title"
+        "delete_video_after_understand": True, "filter_mode": "cover_and_title",
+        "frame_anchor_mode": "bilinote",
+        "quality": "best"  # 下载画质: best=自动最高/1080p/720p/480p/360p
     },
     "vision": {
         "cover_enabled": True, "frames_enabled": True, "comment_images_enabled": True,
@@ -214,6 +275,54 @@ DEFAULT_CONFIG = {
         "prob_trigger": 0.3, "cooldown_minutes": 120
     },
     "dry_goods": {"enabled": False, "min_score": 7.5, "folder_name": "highlights"},
+    "chapter_lock": {
+        "enabled": True,
+        "min_duration_minutes": 15,
+        "model": "auto",
+        "max_chapters_per_video": 12,
+        "chapter_strategy": "ai_split"
+    },
+        "mindmap": {
+            "enabled": True,
+            "auto_generate": True,
+            "output_dir": "MindMaps/",
+            "theme": "default",
+            "max_depth": 3,
+            "inline_assets": False,
+            "include_images": True,
+            "prompt": ""
+        },
+    "document_export": {
+        "enabled": True,
+        "folder_name": "Word",
+        "output_dir": "Word/",
+        "formats": ["docx"],
+        "prompt": ""
+    },
+    "export": {"formats": ["markdown", "mindmap"], "auto_export_on_save": True},
+    "note_style": {
+        "enabled": True,
+        "active_style": "balanced",
+        "styles": {
+            "academic": {"name": "学术严谨", "prompt_suffix": "请使用学术论文风格，引用原文数据，标注时间戳。", "output_language": "zh-CN"},
+            "conversational": {"name": "口语化", "prompt_suffix": "请用通俗易懂的口语化表达，像朋友聊天一样解释概念。", "output_language": "zh-CN"},
+            "key_points": {"name": "重点提取", "prompt_suffix": "只提取核心观点和关键数据，忽略铺垫和废话，用 bullet points。", "output_language": "zh-CN"},
+            "balanced": {"name": "平衡模式", "prompt_suffix": "结构清晰、重点突出、适当保留细节。", "output_language": "zh-CN"}
+        }
+    },
+    "rag_qa": {"enabled": False, "model": "auto", "max_context_chunks": 5, "enable_function_calling": True, "sources": ["knowledge_base", "single_video"]},
+    "version_history": {"enabled": False, "max_versions": 5, "diff_on_regenerate": True},
+    "platform_adapter": {
+        "enabled": True,
+        "ui_platforms": ["bilibili", "youtube", "douyin", "kuaishou", "web", "local"],
+        "supported": ["bilibili", "youtube", "douyin", "kuaishou", "web", "local"],
+        "prefer_platform_subtitles": True,
+        "subtitle_langs": ["zh-Hans", "zh", "zh-CN", "en"],
+        "download_format": "bv*+ba/best/best",
+        "proxy": "",
+        "allow_web_local_files": False,
+    },
+    "browser_extension": {"enabled": False, "port": 9527, "subtitle_direct_capture": True},
     "ai_subtitle_verify": {"enabled": True, "knowledge_review_interval": 10, "knowledge_review_sample_size": 3},
     "cooldown": {
         "startup_cooldown_min": 5, "startup_cooldown_max": 10,
@@ -234,6 +343,24 @@ DEFAULT_CONFIG = {
 }
 
 
+def normalize_config(cfg):
+    """归一化旧字段，避免不同入口读写的 API 配置字段漂移。"""
+    if not isinstance(cfg, dict):
+        cfg = {}
+    api_cfg = cfg.setdefault("api", {})
+    if isinstance(api_cfg, dict):
+        legacy_pairs = {
+            "api_key": "unified_api_key",
+            "base_url": "unified_base_url",
+            "api_base": "unified_base_url",
+            "model": "model_brain",
+        }
+        for old_key, new_key in legacy_pairs.items():
+            if not api_cfg.get(new_key) and api_cfg.get(old_key):
+                api_cfg[new_key] = api_cfg.get(old_key)
+    return cfg
+
+
 # ===== 配置加载/保存 =====
 def load_config():
     """加载配置文件，合并默认值，解密敏感词"""
@@ -241,6 +368,7 @@ def load_config():
         try:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 cfg = json.load(f)
+            cfg = normalize_config(cfg)
             for key in DEFAULT_CONFIG:
                 if key not in cfg:
                     cfg[key] = DEFAULT_CONFIG[key]
@@ -264,6 +392,7 @@ def load_config():
 def save_config(cfg):
     """保存配置文件，加密敏感词（原子写入防崩溃损坏）"""
     try:
+        cfg = normalize_config(cfg)
         # 加密 blocked_keywords 再存盘
         kw_list = cfg.get("reply_safety", {}).get("blocked_keywords", [])
         if kw_list and not all(k.startswith(("enc:", "===")) or len(k) < 3 for k in kw_list):
@@ -275,6 +404,10 @@ def save_config(cfg):
         # 存完后解密回内存，保持内存中明文
         if kw_list:
             cfg["reply_safety"]["blocked_keywords"] = kw_list
+        # 知识库目录可能随配置变化，重新解析（供 core.config 动态访问者使用）
+        global KNOWLEDGE_BASE_DIR
+        KNOWLEDGE_BASE_DIR = resolve_knowledge_base_dir(cfg)
+        os.makedirs(KNOWLEDGE_BASE_DIR, exist_ok=True)
         return True
     except Exception as e:
         print(f"{Fore.RED}[ERROR] 保存配置文件失败: {e}{Style.RESET_ALL}")
@@ -299,8 +432,8 @@ def load_json_file(path, default):
         try:
             with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[WARN] 加载 JSON 文件失败: {path} - {e}", flush=True)
     return default.copy() if isinstance(default, dict) else default
 
 
@@ -312,12 +445,18 @@ def save_json_file(path, data):
             json.dump(data, f, ensure_ascii=False, indent=2)
         os.replace(tmp, path)
         return True
-    except Exception:
+    except Exception as e:
+        print(f"[WARN] 保存 JSON 文件失败: {path} - {e}", flush=True)
         return False
 
 
 # 加载当前配置（模块导入时自动加载）
 config = load_config()
+
+# 根据配置解析知识库目录（支持 knowledge_base_dir / knowledge.base_dir 自定义），
+# 覆盖上面的默认回退值，使所有 `from core.config import KNOWLEDGE_BASE_DIR` 获取到正确路径。
+KNOWLEDGE_BASE_DIR = resolve_knowledge_base_dir(config)
+os.makedirs(KNOWLEDGE_BASE_DIR, exist_ok=True)
 
 # ===== 派生配置变量（供其他模块导入） =====
 # [FIX] 改为 __getattr__ 动态属性，确保用户通过菜单修改配置后实时生效。
@@ -403,7 +542,7 @@ __all__ = (list(_CONFIG_PATHS.keys()) +
             "BOT_DIARY_FILE", "SELF_EVOLUTION_FILE", "AGENT_SKILL_LOG_FILE",
             "RUNTIME_STATE_FILE", "KNOWLEDGE_BASE_DIR", "HIGHLIGHTS_DIR",
             "CIPHER_KEY_FILE", "DEFAULT_CONFIG", "config",
-            "load_config", "save_config", "get_bot_name",
+           "normalize_config", "load_config", "save_config", "get_bot_name",
             "get_config_or_env", "mask_secret", "load_json_file",
             "save_json_file", "log"])
 
