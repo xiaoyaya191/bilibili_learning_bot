@@ -2,7 +2,7 @@
 
 > **B站 AI 学习互动机器人** — 自动刷视频、学知识、评论互动、自我进化  
 > 版本: 3.0.1 | License: MIT  
-> 项目介绍以及使用文档: https://bot1.bxya.top/
+> 项目介绍以及使用文档: https://bot.bxya.top/
 
 
 ---
