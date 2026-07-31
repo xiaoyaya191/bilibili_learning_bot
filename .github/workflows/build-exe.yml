@@ -1,0 +1,51 @@
+name: Build EXE
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install pyinstaller
+          pip install bilibili-api-python==17.4.1
+          pip install openai==2.33.0
+          pip install httpx==0.28.1
+          pip install colorama==0.4.6
+          pip install qrcode==8.2
+          pip install qrcode-terminal==0.8
+          pip install Pillow==12.1.0
+          pip install Flask==3.1.2
+          pip install flask-cors==6.0.2
+          pip install requests==2.32.5
+
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller --onedir --name bilibili_bot --collect-all bilibili-api-python --add-data "config.json;." --hidden-import qrcode_terminal --hidden-import qrcode web_panel.py
+
+      - name: Create release package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/package
+          Copy-Item "dist/bilibili_bot/*" -Destination "dist/package/" -Recurse
+          Copy-Item "config.json" -Destination "dist/package/config.json"
+          New-Item -ItemType Directory -Force -Path "dist/package/Data"
+          Compress-Archive -Path "dist/package/*" -DestinationPath "bilibili_bot.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bilibili_bot
+          path: bilibili_bot.zip
