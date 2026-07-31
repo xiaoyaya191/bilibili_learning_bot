@@ -31,12 +31,6 @@ jobs:
           pip install flask-cors==6.0.2
           pip install requests==2.32.5
 
-      - name: Prepare Data dir
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path Data
-          Copy-Item config.json Data/config.json -ErrorAction SilentlyContinue
-
       - name: Build with PyInstaller
         run: |
           pyinstaller --onedir --name bilibili_bot --collect-all bilibili_api --add-data "Data;Data" --hidden-import qrcode_terminal web_panel.py
@@ -47,7 +41,8 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist/package
           Copy-Item "dist/bilibili_bot/*" -Destination "dist/package/" -Recurse
           New-Item -ItemType Directory -Force -Path "dist/package/Data"
-          Copy-Item "config.json" -Destination "dist/package/Data/config.json"
+          Copy-Item "Data/config.json" -Destination "dist/package/Data/config.json"
+          Copy-Item "Data/config.example.json" -Destination "dist/package/Data/config.example.json" -ErrorAction SilentlyContinue
           Compress-Archive -Path "dist/package/*" -DestinationPath "bilibili_bot.zip"
 
       - name: Upload artifact
