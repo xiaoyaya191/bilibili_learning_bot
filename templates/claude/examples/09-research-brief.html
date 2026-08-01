@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Research Brief Reference</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@100;200;300;400;500;600;700;800&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+<style>
+:root{--bg:#fff;--text:#0d0d0d;--muted:#6b6b6b;--card:#fafafa;--border:#e6e2dd;--accent:#d97757;--accent-bg:rgba(217,119,87,.08)}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,"Microsoft YaHei",sans-serif;line-height:1.7}.page{max-width:1180px;margin:0 auto;padding:58px 28px}.top{display:grid;grid-template-columns:1.1fr .9fr;gap:42px;align-items:end;padding:44px 0 50px;border-bottom:1px solid var(--border)}.tag{display:inline-block;font-size:11px;font-weight:500;color:var(--accent);background:var(--accent-bg);border-radius:20px;padding:5px 14px;letter-spacing:1px}h1{font-size:clamp(42px,6vw,74px);line-height:1.04;font-weight:200;margin:18px 0 0}h2{font-size:30px;font-weight:300;margin:0 0 22px}.summary{color:var(--muted);font-size:17px}.section{padding:44px 0;border-bottom:1px solid var(--border)}.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}.card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:24px}.card i{color:var(--accent);width:22px;height:22px}.card h3{font-size:17px;font-weight:500;margin:16px 0 8px}.card p{margin:0;color:var(--muted)}table{width:100%;border-collapse:separate;border-spacing:0;border:1px solid var(--border);border-radius:10px;overflow:hidden}th,td{text-align:left;padding:15px 18px;border-bottom:1px solid var(--border);vertical-align:top}th{font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:1px;color:var(--muted);background:var(--card)}td{font-size:15px}.risk{display:grid;grid-template-columns:1fr 1fr;gap:18px}.list{list-style:none;margin:0;padding:0}.list li{padding:13px 0;border-bottom:1px solid var(--border)}.num{color:var(--accent);font-weight:500;margin-right:12px}.footer{text-align:center;padding:62px 0}.footer h2{font-size:44px;font-weight:200}@media(max-width:820px){.top,.cards,.risk{grid-template-columns:1fr}.page{padding:36px 18px}th,td{padding:12px}}
+</style>
+</head>
+<body>
+<main class="page">
+<section class="top">
+  <div><span class="tag">DEEP RESEARCH</span><h1>证据链优先的深研报告结构</h1></div>
+  <p class="summary">用于“深研计划”的参考页：先给范围和结论，再给证据、分歧、局限和下一轮验证项。</p>
+</section>
+<section class="section">
+  <h2>研究问题</h2>
+  <div class="cards">
+    <div class="card"><i data-lucide="scan-search"></i><h3>范围</h3><p>明确本轮资料覆盖什么，不覆盖什么。</p></div>
+    <div class="card"><i data-lucide="file-text"></i><h3>证据</h3><p>每个关键结论都要能追溯到来源。</p></div>
+    <div class="card"><i data-lucide="triangle-alert"></i><h3>局限</h3><p>把事实、推断和观点分开呈现。</p></div>
+  </div>
+</section>
+<section class="section">
+  <h2>证据表</h2>
+  <table>
+    <thead><tr><th>主张</th><th>支持来源</th><th>依据摘要</th><th>可信度</th></tr></thead>
+    <tbody>
+      <tr><td>结论 A</td><td>来源标题 / BV 号</td><td>用一句话说明证据如何支持主张。</td><td>高</td></tr>
+      <tr><td>结论 B</td><td>来源标题 / URL</td><td>资料不足时明确写出不足原因。</td><td>中</td></tr>
+    </tbody>
+  </table>
+</section>
+<section class="section risk">
+  <div>
+    <h2>分歧与反例</h2>
+    <ul class="list">
+      <li><span class="num">01</span>不同来源对同一概念的定义差异。</li>
+      <li><span class="num">02</span>数据不足或样本偏差。</li>
+      <li><span class="num">03</span>需要后续验证的推断。</li>
+    </ul>
+  </div>
+  <div class="card"><i data-lucide="route"></i><h3>下一轮研究</h3><p>把待验证问题转换成下一轮检索关键词、实验步骤或阅读路线。</p></div>
+</section>
+<section class="footer">
+  <span class="tag">SUMMARY</span>
+  <h2>结论必须能追溯</h2>
+  <p class="summary">深研页面的价值来自证据结构，而不是更长的文字。</p>
+</section>
+</main>
+<script>lucide.createIcons({attrs:{'stroke-width':1.5}})</script>
+</body>
+</html>

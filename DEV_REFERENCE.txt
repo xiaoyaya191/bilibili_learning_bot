@@ -1,0 +1,59 @@
+bilibili_learning_bot v3.1.5 — 开发者索引
+更新时间: 2026-07-11
+
+本文件是入口索引，不再维护重复的完整文件清单。详细规则请阅读 dev_refs/ 和 REFACTOR_PLAN.md。
+
+一、推荐阅读顺序
+1. README.md
+   面向用户：安装、配置、启动、主要功能。
+2. REFACTOR_PLAN.md
+   面向维护者：当前结构收敛状态、后续拆分路线和开发约定。
+3. dev_refs/08-architecture-flows.md
+   项目结构、核心流程、CLI/Web/服务层关系。
+4. dev_refs/07-service-template.md
+   新增服务模块模板和 CLI/Web 集成步骤。
+5. templates/claude/README.md
+   网页生成设计系统、提示词和参考页面。
+
+二、关键入口
+- CLI: main.py -> cli/app.py
+- Web: web_panel.py + web_panel.html
+- 配置: core/config.py
+- B站 API: api/
+- 自动学习核心: brain/
+- 可复用服务: services/
+- 知识库: knowledge/ + KnowledgeBase/
+- 网页生成: services/html_renderer.py + templates/claude/
+- 测试: tests/
+
+三、重要开发约定
+1. 新功能优先写成 services/ 下的可复用函数或类。
+2. CLI 和 Web 只做参数收集、任务调度和结果展示。
+3. AI 调用优先使用 services._services_ai.call_ai()。
+4. 生成网页必须使用 services.html_renderer，不要复制完整 HTML/CSS/JS 模板。
+5. 重要 JSON 写入使用原子写入。
+6. 新增功能应补测试；无法完整测试时至少提供可运行冒烟验证。
+
+四、统一网页生成
+公共模块: services/html_renderer.py
+- load_claude_prompt(): 读取统一 Claude 网页提示词。
+- render_slide_html(fragment, title=...): 包装 AI 生成的 ppt-container 片段。
+- markdown_to_reading_html(markdown, title): 报告阅读页。
+- markdown_to_slides_html(markdown, title): 报告幻灯片页。
+
+提示词单一事实源:
+- templates/claude/prompts/claude-style-prompt.md
+
+参考页面:
+- templates/claude/examples/08-learning-summary.html
+- templates/claude/examples/09-research-brief.html
+
+五、验证命令
+python -m compileall -q api brain cli core knowledge ob_bridge persona security services utils xingye_bot main.py web_panel.py start_cli.py
+python -m pytest -q
+
+六、当前已知重构方向
+- 拆分 web_panel.py 为 Blueprint。
+- 拆分 cli/app.py 的菜单层和服务调用层。
+- 抽取统一导出管理器 services/export_manager.py。
+- 为 deep_research、html_renderer 和 Web 长任务调度补测试。
