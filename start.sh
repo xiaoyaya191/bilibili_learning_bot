@@ -17,7 +17,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
 echo -e "${CYAN}============================================${NC}"
-echo -e "${CYAN}   bilibili_learning_bot v3.0.2${NC}"
+echo -e "${CYAN}   bilibili_learning_bot v3.0.0${NC}"
 echo -e "${CYAN}============================================${NC}"
 echo ""
 

@@ -51,7 +51,6 @@ model/
 tests/
 *.md
 !README.md
-!CHANGELOG.md
 *.bat
 *.sh
 *.ps1

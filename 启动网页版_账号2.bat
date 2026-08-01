@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-title bilibili_learning_bot - Web Panel [Account1:8080]
+title bilibili_learning_bot - Web Panel [Account2:8081]
 cd /d "%~dp0"
 
 echo.
@@ -17,5 +17,5 @@ echo.
 echo ========================================
 echo.
 
-python web_panel.py
+python web_panel.py --port 8081
 pause

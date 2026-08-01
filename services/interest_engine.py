@@ -7,8 +7,8 @@ services/interest_engine.py — 智能兴趣引擎 v2.0
 - 方案C: 多维度评分(相关性/新颖度/多样性/质量) + 动态阈值
 - 方案D: 混合渐进，默认 = "推荐"组合
 
-配置驱动: 用户数据目录/Data/interest_engine.json
-向后兼容: 旧的 interests.json 自动迁移
+配置驱动: Data/interest_engine.json
+向后兼容: 旧的 Data/interests.json 自动迁移
 """
 import json
 import os
@@ -17,7 +17,6 @@ from datetime import datetime
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple, Set
 from colorama import Fore, Style
-from core.user_data import DATA_DIR
 
 # ── 默认配置 ──
 DEFAULT_ENGINE_CONFIG = {
@@ -27,9 +26,7 @@ DEFAULT_ENGINE_CONFIG = {
     "synonym_map": {},          # {keyword: [syn1, syn2, ...]}
     "settings": {
         "proxy_mode": "smart",       # "simple" | "smart" | "ai_only" | "watch_all"
-        # Interests should be strict by default. Exploration is opt-in from
-        # the Interest page instead of silently admitting unrelated videos.
-        "serendipity_rate": 0.0,
+        "serendipity_rate": 0.1,     # 10% 随机探索
         "auto_sync_psycho": True,    # 从PsychoProfile自动同步
         "use_synonyms": True,        # 启用同义词扩展
         "ai_suggest": True,          # AI定期建议关键词
@@ -88,7 +85,10 @@ FUZZY_RELATED = {
     "数据库": ["mysql", "postgresql", "mongodb", "redis", "sql"],
 }
 
-ENGINE_CONFIG_FILE = str(DATA_DIR / "interest_engine.json")
+ENGINE_CONFIG_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "Data", "interest_engine.json"
+)
 
 # ── 日志辅助 ──
 def _elog(msg: str, tag: str = "ENGINE"):
@@ -161,7 +161,7 @@ class InterestEngine:
                 target[k] = v
 
     def _migrate_from_legacy(self) -> Optional[dict]:
-        """从旧 interests.json 迁移"""
+        """从旧 Data/interests.json 迁移"""
         legacy_path = os.path.join(
             os.path.dirname(self.config_file), "interests.json"
         )
@@ -222,7 +222,7 @@ class InterestEngine:
 
     @property
     def serendipity_rate(self) -> float:
-        return self.settings.get("serendipity_rate", 0.0)
+        return self.settings.get("serendipity_rate", 0.1)
 
     @property
     def history_tags(self) -> List[str]:

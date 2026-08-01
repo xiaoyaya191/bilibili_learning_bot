@@ -1,9 +1,11 @@
+version: "3.9"
+
 services:
   bilibili-bot:
     build:
       context: .
       dockerfile: Dockerfile
-    image: bilibili_learning_bot:3.1.2
+    image: bilibili_learning_bot:3.0.0
     container_name: bilibili_learning_bot
     restart: unless-stopped
     ports:
@@ -29,7 +31,7 @@ services:
         max-size: "10m"
         max-file: "3"
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/')"]
       interval: 30s
       timeout: 10s
       start_period: 15s

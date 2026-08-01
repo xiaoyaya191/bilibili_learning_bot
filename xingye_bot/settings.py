@@ -9,8 +9,7 @@ from typing import Any
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-from core.user_data import DATA_DIR
-
+DATA_DIR = ROOT_DIR / "Data"
 CONFIG_FILE = DATA_DIR / "config.json"
 
 
@@ -58,17 +57,9 @@ class BotSettings:
     video_mode: str = "smart"
     video_max_duration_seconds: int = 900
     video_frame_count: int = 12
-    frame_note_mode: str = "visual_note"
-    visual_note_frame_interval: int = 6
-    candidate_pool_size: int = 20
-    visual_note_max_frames: int = 240
-    visual_note_grid_cols: int = 3
-    visual_note_grid_rows: int = 3
-    custom_video_prompt: str = "请完整覆盖视频全过程，像教程/部署文档一样逐步讲解，保留关键细节、命令、参数、配置和截图，不要省略步骤。"
     video_download_interest_threshold: float = 7.0
     video_download_dir: str = ""
     video_delete_after_understand: bool = True
-    video_quality: str = "best"  # 下载画质: best/1080p/720p/480p/360p
     ai_marker: str = "（内容由AI生成并由AI回复）"
     enable_web_search: bool = True
     enable_proactive: bool = True
@@ -217,7 +208,7 @@ def load_settings() -> BotSettings:
         video_mode = "smart"
 
     return BotSettings(
-        api_key=(lambda _v: "" if _v == "[已隐藏]" else _v)(os.getenv("BILI_AI_API_KEY") or api.get("unified_api_key", "")),
+        api_key=os.getenv("BILI_AI_API_KEY") or api.get("unified_api_key", ""),
         base_url=os.getenv("BILI_AI_BASE_URL") or api.get("unified_base_url") or "https://api.openai.com/v1",
         models={
             "chat": os.getenv("BILI_AI_MODEL_CHAT") or models["chat"],
@@ -245,23 +236,9 @@ def load_settings() -> BotSettings:
         video_mode=video_mode,
         video_max_duration_seconds=_int(video.get("max_duration_seconds"), 900, 1, 24 * 3600),
         video_frame_count=_int(video.get("frame_count"), 12, 1, 60),
-        frame_note_mode=str(video.get("frame_note_mode", "visual_note")).strip().lower()
-        if str(video.get("frame_note_mode", "visual_note")).strip().lower() in {"visual_note", "classic"}
-        else "visual_note",
-        visual_note_frame_interval=_int(video.get("visual_note_frame_interval"), 6, 1, 60),
-        candidate_pool_size=_int(video.get("candidate_pool_size"), 20, 5, 100),
-        visual_note_max_frames=_int(video.get("visual_note_max_frames"), 240, 9, 360),
-        visual_note_grid_cols=_int(video.get("visual_note_grid_cols"), 3, 1, 4),
-        visual_note_grid_rows=_int(video.get("visual_note_grid_rows"), 3, 1, 4),
-        custom_video_prompt=str(video.get("custom_video_prompt", "")).strip(),
         video_download_interest_threshold=_float(video.get("download_interest_threshold"), 7.0, 0.0, 10.0),
         video_download_dir=str(video.get("download_dir", "")).strip(),
         video_delete_after_understand=_bool(video.get("delete_video_after_understand"), True),
-        video_quality=(
-            str(video.get("quality", "best")).strip().lower()
-            if str(video.get("quality", "best")).strip().lower() in {"best", "1080p", "720p", "480p", "360p"}
-            else "best"
-        ),
         ai_marker=os.getenv("BILI_AI_MARKER") or str(behavior.get("ai_marker", "（内容由AI生成并由AI回复）")),
         enable_web_search=_bool(automation.get("enable_web_search"), True),
         enable_proactive=_bool(automation.get("enable_proactive"), True),
@@ -296,22 +273,14 @@ def public_config(settings: BotSettings) -> dict[str, Any]:
             "favorite": settings.allow_favorite,
             "dynamic": settings.allow_dynamic,
         },
-            "video": {
-                "mode": settings.video_mode,
-                "max_duration_seconds": settings.video_max_duration_seconds,
-                "frame_count": settings.video_frame_count,
-                "frame_note_mode": settings.frame_note_mode,
-                "visual_note_frame_interval": settings.visual_note_frame_interval,
-                "candidate_pool_size": settings.candidate_pool_size,
-                "visual_note_max_frames": settings.visual_note_max_frames,
-                "visual_note_grid_cols": settings.visual_note_grid_cols,
-                "visual_note_grid_rows": settings.visual_note_grid_rows,
-                "custom_video_prompt": settings.custom_video_prompt,
-                "download_interest_threshold": settings.video_download_interest_threshold,
-                "download_dir": settings.video_download_dir,
-                "delete_video_after_understand": settings.video_delete_after_understand,
-                "quality": settings.video_quality,
-            },
+        "video": {
+            "mode": settings.video_mode,
+            "max_duration_seconds": settings.video_max_duration_seconds,
+            "frame_count": settings.video_frame_count,
+            "download_interest_threshold": settings.video_download_interest_threshold,
+            "download_dir": settings.video_download_dir,
+            "delete_video_after_understand": settings.video_delete_after_understand,
+        },
         "proactive": {
             "video_count": settings.proactive_video_count,
             "comment_count": settings.proactive_comment_count,

@@ -7,7 +7,6 @@ from core.globals import *
 from utils.display import log
 from utils.helpers import sanitize_filename
 from brain.video_analysis import _scan_knowledge_base_md_files
-from knowledge.classifier import KnowledgeBaseClassifier
 
 async def organize_knowledge_base():
     """扫描并整理知识库：将非3层目录结构的文件AI自动归位。
@@ -129,7 +128,7 @@ async def organize_knowledge_base():
         print(f"  {Fore.CYAN}[整理] 选择 (1-4, 回车=1): {Style.RESET_ALL}", end="")
 
         import sys
-        (sys.stdout.flush() if sys.stdout else None)
+        sys.stdout.flush()
         ch = input().strip()
 
         if ch == "2":
@@ -145,11 +144,12 @@ async def organize_knowledge_base():
     async def ai_review(action_desc, detail=""):
         """AI审查"""
         try:
-            raw = await _call_ai_with_retry_static(
+            resp = await _call_ai_with_retry_static(
                 model=MODEL_BRAIN,
                 messages=[{"role": "user", "content": f"你是安全审查助手。评估此操作是否合理:{action_desc}。详情:{detail[:300]}。只返回JSON: {{\"safe\":true/false,\"reason\":\"理由\"}}"}],
                 request_timeout=20
             )
+            raw = resp.choices[0].message.content
             s = raw.find("{")
             e = raw.rfind("}")
             if s >= 0 and e >= s:
@@ -314,3 +314,4 @@ async def organize_knowledge_base():
 
 # ── [N] 自定义知识管理（增删改查）───────────────────────────────────────
 CUSTOM_KNOWLEDGE_DIR = os.path.join(KNOWLEDGE_BASE_DIR, "自定义知识")
+

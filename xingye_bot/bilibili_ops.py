@@ -96,7 +96,7 @@ class BilibiliAccount:
 
         cookies = _load_cookies()
         if not cookies:
-            raise RuntimeError(f"未找到登录 Cookie: {COOKIE_FILE}")
+            raise RuntimeError("未找到 Data/bilibili_cookies.json")
         return Credential(
             sessdata=cookies.get("SESSDATA"),
             bili_jct=cookies.get("bili_jct"),
@@ -185,33 +185,9 @@ class BilibiliAccount:
     ) -> dict[str, Any]:
         action = (action or "").strip().lower()
         payload = {"bvid": bvid, "action": action, "text": text}
-        # Commenting and video likes are intentionally source-disabled globally.
-        from core.platform_actions import public_commenting_enabled, video_liking_enabled
-        if action == "comment" and not public_commenting_enabled():
-            return {"executed": False, "reason": "评论功能已被全局安全策略禁用", "payload": payload}
-        if action == "like" and not video_liking_enabled():
-            return {"executed": False, "reason": "视频点赞功能已被全局安全策略禁用", "payload": payload}
         if dry_run:
             self._log(f"video.{action}.dry_run", True, str(payload)[:200])
             return {"executed": False, "reason": "dry_run 已开启", "payload": payload}
-
-        review_type = {"like": "video_like", "coin": "coin", "favorite": "favorite"}.get(action)
-        if review_type:
-            from services.like_review import ActionReviewInbox, requires_review
-            try:
-                review_config = json.loads((DATA_DIR / "config.json").read_text(encoding="utf-8"))
-            except Exception:
-                review_config = {}
-            if requires_review(review_config, review_type):
-                row = ActionReviewInbox(DATA_DIR).propose(
-                    review_type,
-                    f"对视频 {bvid} 执行{action}",
-                    text,
-                    payload={"bvid": bvid, "num": 1},
-                    dedupe_key=f"{review_type}:{bvid}",
-                )
-                return {"executed": False, "queued_for_review": True,
-                        "review_id": row.get("id") if row else None, "payload": payload}
 
         from bilibili_api import comment, favorite_list
         from bilibili_api.comment import CommentResourceType
@@ -263,7 +239,7 @@ class BilibiliAccount:
     async def recent_replies_to_me(self, limit: int = 20) -> list[dict[str, Any]]:
         cookies = _load_cookies()
         if not cookies:
-            raise RuntimeError(f"未找到登录 Cookie: {COOKIE_FILE}")
+            raise RuntimeError("未找到 Data/bilibili_cookies.json")
         headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://www.bilibili.com/"}
         async with httpx.AsyncClient(http2=True, headers=headers, cookies=cookies, timeout=20) as client:
             resp = await client.get(
@@ -280,9 +256,6 @@ class BilibiliAccount:
     async def send_comment_reply(self, oid: int, root: int, parent: int, text: str, dry_run: bool = True, allow_comment: bool = False) -> dict[str, Any]:
         text = _with_ai_marker(text)
         payload = {"oid": oid, "root": root, "parent": parent, "text": text}
-        from core.platform_actions import public_commenting_enabled
-        if not public_commenting_enabled():
-            return {"executed": False, "reason": "评论功能已被全局安全策略禁用", "payload": payload}
         if dry_run or not allow_comment:
             self._log("comment.reply.dry_run", True, str(payload)[:200])
             return {"executed": False, "reason": "dry_run 或 allow_comment 未开启", "payload": payload}

@@ -39,13 +39,12 @@ EXPOSE 8080
 
 # 健康检查
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/health')" || exit 1
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/')" || exit 1
 
 # 支持通过 BOT_MODE 切换启动模式：
 #   web    — Web 管理面板（默认）
 #   cli    — CLI 交互式菜单
 #   standby — 待机模式（后台监听）
-ENV WEB_PORT=8080
 ENV BOT_MODE=web
 
 CMD if [ "$BOT_MODE" = "cli" ]; then \

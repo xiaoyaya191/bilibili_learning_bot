@@ -1,8 +1,6 @@
 """brain/_brain_session.py — AgentBrain 会话管理 mixin (能量/评论/私信/弹幕/UP关注/登录)"""
 from brain._mixin_imports import *
 from api.throttle import _bili_throttle
-from core.platform_actions import public_commenting_enabled
-from core.time_policy import is_quiet_period
 
 class BrainSessionMixin:
     """能量恢复、评论检查、私信处理、弹幕互动、UP关注、登录初始化"""
@@ -36,8 +34,6 @@ class BrainSessionMixin:
         log(f"恢复完成！当前精力: {self.energy}%，准备继续工作！", "SUCCESS")
 
     async def check_and_handle_comments(self):
-        if not public_commenting_enabled():
-            return 0
         if not COMMENT_CHECK_ENABLED:
             return 0
         if not self.comment_mgr:
@@ -79,46 +75,6 @@ class BrainSessionMixin:
         finally:
             self.last_private_message_check = now
 
-    async def check_and_handle_mentions(self):
-        """Use the realtime monitor's complete @-reply flow while browsing videos.
-
-        The old normal-mode path only printed a notification and was never
-        reached by the main loop.  Sharing the monitor's persistent mention
-        state also keeps replies deduplicated across normal and monitor modes.
-        """
-        try:
-            from brain.monitor import MonitorBot, load_monitor_config
-            monitor_cfg = load_monitor_config()
-        except Exception as exc:
-            log(f"[Ntf] 读取 @我监听配置失败: {exc}", "DEBUG")
-            return 0
-
-        if not monitor_cfg.get("enabled", True) or not monitor_cfg.get("at_mentions_enabled", True):
-            return 0
-        if not self.comment_mgr or not self.bili:
-            return 0
-
-        now = datetime.now()
-        interval = max(30, int(monitor_cfg.get("comment_check_interval", 30)))
-        if self.last_mention_check and (now - self.last_mention_check).total_seconds() < interval:
-            return 0
-        self.last_mention_check = now
-
-        try:
-            if self._normal_mention_monitor is None:
-                self._normal_mention_monitor = MonitorBot()
-            watcher = self._normal_mention_monitor
-            watcher.cfg = monitor_cfg
-            watcher.bili = self.bili
-            watcher.uid = getattr(self.bili, "uid", 0)
-            watcher.comment_mgr = self.comment_mgr
-            watcher.private_msg_mgr = self.private_message_mgr
-            log("[Ntf] 正常刷视频模式：正在检查评论区 @我提醒...", "MENTION")
-            return await watcher._check_mentions()
-        except Exception as exc:
-            log(f"[Ntf] @我提醒处理失败: {exc}", "WARN")
-            return 0
-
     # ── 看完视频后检查通知 (@我/私信/自己评论) ──
     async def check_notifications_after_video(self):
         """每看完一个视频后检查通知：@提及 + 私信 + 自己视频评论。
@@ -138,13 +94,7 @@ class BrainSessionMixin:
         # ── 1. 检查 @通知 ──
         if PER_VIDEO_CHECK_AT_NOTIFICATIONS:
             try:
-                # The quick path only logged @ notifications. Use the monitor's
-                # complete reply path so a post-video check can actually respond.
-                saved_last = self.last_mention_check
-                self.last_mention_check = None
-                at_count = await self.check_and_handle_mentions()
-                if at_count == 0:
-                    self.last_mention_check = saved_last
+                at_count = await self._check_at_notifications_quick()
                 if at_count > 0:
                     log(f"[Ntf] @通知: 发现 {at_count} 条新@提及", "NOTIFY")
             except Exception as e:
@@ -252,47 +202,25 @@ class BrainSessionMixin:
 
     # ── 主动聊天 ──
     async def maybe_initiate_chat(self):
-        active_cfg = config.get("active_chat", {}) if isinstance(config, dict) else {}
-        if not active_cfg.get("enabled", ACTIVE_CHAT_ENABLED):
+        if not ACTIVE_CHAT_ENABLED:
             return
         if not PRIVATE_MESSAGE_ENABLED or not PRIVATE_MESSAGE_AUTO_REPLY:
             return
         if not self.private_message_mgr:
             return
-        if active_cfg.get("quiet_hours_enabled", True) and is_quiet_period(
-            datetime.now(),
-            active_cfg.get("quiet_start_hour", 22),
-            active_cfg.get("quiet_end_hour", 8),
-        ):
-            quiet_marker = datetime.now().strftime("%Y-%m-%d")
-            if getattr(self, "_active_chat_quiet_marker", "") != quiet_marker:
-                log(
-                    f"主动私信处于免打扰时段 "
-                    f"({active_cfg.get('quiet_start_hour', 22):02d}:00-"
-                    f"{active_cfg.get('quiet_end_hour', 8):02d}:00)，本时段不触发",
-                    "CHAT",
-                )
-                self._active_chat_quiet_marker = quiet_marker
-            return
-        max_per_session = int(active_cfg.get("max_initiate_per_session", ACTIVE_CHAT_MAX_PER_SESSION))
-        if self._active_chat_count >= max_per_session:
+        self._active_chat_count += 1
+        if self._active_chat_count > ACTIVE_CHAT_MAX_PER_SESSION:
             return
         elapsed = (datetime.now() - self._last_active_chat_at).total_seconds() / 60
-        cooldown = float(active_cfg.get("cooldown_minutes", ACTIVE_CHAT_COOLDOWN_MINUTES))
-        if elapsed < cooldown:
+        if elapsed < ACTIVE_CHAT_COOLDOWN_MINUTES:
             return
-        probability = float(active_cfg.get("prob_initiate", PROB_INITIATE_CHAT))
-        if random.random() >= probability:
+        if random.random() >= PROB_INITIATE_CHAT:
             return
         try:
             target = await self.private_message_mgr.get_chat_target(self.bili)
             if not target:
                 return
             target_uid = target.get("uid")
-            allowed_uids = {str(uid).strip() for uid in active_cfg.get("whitelist_uids", []) if str(uid).strip()}
-            if active_cfg.get("whitelist_enabled", False) and str(target_uid) not in allowed_uids:
-                log(f"主动私信跳过非白名单用户 UID:{target_uid}", "CHAT")
-                return
             target_name = target.get("name", str(target_uid))
             log(f"[MSG] 主动发起聊天 @{target_name}", "CHAT")
             await self._compose_active_chat(target_uid, target_name, target)
@@ -351,16 +279,9 @@ class BrainSessionMixin:
                 return
             await asyncio.sleep(human_reply_delay())
             result = await self.private_message_mgr.send_reply(target_uid, chat_text)
-            self._last_active_chat_at = datetime.now()
-            self._active_chat_count += 1
-            if isinstance(result, dict) and result.get("queued"):
-                log(f"[MSG] 主动私信建议已提交审核 @{target_name}: {chat_text[:60]}", "CHAT")
-                event_type = "active_chat_review"
-            else:
-                log(f"[MSG] 已主动发消息给 @{target_name}: {chat_text[:60]}", "CHAT")
-                event_type = "active_chat"
+            log(f"[MSG] 已主动发消息给 @{target_name}: {chat_text[:60]}", "CHAT")
             self.record_session_event(
-                event_type,
+                "active_chat",
                 target_uid=target_uid,
                 target_name=target_name,
                 content=chat_text[:120]
@@ -387,47 +308,6 @@ class BrainSessionMixin:
             self.daily_danmaku_sent = 0
             self.daily_danmaku_sent_date = today
 
-    async def _inspect_up_before_follow(self, up_uid: int, up_name: str, entry: dict) -> bool:
-        """Inspect a creator page before following instead of trusting one video."""
-        inspected_at = str(entry.get("profile_inspected_at") or "")
-        try:
-            recently_inspected = (datetime.now() - datetime.fromisoformat(inspected_at)).days < 7 if inspected_at else False
-        except (TypeError, ValueError):
-            recently_inspected = False
-        if recently_inspected and entry.get("profile_samples"):
-            return True
-        sample_limit = max(3, min(6, int(UP_FOLLOW_MAX_BROWSE or 3)))
-        log(f"[FOLLOW] 先查看 @{up_name} 主页的 {sample_limit} 条投稿，再决定是否关注...", "FOLLOW")
-        videos = await self.bili.get_up_videos(up_uid, limit=sample_limit)
-        if not videos:
-            log(f"[FOLLOW] @{up_name} 主页视频暂时无法读取，本次不关注", "WARN")
-            return False
-        keywords = " ".join(
-            f"{item.get('title', '')} {item.get('description', '')}" for item in videos
-        ).lower()
-        labels = []
-        for label, terms in (
-            ("AI / 科技博主", ("ai", "模型", "编程", "科技", "软件", "硬件", "代码")),
-            ("知识分享博主", ("教程", "科普", "学习", "知识", "课程", "解析")),
-            ("游戏内容创作者", ("游戏", "实况", "攻略", "电竞", "玩家")),
-            ("音乐分享博主", ("音乐", "翻唱", "歌曲", "演奏", "mv")),
-            ("生活 / 观点博主", ("生活", "日常", "访谈", "观点", "故事")),
-        ):
-            if any(term in keywords for term in terms):
-                labels.append(label)
-        profile_label = "、".join(labels[:2]) or "综合内容创作者"
-        entry["profile_label"] = profile_label
-        entry["profile_samples"] = [{
-            "bvid": item.get("bvid", ""), "title": item.get("title", "")[:120],
-            "description": item.get("description", "")[:180], "pic": item.get("pic", ""),
-            "play": item.get("play", 0),
-        } for item in videos]
-        entry["profile_inspected_at"] = datetime.now().isoformat()
-        entry["profile_inspection_count"] = int(entry.get("profile_inspection_count") or 0) + 1
-        self._save_memory()
-        log(f"[FOLLOW] @{up_name} 主页画像：{profile_label} | 已查看 {len(videos)} 条投稿", "FOLLOW")
-        return True
-
     async def maybe_follow_up(self, up_uid: int, up_name: str, score: float):
         if not UP_FOLLOW_ENABLED or not up_uid or not up_name:
             return False
@@ -443,8 +323,6 @@ class BrainSessionMixin:
         up_entry = self.memory.setdefault("known_ups", {}).get(up_name, {})
         if up_entry.get("followed"):
             return False
-        if not await self._inspect_up_before_follow(up_uid, up_name, up_entry):
-            return False
         views = up_entry.get("views", 0)
         avg_score = up_entry.get("avg_score", score)
         if not exceptional and views < UP_FOLLOW_MIN_IMPRESSIONS:
@@ -453,19 +331,6 @@ class BrainSessionMixin:
         impression_bonus = min(views / max(UP_FOLLOW_MIN_IMPRESSIONS, 1), 2.0)
         adjusted_prob = UP_FOLLOW_AUTO_PROB * score_factor * impression_bonus
         if not exceptional and random.random() >= adjusted_prob:
-            return False
-        from services.like_review import ActionReviewInbox, requires_review
-        if requires_review(config, "follow_up"):
-            ActionReviewInbox(DATA_DIR).propose(
-                "follow_up",
-                f"关注 UP 主 @{up_name}",
-                f"AI 根据观看记录建议关注，当前视频评分 {score}，累计观看 {views} 次。",
-                payload={"uid": int(up_uid)},
-                metadata={"up_name": up_name, "score": score, "views": views,
-                          "profile_label": up_entry.get("profile_label", "")},
-                dedupe_key=f"follow_up:{up_uid}",
-            )
-            log(f"关注 @{up_name} 的建议已进入 AI 行为审核", "INFO")
             return False
         try:
             avg_str = f", 均分:{avg_score:.1f}" if views else ""
@@ -562,23 +427,9 @@ class BrainSessionMixin:
 
     # ── [MSG] 弹幕互动 ──
     async def maybe_read_danmaku(self, bvid: str, force: bool = False):
-        danmaku_cfg = config.get("danmaku", {}) if isinstance(config, dict) else {}
-        workflow_cfg = config.get("learning_workflow", {}) if isinstance(config, dict) else {}
-        if not bvid:
+        if not DANMAKU_ENABLED or not bvid:
             return []
-        if not danmaku_cfg.get("enabled", True):
-            log("弹幕读取已在弹幕设置中关闭", "DANMAKU")
-            return []
-        if not workflow_cfg.get("read_danmaku", True):
-            log("弹幕读取已在学习流程中关闭", "DANMAKU")
-            return []
-        try:
-            read_prob = float(danmaku_cfg.get("read_prob", DANMAKU_READ_PROB))
-        except (TypeError, ValueError):
-            read_prob = 0.4
-        read_prob = max(0.0, min(1.0, read_prob))
-        if not force and random.random() >= read_prob:
-            log(f"按抽样规则跳过弹幕读取（概率 {read_prob:.0%}）", "DANMAKU")
+        if not force and random.random() >= DANMAKU_READ_PROB:
             return []
         try:
             log("[MSG] 正在读取弹幕...", "DANMAKU")
@@ -600,22 +451,12 @@ class BrainSessionMixin:
         return []
 
     async def maybe_like_danmaku(self, bvid: str, danmaku_list: list, cid: int = 0):
-        danmaku_cfg = config.get("danmaku", {}) if isinstance(config, dict) else {}
-        if not danmaku_cfg.get("enabled", True) or not danmaku_list:
+        if not DANMAKU_ENABLED or not danmaku_list:
             return False
-        try:
-            like_prob = float(danmaku_cfg.get("like_prob", DANMAKU_LIKE_PROB))
-        except (TypeError, ValueError):
-            like_prob = 0.15
-        like_prob = max(0.0, min(1.0, like_prob))
-        if random.random() >= like_prob:
+        if random.random() >= DANMAKU_LIKE_PROB:
             return False
-        try:
-            daily_limit = max(0, int(danmaku_cfg.get("max_daily_danmaku_likes", DANMAKU_MAX_DAILY_LIKES)))
-        except (TypeError, ValueError):
-            daily_limit = DANMAKU_MAX_DAILY_LIKES
         self._reset_daily_danmaku_likes()
-        if self.daily_danmaku_likes >= daily_limit:
+        if self.daily_danmaku_likes >= DANMAKU_MAX_DAILY_LIKES:
             return False
         if not cid:
             cid = self._last_danmaku_cids.get(bvid, 0)
@@ -631,7 +472,7 @@ class BrainSessionMixin:
             result = await self.bili.like_danmaku(dmid=dm_id_str, cid=cid, bvid=bvid)
             if result.get("code") == 0:
                 self.daily_danmaku_likes += 1
-                log(f"弹幕点赞成功！今日已赞 {self.daily_danmaku_likes}/{daily_limit}", "SUCCESS")
+                log(f"弹幕点赞成功！今日已赞 {self.daily_danmaku_likes}/{DANMAKU_MAX_DAILY_LIKES}", "SUCCESS")
                 return True
             else:
                 log(f"弹幕点赞未成功: {result.get('msg')}", "INFO")
@@ -640,22 +481,12 @@ class BrainSessionMixin:
         return False
 
     async def maybe_send_danmaku(self, bvid: str, title: str = "", subtitle_text: str = ""):
-        danmaku_cfg = config.get("danmaku", {}) if isinstance(config, dict) else {}
-        if not danmaku_cfg.get("enabled", True) or not bvid:
+        if not DANMAKU_ENABLED or not bvid:
             return False
-        try:
-            send_prob = float(danmaku_cfg.get("send_prob", DANMAKU_SEND_PROB))
-        except (TypeError, ValueError):
-            send_prob = 0.03
-        send_prob = max(0.0, min(1.0, send_prob))
-        if random.random() >= send_prob:
+        if random.random() >= DANMAKU_SEND_PROB:
             return False
-        try:
-            daily_limit = max(0, int(danmaku_cfg.get("max_daily_send", DANMAKU_MAX_DAILY_SEND)))
-        except (TypeError, ValueError):
-            daily_limit = DANMAKU_MAX_DAILY_SEND
         self._reset_daily_danmaku_sent()
-        if self.daily_danmaku_sent >= daily_limit:
+        if self.daily_danmaku_sent >= DANMAKU_MAX_DAILY_SEND:
             return False
         try:
             context = f"视频标题: {title}\n视频内容摘要: {subtitle_text[:200] if subtitle_text and '[未读取' not in subtitle_text else '未知'}"
@@ -672,23 +503,11 @@ class BrainSessionMixin:
             dm_text = resp.choices[0].message.content.strip()
             if not dm_text or len(dm_text) > 50:
                 return False
-            from services.like_review import ActionReviewInbox, requires_review
-            if requires_review(config, "send_danmaku"):
-                ActionReviewInbox(DATA_DIR).propose(
-                    "send_danmaku",
-                    f"向视频 {bvid} 发送弹幕",
-                    dm_text,
-                    payload={"bvid": bvid, "text": dm_text},
-                    metadata={"video_title": title},
-                    dedupe_key=f"send_danmaku:{bvid}:{dm_text}",
-                )
-                log("AI 弹幕建议已进入行为审核，等待用户决定", "INFO")
-                return False
             log(f"📤 发送弹幕: {dm_text}", "DANMAKU")
             result = await self.bili.send_danmaku(bvid, dm_text)
             if result.get("code") == 0:
                 self.daily_danmaku_sent += 1
-                log(f"弹幕发送成功！今日已发 {self.daily_danmaku_sent}/{daily_limit}", "SUCCESS")
+                log(f"弹幕发送成功！今日已发 {self.daily_danmaku_sent}/{DANMAKU_MAX_DAILY_SEND}", "SUCCESS")
                 self.record_session_event("send_danmaku", bvid=bvid, text=dm_text)
                 return True
             else:

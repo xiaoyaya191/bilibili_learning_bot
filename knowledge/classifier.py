@@ -6,25 +6,16 @@ import shutil
 from datetime import datetime
 from colorama import Fore, Style
 
-from core.config import config, KNOWLEDGE_BASE_DIR
-from core.user_data import USER_DATA_DIR
+from openai import OpenAI
+
+from core.config import config, KNOWLEDGE_BASE_DIR, BASE_DIR
+# 从 config 实时读取，避免 import * 缓存问题
+def _get_model_brain():
+    return config.get("api", {}).get("model_brain", "")
 from utils.helpers import sanitize_filename
-from brain.decision import decode_ai_mapping
 
-KB_METADATA_FILE = str(USER_DATA_DIR / "knowledge_metadata.json")
+KB_METADATA_FILE = os.path.join(BASE_DIR, "knowledge_metadata.json")
 from utils.display import log
-
-
-def _decode_ai_mapping(raw):
-    return decode_ai_mapping(raw, (
-        "selected_category", "reason", "is_new", "confidence",
-    ))
-
-# ── 统一 AI 调用（不再依赖 openai / xingye_bot） ──
-async def _ai_chat(messages, model="", timeout=15, temperature=0.7):
-    from services._services_ai import call_ai
-    return await call_ai(messages=messages, model=model, timeout=timeout,
-                         temperature=temperature, verbose=False)
 
 class KnowledgeBaseClassifier:
     """知识库分类器 - 智能分类系统"""
@@ -71,7 +62,7 @@ class KnowledgeBaseClassifier:
         traverse_tree(self.metadata.get("categories", {}))
         return all_cats
     
-    async def _find_best_category(self, content_title, subtitle_text, existing_categories):
+    def _find_best_category(self, content_title, subtitle_text, existing_categories):
         try:
             # 只提取顶层分类（让AI可以自由选择或新建）
             top_level_cats = set()
@@ -107,22 +98,49 @@ class KnowledgeBaseClassifier:
             }}
             """
             
-            raw = await _ai_chat(
+            client = OpenAI(api_key=config.get("api", {}).get("unified_api_key", ""), base_url=config.get("api", {}).get("unified_base_url", ""), timeout=120)
+            response = client.chat.completions.create(
+                model=_get_model_brain(),
                 messages=[
                     {"role": "system", "content": "你是一个专业的知识库分类专家。要大胆创建新分类，不要强行把不相关的内容塞进现有分类。"},
                     {"role": "user", "content": context}
-                ],
-                timeout=12,
+                ]
             )
-            raw = raw.strip()
+            
+            raw = response.choices[0].message.content.strip()
             if not raw:
                 raise ValueError("AI返回空内容")
-            result = _decode_ai_mapping(raw)
-            if result is None:
+            # [FIX] 多策略JSON提取（支持 markdown 代码块、非标准 JSON 等）
+            # 去掉 markdown 代码块
+            if "```" in raw:
+                import re as _re
+                code_match = _re.search(r"```(?:json)?\s*\n?(.*?)```", raw, _re.DOTALL)
+                if code_match:
+                    raw = code_match.group(1).strip()
+            start = raw.find("{")
+            if start >= 0:
+                # 嵌套匹配
+                depth = 0
+                match_end = -1
+                for i in range(start, len(raw)):
+                    if raw[i] == '{':
+                        depth += 1
+                    elif raw[i] == '}':
+                        depth -= 1
+                        if depth == 0:
+                            match_end = i
+                            break
+                if match_end < 0:
+                    end = raw.rfind("}")
+                    if end >= start:
+                        raw = raw[start:end+1]
+                else:
+                    raw = raw[start:match_end+1]
+            try:
+                result = json.loads(raw)
+            except json.JSONDecodeError:
                 # 修复常见JSON问题：未加引号的key、单引号、中文引号等
                 fixed = raw
-                if "{" not in fixed and re.search(r'\b(selected_category|reason|confidence|is_new)\s*:', fixed):
-                    fixed = "{" + fixed.strip().strip(",") + "}"
                 # 修复未加引号的key (如 selected_category: → "selected_category":)
                 fixed = re.sub(r'(?<=\{|,)\s*(\w+)\s*:', r'"\1":', fixed)
                 # 修复单引号值
@@ -133,9 +151,10 @@ class KnowledgeBaseClassifier:
                 # 修复布尔值
                 fixed = re.sub(r'\bTrue\b', 'true', fixed)
                 fixed = re.sub(r'\bFalse\b', 'false', fixed)
-                result = _decode_ai_mapping(fixed)
-                if result is None:
-                    raise ValueError("AI返回内容不含可用JSON对象")
+                try:
+                    result = json.loads(fixed)
+                except json.JSONDecodeError:
+                    raise
             return result
             
         except Exception as e:
@@ -206,7 +225,7 @@ class KnowledgeBaseClassifier:
         tree_lines = format_tree(self.metadata.get("categories", {}))
         return "\n".join(tree_lines) if tree_lines else "暂无分类"
     
-    async def classify_content(self, content_title, subtitle_text, bvid, topic_suggestion=None):
+    def classify_content(self, content_title, subtitle_text, bvid, topic_suggestion=None):
         log(f"开始智能分类: {content_title}", "KB")
         
         existing_categories = self._get_all_categories()
@@ -218,7 +237,7 @@ class KnowledgeBaseClassifier:
                     log(f"使用AI建议分类: {cat}", "KB")
                     return cat
         
-        ai_result = await self._find_best_category(content_title, subtitle_text, existing_categories)
+        ai_result = self._find_best_category(content_title, subtitle_text, existing_categories)
         
         selected_category = ai_result.get("selected_category", "未分类")
         is_new = ai_result.get("is_new", False)
@@ -439,7 +458,7 @@ class KnowledgeBaseClassifier:
         total_cats = len([p for p in file_index if file_index[p]])  # 只统计有文件的分类
         print(f"{Fore.YELLOW}总计: {total_files} 个文件分布在 {total_cats} 个分类中{Style.RESET_ALL}")
 
-    async def reclassify_uncategorized(self, max_per_run=5):
+    def reclassify_uncategorized(self, max_per_run=5):
         """[KB] 自动重分类"未分类"文件夹中的文件，返回 (成功数, 失败数)"""
         file_index = self.metadata.get("file_index", {})
         uncategorized = file_index.get("未分类", [])
@@ -460,7 +479,7 @@ class KnowledgeBaseClassifier:
 
             try:
                 # 用标题+空内容做AI分类（没有字幕文本时纯靠标题）
-                new_cat = await self._find_best_category(title, "", self._get_all_categories())
+                new_cat = self._find_best_category(title, "", self._get_all_categories())
                 selected = new_cat.get("selected_category", "未分类")
                 conf = new_cat.get("confidence", 0)
 
@@ -614,29 +633,54 @@ class KnowledgeBaseClassifier:
 }}
 
 注意：
-- file_assignments 必须包含所有{len(all_files)}个文件
+- file_assignments 必须包含所有{bvid}个文件
 - 路径必须恰好3层（用/分隔）
 - 只返回JSON，不要其他文字"""
 
         try:
-            raw = await _ai_chat(
+            client = OpenAI(api_key=config.get("api", {}).get("unified_api_key", ""), base_url=config.get("api", {}).get("unified_base_url", ""), timeout=180)
+            resp = client.chat.completions.create(
+                model=_get_model_brain(),
                 messages=[
                     {"role": "system", "content": "你是严谨的知识库架构师，只输出JSON，不输出任何其他内容。"},
                     {"role": "user", "content": prompt}
                 ],
-                timeout=180,
-                temperature=0.3,
+                temperature=0.3
             )
-            raw = raw.strip()
+            raw = resp.choices[0].message.content.strip()
         except Exception as e:
             log(f"[KB] AI整理分类树失败: {e}", "ERROR")
             return 0, len(all_files)
 
-        # Gateways sometimes prepend analysis or append a second object.  The
-        # shared decoder consumes only the first complete mapping in either case.
-        plan = decode_ai_mapping(raw, ("category_tree", "file_assignments"))
-        if not isinstance(plan, dict):
-            log("[KB] AI返回的分类方案不是可用JSON对象", "ERROR")
+        # 解析AI返回的JSON
+        plan = None
+        try:
+            if "```" in raw:
+                import re as _re
+                code_match = _re.search(r"```(?:json)?\s*\n?(.*?)```", raw, _re.DOTALL)
+                if code_match:
+                    raw = code_match.group(1).strip()
+            start = raw.find("{")
+            if start >= 0:
+                depth = 0
+                match_end = -1
+                for i in range(start, len(raw)):
+                    if raw[i] == '{':
+                        depth += 1
+                    elif raw[i] == '}':
+                        depth -= 1
+                        if depth == 0:
+                            match_end = i
+                            break
+                if match_end >= 0:
+                    raw = raw[start:match_end+1]
+                else:
+                    end = raw.rfind("}")
+                    if end >= start:
+                        raw = raw[start:end+1]
+            plan = json.loads(raw)
+        except json.JSONDecodeError as e:
+            log(f"[KB] AI返回JSON解析失败: {e}", "ERROR")
             return 0, len(all_files)
 
         assignments = plan.get("file_assignments", {})

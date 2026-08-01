@@ -2,7 +2,6 @@
 import asyncio
 import json
 import os
-import shutil
 import time
 import random
 import qrcode
@@ -103,18 +102,13 @@ async def login_bilibili():
     print("="*50)
 
     # 💾 保存高清二维码图片到独立 qr_codes 文件夹（方便管理，登录后自动删除）
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    base_dir = os.path.dirname(os.path.abspath(__file__))
     qr_dir = os.path.join(base_dir, "qr_codes")
     qr_path = os.path.join(qr_dir, "bilibili_login_qr.png")
-    targets = [(qr_dir, qr_path)]
-    gallery_path = None
-    is_android = os.path.isdir("/storage/emulated/0") and shutil.which("am")
-    if is_android:
-        gallery_dir = "/storage/emulated/0/Pictures"
-        gallery_path = os.path.join(gallery_dir, "bilibili_login_qr.png")
-        targets.append((gallery_dir, gallery_path))
-
-    for target_dir, target_path in targets:
+    # 也存到手机相册（Android 环境）
+    gallery_dir = "/storage/emulated/0/Pictures"
+    gallery_path = os.path.join(gallery_dir, "bilibili_login_qr.png")
+    for target_dir, target_path in [(qr_dir, qr_path), (gallery_dir, gallery_path)]:
         try:
             os.makedirs(target_dir, exist_ok=True)
             qr_png = qrcode.QRCode(
@@ -130,19 +124,18 @@ async def login_bilibili():
         except Exception as e:
             log(f"保存二维码到 {target_dir} 失败: {e}", "WARN")
 
-    # 📲 仅 Android/Termux 环境通知系统扫描图片（让相册 APP 能看到）
-    if gallery_path:
-        try:
-            import subprocess
-            subprocess.run([
-                "am", "broadcast",
-                "-a", "android.intent.action.MEDIA_SCANNER_SCAN_FILE",
-                "-d", f"file://{gallery_path}"
-            ], capture_output=True, timeout=10)
-        except Exception as e:
-            log(f'相册扫描通知失败: {e}', 'WARN')
+    # 📲 通知 Android 系统扫描图片（让相册 APP 能看到）
+    try:
+        import subprocess
+        subprocess.run([
+            "am", "broadcast",
+            "-a", "android.intent.action.MEDIA_SCANNER_SCAN_FILE",
+            "-d", f"file://{gallery_path}"
+        ], capture_output=True, timeout=10)
+    except Exception as e:
+        log(f'非预期异常: {e}', 'WARN')
 
-    if gallery_path and os.path.exists(gallery_path):
+    if os.path.exists(gallery_path):
         print(f"\n📸 二维码图片已保存到相册：")
         print(f"   📷 {gallery_path}")
         print(f"   → 打开手机「相册/图库」APP 即可看到，用 B站APP 扫码登录")
@@ -217,8 +210,7 @@ async def login_bilibili():
 
     # 🧹 登录成功后自动删除 qr_codes 文件夹中的二维码图片
     try:
-        from core.user_data import QR_CODES_DIR
-        qr_dir = str(QR_CODES_DIR)
+        qr_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qr_codes")
         if os.path.isdir(qr_dir):
             for fname in os.listdir(qr_dir):
                 fpath = os.path.join(qr_dir, fname)

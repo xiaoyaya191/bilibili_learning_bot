@@ -7,8 +7,7 @@ Contact the maintainers via private channels.
 
 ## Data Protection
 
-- API keys are stored in `%USERPROFILE%\BiliLearn\Data\config.json` by default (local only)
-- B站 cookies are stored in `%USERPROFILE%\BiliLearn\Data\bilibili_cookies.json` by default (local only)
-- Set `BILI_USER_DATA_DIR` before startup to use a different private-data root
+- API keys are stored in `Data/config.json` (local only)
+- B站 cookies are stored in `Data/bilibili_cookies.json` (local only)
 - Export backups mask sensitive data via `sanitize_config_for_export()`
 - Factory reset (`R` command) clears all local data including cookies/config/logs

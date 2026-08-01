@@ -4,31 +4,12 @@
 - 多页幻灯片，←→键盘翻页 + 底部导航点 + 触摸滑动
 - 粒子Canvas背景 + SVG噪点 + 渐变暗色主题
 - animate-item 级联入场动画
-- 支持多种配色主题: dark(默认), purple, cyan, claude_slides；旧 Claude 主题自动兼容到 claude_slides
+- 支持4种配色主题: dark(默认), purple, cyan, claude
 - Flask预览服务器：生成后本地预览，保存到指定路径（跨平台）
-- claude_slides: 基于 bilibili_learning_bot_slides.html 模板的完整动画系统
 """
-import os, re, time, json, sys, asyncio, webbrowser, socket, threading
+import os, re, time, json, asyncio, webbrowser, socket, threading
 import httpx
 from pathlib import Path
-
-
-def _safe_flush(stream) -> None:
-    """flush 兜底：windowed 冻结环境下 sys.stdout 可能为 None。"""
-    if stream is not None:
-        try:
-            stream.flush()
-        except (AttributeError, OSError, ValueError):
-            pass
-
-
-def _utf8_json_request(payload: dict) -> tuple[bytes, dict[str, str]]:
-    """Build a UTF-8 request for OpenAI-compatible gateways."""
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    return body, {
-        "Content-Type": "application/json; charset=utf-8",
-        "Content-Length": str(len(body)),
-    }
 
 # ── Flask 预览服务器（全局单例） ──
 _preview_server = None
@@ -61,9 +42,21 @@ THEMES = {
         "card_bg": "rgba(0,212,255,0.08)",
         "card_border": "rgba(0,212,255,0.3)",
     },
+    "claude": {
+        "name": "Claude 暖橙",
+        # 浅色暖灰背景 + 微妙径向渐变
+        "bg_start": "#f5f0e8", "bg_end": "#ebe5d9",
+        # 紫粉渐变主色（标题）
+        "primary": "#c77dff", "accent": "#f96",
+        # 功能色
+        "cyan": "#4dabf7", "purple": "#da77f2",
+        # 白色半透明卡片
+        "card_bg": "rgba(255,255,255,0.72)",
+        "card_border": "rgba(200,190,175,0.45)",
+    },
     "claude_slides": {
         "name": "Claude 幻灯片",
-        # 唯一 Claude 风格：bilibili_learning_bot_slides.html 的白/黑/灰+暖橙体系。
+        # 纯白背景 + 暖橙点缀 (参考 claude-style-slides.html)
         "bg_start": "#FFFFFF", "bg_end": "#F5F5F5",
         "primary": "#D97757", "accent": "#E8916A",
         "cyan": "#4dabf7", "purple": "#da77f2",
@@ -71,80 +64,6 @@ THEMES = {
         "card_border": "rgba(229,229,229,0.6)",
     },
 }
-
-# Every public selector has a concrete palette. Previously many choices in the
-# web picker silently fell back to ``dark``; keeping them here makes the saved
-# output deterministic as well as the prompt direction.
-THEMES.update({
-    "light": {"name":"极简白昼","bg_start":"#f8fafc","bg_end":"#e9edf2","primary":"#2563eb","accent":"#0f766e","cyan":"#0284c7","purple":"#7c3aed","card_bg":"rgba(255,255,255,.92)","card_border":"rgba(15,23,42,.12)"},
-    "slide": {"name":"幻灯片叙事","bg_start":"#111827","bg_end":"#0f172a","primary":"#f97316","accent":"#facc15","cyan":"#38bdf8","purple":"#a78bfa","card_bg":"rgba(30,41,59,.72)","card_border":"rgba(148,163,184,.25)"},
-    "card": {"name":"卡片画廊","bg_start":"#111827","bg_end":"#172554","primary":"#fb7185","accent":"#fbbf24","cyan":"#22d3ee","purple":"#c084fc","card_bg":"rgba(30,41,59,.82)","card_border":"rgba(251,113,133,.28)"},
-    "bento": {"name":"Bento 网格","bg_start":"#0f172a","bg_end":"#1e293b","primary":"#38bdf8","accent":"#a3e635","cyan":"#22d3ee","purple":"#818cf8","card_bg":"rgba(30,41,59,.88)","card_border":"rgba(148,163,184,.24)"},
-    "glass": {"name":"玻璃拟态","bg_start":"#172554","bg_end":"#312e81","primary":"#67e8f9","accent":"#f9a8d4","cyan":"#22d3ee","purple":"#c4b5fd","card_bg":"rgba(255,255,255,.12)","card_border":"rgba(255,255,255,.25)"},
-    "aurora": {"name":"极光渐变","bg_start":"#052e2b","bg_end":"#172554","primary":"#5eead4","accent":"#c4b5fd","cyan":"#67e8f9","purple":"#a78bfa","card_bg":"rgba(15,23,42,.62)","card_border":"rgba(94,234,212,.25)"},
-    "neobrutal": {"name":"新野蛮主义","bg_start":"#fef08a","bg_end":"#fca5a5","primary":"#111827","accent":"#2563eb","cyan":"#0891b2","purple":"#7c3aed","card_bg":"#ffffff","card_border":"#111827"},
-    "oled": {"name":"深色 OLED","bg_start":"#000000","bg_end":"#050505","primary":"#22d3ee","accent":"#a3e635","cyan":"#22d3ee","purple":"#c084fc","card_bg":"rgba(17,17,17,.92)","card_border":"rgba(163,230,53,.26)"},
-    "cyberpunk": {"name":"赛博朋克","bg_start":"#14001f","bg_end":"#05010d","primary":"#f472b6","accent":"#facc15","cyan":"#22d3ee","purple":"#c084fc","card_bg":"rgba(30,5,52,.86)","card_border":"rgba(244,114,182,.34)"},
-    "neumorphism": {"name":"新拟态","bg_start":"#dfe5ec","bg_end":"#cdd5df","primary":"#334155","accent":"#2563eb","cyan":"#0ea5e9","purple":"#7c3aed","card_bg":"#dfe5ec","card_border":"rgba(255,255,255,.7)"},
-    "liquid_glass": {"name":"液态玻璃","bg_start":"#0f172a","bg_end":"#164e63","primary":"#e0f2fe","accent":"#67e8f9","cyan":"#22d3ee","purple":"#c4b5fd","card_bg":"rgba(255,255,255,.13)","card_border":"rgba(255,255,255,.30)"},
-    "nostalgic": {"name":"复古主义","bg_start":"#1d2a3a","bg_end":"#17212b","primary":"#fbbf24","accent":"#fb7185","cyan":"#67e8f9","purple":"#a78bfa","card_bg":"#223047","card_border":"#fbbf24"},
-    "linear": {"name":"Linear 风格","bg_start":"#16122d","bg_end":"#111827","primary":"#a78bfa","accent":"#67e8f9","cyan":"#22d3ee","purple":"#a78bfa","card_bg":"rgba(22,18,45,.78)","card_border":"rgba(167,139,250,.30)"},
-    "gradient_new": {"name":"新变风","bg_start":"#3b0764","bg_end":"#0c4a6e","primary":"#f9a8d4","accent":"#fde68a","cyan":"#67e8f9","purple":"#c4b5fd","card_bg":"rgba(15,23,42,.58)","card_border":"rgba(255,255,255,.22)"},
-    "soft_pop": {"name":"柔和流行","bg_start":"#fff1f2","bg_end":"#e0f2fe","primary":"#db2777","accent":"#2563eb","cyan":"#0ea5e9","purple":"#8b5cf6","card_bg":"rgba(255,255,255,.88)","card_border":"rgba(219,39,119,.18)"},
-    "promptport": {"name":"PromptPort","bg_start":"#020617","bg_end":"#071a1a","primary":"#00e5a8","accent":"#67e8f9","cyan":"#22d3ee","purple":"#a78bfa","card_bg":"rgba(15,23,42,.84)","card_border":"rgba(0,229,168,.30)"},
-})
-
-STYLE_ART_DIRECTION = {
-    "dark":"深色研究界面，红金点缀和克制粒子；内容以章节和数据卡片组织。",
-    "light":"高可读的白昼编辑排版，深色正文、蓝绿强调、留白优先。",
-    "slide":"电影分镜式叙事，每页一个结论，前后承接明确。", "card":"高密度可扫描卡片画廊，卡片内有结论和依据。",
-    "bento":"不规则但对齐的 Bento 网格，突出一项主结论和多个辅助事实。", "glass":"半透明玻璃层次，只用少量发光边界。",
-    "aurora":"深色极光背景上的清晰信息层，背景不能降低正文对比度。", "neobrutal":"粗边框、硬阴影、强对比，但文字必须清晰可读。",
-    "oled":"纯黑阅读底板、低亮霓虹点缀，避免大面积白色。", "cyberpunk":"霓虹终端氛围，文字仍以内容优先，不做故障字遮挡。",
-    "neumorphism":"柔和浮雕控制台，边界和文字对比必须足够。", "liquid_glass":"高透明玻璃层次，信息块有明确轮廓。",
-    "nostalgic":"克制的复古 GUI 和等宽标签，不使用像素噪点干扰正文。", "linear":"精简开发者工具感，细边框与紫青点缀。",
-    "gradient_new":"鲜明但节制的潮流背景，正文区域必须稳定可读。", "soft_pop":"柔和活泼但非儿童化，圆润结构与清楚层级。",
-    "promptport":"黑底绿青开发者产品界面，模块清晰，禁止营销空话。",
-}
-
-# Old saved settings and API callers remain valid, but all Claude variants render
-# through the one maintained style above.  Keeping this mapping avoids silently
-# falling back to the unrelated dark theme for existing users.
-_LEGACY_CLAUDE_THEMES = {"claude", "claude_slides_v2"}
-
-
-def normalize_theme_name(theme_name: str) -> str:
-    """Return the public theme ID, preserving compatibility with old configs."""
-    normalized = (theme_name or "").strip().lower()
-    return "claude_slides" if normalized in _LEGACY_CLAUDE_THEMES else normalized
-
-
-def count_slide_elements(html: str) -> int:
-    """Count actual deck pages, excluding helpers such as ``slide-content``."""
-    return len(re.findall(
-        r'<div\b[^>]*\bclass\s*=\s*["\'][^"\']*(?<![\w-])slide(?![\w-])',
-        html or "",
-        flags=re.IGNORECASE,
-    ))
-
-
-def _unwrap_ppt_container(fragment: str) -> str:
-    """Remove one generated outer container before adding the engine wrapper.
-
-    Some model responses have historically lost the leading ``<div`` while
-    retaining ``class=\"ppt-container\">``. Treat that form as an outer
-    wrapper too, otherwise browsers render the residual text on the slide.
-    """
-    text = (fragment or "").strip()
-    opening = re.match(
-        r'^(?:<div\s+)?class\s*=\s*(["\'])ppt-container\1\s*>\s*',
-        text,
-        flags=re.IGNORECASE,
-    )
-    if not opening:
-        return text
-    text = text[opening.end():]
-    return re.sub(r'\s*</div>\s*$', '', text, count=1)
 
 # ── PPT模板 CSS（暗色主题）──
 PPT_CSS = r"""
@@ -672,14 +591,6 @@ body{
     padding:15px 20px;border-radius:0 10px 10px 0;margin:14px 0;
     font-size:16px;line-height:1.8;color:var(--cs-text-secondary);
 }
-/* AI content may contain a quote block with an inline light background. Keep
-   semantic content readable after users switch the exported deck to dark. */
-[data-theme="dark"] .slide blockquote,[data-theme="dark"] .slide .quote,[data-theme="dark"] .slide .quote-card{
-    background:var(--cs-accent-bg)!important;color:var(--cs-text-primary)!important;
-    border-color:var(--cs-border)!important;border-left:4px solid var(--cs-accent)!important;
-}
-[data-theme="dark"] .slide pre,[data-theme="dark"] .slide code{background:var(--cs-bg-secondary)!important;color:var(--cs-text-primary)!important;border-color:var(--cs-border)!important}
-[data-theme="dark"] .slide [style*="background:#fff"],[data-theme="dark"] .slide [style*="background: #fff"],[data-theme="dark"] .slide [style*="background:white"],[data-theme="dark"] .slide [style*="background: white"]{background:var(--cs-bg-card)!important;color:var(--cs-text-primary)!important}
 /* 导航 */
 .nav-dots{position:fixed;bottom:32px;left:50%;transform:translateX(-50%);display:flex;gap:10px;z-index:100}
 .nav-dot{
@@ -724,7 +635,7 @@ body{
 
 CLAUDE_SLIDES_JS = r"""
 let cur=0,total=0,locked=false;
-function updateProgress(){var p=document.querySelector('.progress-bar');if(p&&total>0)p.style.width=(((cur+1)/total)*100)+'%'}
+function updateProgress(){var p=document.querySelector('.progress-bar');if(p&&total>0)p.style.width=(total===1?'100%':(cur/(total-1)*100+'%'))}
 function go(n,instant){
     if(n<0||n>=total||n===cur)return;
     if(!instant&&locked)return;
@@ -823,293 +734,6 @@ total=document.querySelectorAll('.slide').length;
 document.querySelector('.page-num span').textContent='1';
 """
 
-# ══════════════════════════════════════════════════════════════
-# Claude Slides V2 — 完整动画系统（基于 bilibili_learning_bot_slides.html 模板）
-# 包含11种keyframe动画、级联入场、数字滚动、粒子特效、版本翻转
-# ══════════════════════════════════════════════════════════════
-
-CLAUDE_SLIDES_V2_CSS = r"""
-:root {
-  --bg-primary: #FFFFFF;
-  --bg-secondary: #F5F5F5;
-  --bg-card: #FAFAFA;
-  --text-primary: #0D0D0D;
-  --text-secondary: #666666;
-  --text-tertiary: #999999;
-  --accent: #D97757;
-  --accent-hover: #C56545;
-  --accent-bg: rgba(217,119,87,0.08);
-  --border: #E5E5E5;
-  --border-light: #F0F0F0;
-  --shadow: 0 1px 3px rgba(0,0,0,0.06);
-  --shadow-lg: 0 20px 60px rgba(0,0,0,0.08);
-  --code-bg: #F5F5F5;
-  --code-text: #0D0D0D;
-  --code-border: #E5E5E5;
-}
-[data-theme="dark"] {
-  --bg-primary: #0D0D0D;
-  --bg-secondary: #1A1A1A;
-  --bg-card: #141414;
-  --text-primary: #F5F5F5;
-  --text-secondary: #999999;
-  --text-tertiary: #666666;
-  --accent: #E8916A;
-  --accent-hover: #F0A585;
-  --accent-bg: rgba(232,145,106,0.1);
-  --border: #2A2A2A;
-  --border-light: #1F1F1F;
-  --shadow: 0 1px 3px rgba(0,0,0,0.3);
-  --shadow-lg: 0 20px 60px rgba(0,0,0,0.5);
-  --code-bg: #1A1A1A;
-  --code-text: #E5E5E5;
-  --code-border: #2A2A2A;
-}
-* { margin:0; padding:0; box-sizing:border-box; }
-body {
-  font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
-  font-weight:400; background:var(--bg-primary); color:var(--text-primary);
-  overflow:hidden; height:100vh; transition:background .35s,color .35s;
-}
-.slide-container { width:100vw; height:100vh; display:flex; align-items:center; justify-content:center; position:relative; }
-.slide {
-  width:80vw; max-width:960px; max-height:88vh; background:var(--bg-primary);
-  border-radius:20px; box-shadow:var(--shadow-lg); padding:44px 60px;
-  display:flex; flex-direction:column; position:absolute;
-  opacity:0; transition:opacity .35s ease, transform .35s ease;
-  overflow-y:auto; overflow-x:hidden; border:1px solid var(--border);
-}
-.slide.active { opacity:1; }
-.slide::-webkit-scrollbar { width:4px; }
-.slide::-webkit-scrollbar-track { background:transparent; }
-.slide::-webkit-scrollbar-thumb { background:var(--border); border-radius:4px; }
-.progress-bar {
-  position:fixed; top:0; left:0; height:2px; background:var(--accent);
-  z-index:1000; transition:width .35s ease;
-}
-.theme-toggle {
-  position:fixed; top:20px; right:24px; z-index:1001;
-  width:40px; height:40px; border-radius:50%;
-  border:1px solid var(--border); background:var(--bg-secondary);
-  cursor:pointer; display:flex; align-items:center; justify-content:center;
-  transition:all .2s; color:var(--text-primary); padding:0;
-}
-.theme-toggle svg { width:18px; height:18px; }
-.theme-toggle:hover { background:var(--border); }
-/* Typography */
-.slide-title { font-size:44px; font-weight:200; line-height:1.12; margin-bottom:16px; letter-spacing:-1.5px; color:var(--text-primary); }
-.slide-title.sm { font-size:34px; }
-.slide-subtitle { font-size:16px; font-weight:300; color:var(--text-secondary); margin-bottom:24px; line-height:1.55; max-width:80%; letter-spacing:-0.2px; }
-.accent-text { color:var(--accent); }
-.divider { width:40px; height:2px; background:var(--accent); margin:18px 0 24px; border-radius:1px; }
-.divider.center { margin:24px auto 32px; }
-.tag { display:inline-block; font-size:11px; font-weight:600; padding:5px 14px; border-radius:20px; background:var(--accent-bg); color:var(--accent); margin-bottom:16px; letter-spacing:1px; text-transform:uppercase; }
-.logo-mark { font-size:12px; font-weight:400; color:var(--text-tertiary); margin-top:28px; letter-spacing:2px; text-transform:uppercase; }
-/* Grid & Cards */
-.content-grid { display:grid; grid-template-columns:1fr 1fr; gap:24px; flex:1; }
-.content-grid.three { grid-template-columns:1fr 1fr 1fr; }
-.content-grid.four { grid-template-columns:1fr 1fr 1fr 1fr; }
-.card { background:var(--bg-card); border-radius:14px; padding:26px 26px 22px; border:1px solid var(--border); transition:border-color .2s, box-shadow .2s; display:flex; flex-direction:column; position:relative; overflow:hidden; }
-.card::after { content:''; position:absolute; bottom:0; left:0; width:48px; height:2px; background:var(--accent); opacity:.12; }
-.card:hover { border-color:var(--accent); box-shadow:var(--shadow); }
-.card-icon { width:24px; height:24px; margin-bottom:14px; display:block; color:var(--accent); }
-.card-icon svg { width:24px; height:24px; }
-.card h3 { font-size:18px; font-weight:500; margin-bottom:8px; color:var(--text-primary); letter-spacing:-0.3px; }
-.card p { font-size:13px; line-height:1.6; color:var(--text-secondary); font-weight:400; }
-.card-tags { display:flex; flex-wrap:wrap; gap:6px; margin-top:auto; padding-top:14px; }
-.card-tags span { font-size:10px; font-weight:500; color:var(--accent); background:var(--accent-bg); padding:3px 8px; border-radius:20px; letter-spacing:0.2px; }
-.card-corner { position:absolute; bottom:-12px; right:-12px; color:var(--accent); opacity:.04; pointer-events:none; }
-/* Lists */
-.feature-list { list-style:none; flex:1; display:flex; flex-direction:column; gap:14px; margin-top:4px; }
-.feature-list li { display:flex; align-items:flex-start; gap:16px; font-size:15px; line-height:1.55; color:var(--text-primary); font-weight:400; padding:14px 0; border-bottom:1px solid var(--border-light); }
-.feature-list li:last-child { border-bottom:none; }
-.feature-list .num { font-size:11px; font-weight:600; color:var(--accent); min-width:26px; height:26px; background:var(--accent-bg); border-radius:50%; display:flex; align-items:center; justify-content:center; flex-shrink:0; margin-top:1px; }
-.feature-list li strong { font-weight:500; letter-spacing:-0.2px; }
-/* Misc */
-.code-block { background:var(--code-bg); color:var(--code-text); border:1px solid var(--code-border); border-radius:10px; padding:18px 24px; font-size:13px; font-family:'SF Mono','Cascadia Code','Fira Code','Consolas',monospace; line-height:1.7; overflow-x:auto; white-space:pre; margin-top:12px; }
-.two-col { display:grid; grid-template-columns:1fr 1fr; gap:36px; flex:1; align-items:start; }
-.arch-layer { border-left:3px solid var(--accent); padding:8px 16px; margin-bottom:10px; font-size:14px; line-height:1.5; }
-.arch-layer strong { font-size:11px; font-weight:500; color:var(--accent); letter-spacing:1px; text-transform:uppercase; }
-.arch-layer span { color:var(--text-secondary); font-size:12px; }
-.table-wrap { width:100%; margin-top:8px; }
-.table-wrap table { width:100%; border-collapse:separate; border-spacing:0; }
-.table-wrap th { font-size:11px; font-weight:500; color:var(--text-tertiary); text-align:left; padding:10px 18px; text-transform:uppercase; letter-spacing:1px; border-bottom:1px solid var(--border); }
-.table-wrap td { padding:9px 14px; font-size:14px; border-bottom:1px solid var(--border-light); line-height:1.5; color:var(--text-primary); }
-.table-wrap td code { font-size:13px; background:var(--accent-bg); color:var(--accent); padding:2px 8px; border-radius:4px; font-weight:500; }
-.table-wrap tr:last-child td { border-bottom:none; }
-.end-card { display:flex; flex-direction:column; align-items:center; justify-content:center; height:100%; text-align:center; }
-.end-card .slide-title { font-size:48px; font-weight:200; letter-spacing:-1.5px; }
-.end-card p { font-size:16px; color:var(--text-secondary); font-weight:400; margin-top:14px; }
-.big-num { font-size:64px; font-weight:200; color:var(--accent); line-height:1; letter-spacing:-2px; }
-.num-label { font-size:14px; color:var(--text-secondary); margin-top:6px; font-weight:400; }
-.flow-row { display:flex; align-items:center; gap:10px; margin-top:16px; flex-wrap:wrap; }
-.flow-step { background:var(--bg-card); border:1px solid var(--border); border-radius:10px; padding:12px 18px; font-size:13px; font-weight:500; color:var(--text-primary); letter-spacing:-0.2px; }
-.flow-arrow { color:var(--accent); font-size:18px; font-weight:200; }
-.flow-step.accent { border-color:var(--accent); color:var(--accent); font-weight:600; }
-.step-num { display:inline-flex; align-items:center; justify-content:center; width:28px; height:28px; border-radius:50%; background:var(--text-primary); color:var(--bg-primary); font-size:13px; font-weight:600; margin-right:10px; flex-shrink:0; }
-.pipeline-list { list-style:none; display:flex; flex-direction:column; gap:12px; }
-.pipeline-list li { display:flex; align-items:flex-start; gap:12px; font-size:13px; line-height:1.55; color:var(--text-primary); font-weight:400; padding:10px 14px; border-radius:8px; background:var(--bg-card); border:1px solid var(--border-light); }
-/* Never let model-provided white quote/code blocks flash in dark mode. */
-[data-theme="dark"] .slide blockquote,[data-theme="dark"] .slide .quote,[data-theme="dark"] .slide .quote-card{background:var(--accent-bg)!important;color:var(--text-primary)!important;border-color:var(--border)!important;border-left:4px solid var(--accent)!important}
-[data-theme="dark"] .slide pre,[data-theme="dark"] .slide code{background:var(--code-bg)!important;color:var(--code-text)!important;border-color:var(--code-border)!important}
-[data-theme="dark"] .slide [style*="background:#fff"],[data-theme="dark"] .slide [style*="background: #fff"],[data-theme="dark"] .slide [style*="background:white"],[data-theme="dark"] .slide [style*="background: white"]{background:var(--bg-card)!important;color:var(--text-primary)!important}
-/* === LIGHT ANIMATION (3 keyframes, short stagger, no particles/counters) === */
-@keyframes aFadeUp  { from{opacity:0;transform:translateY(16px)} to{opacity:1;transform:translateY(0)} }
-@keyframes aFadeIn  { from{opacity:0} to{opacity:1} }
-@keyframes aScaleIn { from{opacity:0;transform:scale(.94)} to{opacity:1;transform:scale(1)} }
-.slide.animating > * { animation-fill-mode:both; animation-duration:.4s; animation-timing-function:ease-out; animation-name:aFadeUp; }
-.slide.animating > *:nth-child(1) { animation-delay:.04s; }
-.slide.animating > *:nth-child(2) { animation-delay:.10s; }
-.slide.animating > *:nth-child(3) { animation-delay:.16s; }
-.slide.animating > *:nth-child(4) { animation-delay:.22s; }
-.slide.animating > *:nth-child(n+5) { animation-delay:.28s; }
-.slide.animating .content-grid > * { animation-name:aScaleIn; }
-.slide.animating .content-grid > *:nth-child(1) { animation-delay:.08s; }
-.slide.animating .content-grid > *:nth-child(2) { animation-delay:.16s; }
-.slide.animating .content-grid > *:nth-child(3) { animation-delay:.24s; }
-.slide.animating .content-grid > *:nth-child(n+4) { animation-delay:.32s; }
-.slide.animating .feature-list > li { animation-name:aFadeUp; }
-.slide.animating .feature-list > li:nth-child(1) { animation-delay:.08s; }
-.slide.animating .feature-list > li:nth-child(2) { animation-delay:.14s; }
-.slide.animating .feature-list > li:nth-child(3) { animation-delay:.20s; }
-.slide.animating .feature-list > li:nth-child(n+4) { animation-delay:.26s; }
-@media (max-width:768px) {
-  .slide { padding:36px 24px; border-radius:14px; width:96vw; }
-  .slide-title { font-size:32px; letter-spacing:-1px; }
-  .slide-title.sm { font-size:28px; }
-  .slide-subtitle { font-size:15px; max-width:100%; }
-  .content-grid,.content-grid.three,.content-grid.four { grid-template-columns:1fr; gap:14px; }
-  .two-col { grid-template-columns:1fr; gap:20px; }
-  .logo-mark { margin-top:20px; }
-  .big-num { font-size:44px; }
-  .flow-row { gap:6px; }
-  .flow-step { padding:8px 12px; font-size:11px; }
-}
-"""
-CLAUDE_SLIDES_V2_JS = r"""
-var cur=0,total=0,isDark=false;
-function updateProgress(){
-    var p=document.querySelector('.progress-bar');
-    if(p&&total>0)p.style.width=(((cur+1)/total)*100)+'%'
-}
-function go(n){
-    if(n<0||n>=total||n===cur)return;
-    // Hide old, show new
-    document.querySelectorAll('.slide').forEach(function(s,i){
-        s.classList.toggle('active',i===n);
-        s.classList.remove('animating');
-    });
-    document.querySelectorAll('.nav-dot').forEach(function(d,i){
-        d.classList.toggle('active',i===n);
-    });
-    var pn=document.querySelector('.page-num span');
-    if(pn)pn.textContent=n+1;
-    updateProgress();
-    cur=n;
-    // Trigger entrance animation on new active slide
-    requestAnimationFrame(function(){
-        var active=document.querySelector('.slide.active');
-        if(active){active.classList.add('animating');}
-    });
-}
-// Theme
-function toggleTheme(){
-    isDark=!isDark;
-    document.documentElement.setAttribute('data-theme',isDark?'dark':'');
-    var icon=document.querySelector('.theme-toggle i');
-    if(icon){
-        icon.setAttribute('data-lucide',isDark?'sun':'moon');
-        lucide.createIcons({attrs:{'stroke-width':1.5}});
-    }
-    try{localStorage.setItem('claude-v2-theme',isDark?'dark':'light')}catch(e){}
-}
-// Init
-window.addEventListener('DOMContentLoaded',function(){
-    try{
-        var saved=localStorage.getItem('claude-v2-theme');
-        if(saved==='dark'){
-            isDark=true;
-            document.documentElement.setAttribute('data-theme','dark');
-            var tIcon=document.querySelector('.theme-toggle i');
-            if(tIcon)tIcon.setAttribute('data-lucide','sun');
-        }
-    }catch(e){}
-    lucide.createIcons({attrs:{'stroke-width':1.5}});
-    // Nav dots
-    var slides=document.querySelectorAll('.slide');
-    var dots=document.getElementById('navDots');
-    if(dots&&slides.length){
-        dots.innerHTML='';
-        for(var i=0;i<slides.length;i++){
-            var d=document.createElement('div');
-            d.className='nav-dot'+(i===0?' active':'');
-            d.setAttribute('data-index',i);
-            d.addEventListener('click',function(){go(parseInt(this.dataset.index))});
-            dots.appendChild(d);
-        }
-        var pn=document.querySelector('.page-num');
-        if(pn)pn.innerHTML='<span>1</span> / '+slides.length;
-    }
-    total=slides.length;
-    updateProgress();
-    // Initial animation
-    requestAnimationFrame(function(){
-        var active=document.querySelector('.slide.active');
-        if(active)active.classList.add('animating');
-    });
-});
-// Keyboard
-document.addEventListener('keydown',function(e){
-    if(e.key==='ArrowRight'||e.key==='ArrowDown'||e.key===' '||e.key==='PageDown'){e.preventDefault();go(cur+1)}
-    else if(e.key==='ArrowLeft'||e.key==='ArrowUp'||e.key==='PageUp'){e.preventDefault();go(cur-1)}
-    else if(e.key==='Home'){e.preventDefault();go(0)}
-    else if(e.key==='End'){e.preventDefault();go(total-1)}
-    else if(e.key==='d'||e.key==='D'){toggleTheme()}
-});
-// Touch swipe
-var tsX=0;
-document.addEventListener('touchstart',function(e){tsX=e.changedTouches[0].screenX});
-document.addEventListener('touchend',function(e){
-    var d=tsX-e.changedTouches[0].screenX;
-    if(Math.abs(d)>50){if(d>0)go(cur+1);else go(cur-1)}
-});
-// Bind theme toggle
-document.addEventListener('DOMContentLoaded',function(){
-    var tb=document.querySelector('.theme-toggle');
-    if(tb)tb.addEventListener('click',toggleTheme);
-});
-"""
-
-
-def _style_css_override(theme_name: str) -> str:
-    """Small, deterministic layout accents for every non-Claude picker choice."""
-    if theme_name in {"light", "soft_pop", "neumorphism", "neobrutal"}:
-        base = r"""
-body{background:linear-gradient(145deg,var(--bg-start),var(--bg-end));color:#172033}
-body::before{opacity:.035;mix-blend-mode:multiply}.slide-content{color:#172033}.meta-line,.data-label{color:#5b6472}.card-text,.insight-list li,.highlight-box,.quote-card{color:#273244}.content-card,.data-item,.quote-card,.highlight-box{background:var(--card-bg);border-color:var(--card-border);box-shadow:0 12px 30px rgba(15,23,42,.08)}.nav-arrow{background:rgba(255,255,255,.78);border-color:var(--card-border);color:#172033}.nav-dot{background:rgba(15,23,42,.22)}
-"""
-        if theme_name == "neobrutal":
-            base += r""".content-card,.data-item,.quote-card,.flow-step{border:3px solid #111827!important;border-radius:4px!important;box-shadow:5px 5px 0 #111827!important}.main-title{-webkit-text-fill-color:#111827;background:none}.slide{font-family:Inter,"Microsoft YaHei",sans-serif}.nav-arrow{border:2px solid #111827;border-radius:4px;box-shadow:3px 3px 0 #111827}.nav-dot{border-radius:1px}"""
-        elif theme_name == "neumorphism":
-            base += r""".content-card,.data-item,.quote-card,.flow-step{border:0!important;box-shadow:10px 10px 22px rgba(72,85,99,.18),-10px -10px 22px rgba(255,255,255,.74)!important}.main-title{-webkit-text-fill-color:#334155;background:none}"""
-        elif theme_name == "soft_pop":
-            base += r""".content-card,.data-item,.quote-card,.flow-step{border-radius:18px}.main-title{-webkit-text-fill-color:#db2777;background:none}"""
-        return base
-    if theme_name == "bento":
-        return r""".content-grid{grid-template-columns:1.25fr .75fr}.content-grid>.card:first-child{grid-row:span 2}.data-grid{grid-template-columns:repeat(4,1fr)}.content-card,.data-item{border-radius:10px}@media(max-width:768px){.content-grid,.data-grid{grid-template-columns:1fr 1fr}.content-grid>.card:first-child{grid-row:auto}}"""
-    if theme_name == "card":
-        return r""".content-card,.data-item,.quote-card{transition:transform .22s ease,box-shadow .22s ease}.content-card:hover,.data-item:hover,.quote-card:hover{transform:translateY(-4px);box-shadow:0 18px 38px rgba(0,0,0,.28)}"""
-    if theme_name in {"glass", "liquid_glass"}:
-        return r""".content-card,.data-item,.quote-card,.flow-step{backdrop-filter:blur(18px) saturate(135%);box-shadow:0 16px 38px rgba(0,0,0,.22)}.slide-cover{background:radial-gradient(circle at 24% 18%,rgba(255,255,255,.16),transparent 42%)}"""
-    if theme_name == "linear":
-        return r""".content-card,.data-item,.quote-card,.flow-step{border-radius:8px;box-shadow:0 0 0 1px rgba(167,139,250,.10),0 18px 45px rgba(0,0,0,.24)}.card::after{width:100%;opacity:.18}"""
-    if theme_name == "nostalgic":
-        return r"""body,.slide{font-family:"Cascadia Mono","Consolas","Microsoft YaHei",monospace}.content-card,.data-item,.quote-card,.flow-step{border-radius:0;border:2px solid var(--accent);box-shadow:4px 4px 0 rgba(0,0,0,.35)}.tag{border-radius:0}"""
-    if theme_name == "promptport":
-        return r""".content-card,.data-item,.quote-card,.flow-step{border-radius:8px;box-shadow:0 0 26px rgba(0,229,168,.08)}.main-title{font-weight:700;letter-spacing:0}.tag{border:1px solid rgba(0,229,168,.35)}"""
-    if theme_name == "cyberpunk":
-        return r""".content-card,.data-item,.quote-card{box-shadow:0 0 22px rgba(34,211,238,.10),inset 0 0 20px rgba(244,114,182,.04)}.main-title{text-shadow:0 0 18px rgba(34,211,238,.24)}"""
-    return ""
 
 # ── AI Prompt 模板 ──
 def _load_claude_design_system() -> str:
@@ -1127,8 +751,17 @@ def _load_claude_design_system() -> str:
         pass
 
     if not prompt_text:
-        from services.html_renderer import SLIDE_COMPONENT_CONTRACT
-        prompt_text = SLIDE_COMPONENT_CONTRACT
+        # fallback: 使用内置精简版
+        prompt_text = """【Claude 设计风格核心规范 v1.0】
+- 字体: Inter (100-800) 全字重; 标题200-300, 正文400; 禁止600+粗体标题
+- 配色: 纯白/黑/灰 + 暖橙点缀 #D97757; 暗色模式精确反转
+- 图标: Lucide Icons (stroke-width:1.5), 禁止emoji/Font Awesome/Material Icons
+- 卡片: border-radius:14px, padding:36px, border:1px solid var(--border), hover变accent
+- 按钮: 黑底白字(亮)/白底黑字(暗), border-radius:8px, padding:12px 28px
+- 分割线: width:40px, height:2px, background:var(--accent)
+- 标签: font-size:11px, border-radius:20px, background:accent-bg
+- 暗色模式: [data-theme="dark"] CSS变量 + localStorage持久化 + 40px圆形切换按钮
+- 禁止: 渐变、粗阴影(blur>60px)、彩色阴影、彩色文字、弹跳/旋转/脉冲动画、emoji图标"""
 
     # 加载参考HTML示例的关键结构信息
     examples_info = _load_examples_info(base_dir)
@@ -1139,76 +772,76 @@ def _load_claude_design_system() -> str:
 
 
 def _load_examples_info(base_dir: str) -> str:
-    """Describe the one canonical reference without injecting an HTML file into the LLM."""
-    reference = os.path.join(base_dir, "bilibili_learning_bot_slides.html")
-    if not os.path.isfile(reference):
-        return ""
-    return (
-        "唯一视觉参考：项目根目录 bilibili_learning_bot_slides.html。"
-        "使用其已有的 slide、tag、slide-title、divider、content-grid、card、"
-        "feature-list、two-col、table-wrap、end-card、logo-mark 组件；"
-        "页面引擎已提供亮暗切换、进度条、键盘和触摸翻页、Lucide 与响应式布局。"
-        "不要参考或混用 templates/claude/examples 中的其他页面。"
-    )
+    """加载参考HTML示例的关键结构摘要（用于AI prompt）"""
+    examples_dir = os.path.join(base_dir, "templates", "claude", "examples")
+    if not os.path.isdir(examples_dir):
+        # 尝试 claude-design-system 目录
+        alt_dir = os.path.join(os.path.dirname(base_dir), "claude-design-system", "examples")
+        if os.path.isdir(alt_dir):
+            examples_dir = alt_dir
+        else:
+            return ""
 
-def build_slide_prompt(
-    video_info: dict,
-    subtitle_text: str,
-    theme_name: str = "dark",
-    detail_level: str = "medium",
-    custom_prompt: str = "",
-    enhanced_animations: bool = False,
-    slide_count: int | None = None,
-) -> str:
-    """构建AI生成PPT幻灯片内容的提示词。"""
-    theme_name = normalize_theme_name(theme_name)
+    info_parts = []
+    example_files = sorted([f for f in os.listdir(examples_dir) if f.endswith('.html')])
+    for ef in example_files[:7]:  # 最多取7个
+        fpath = os.path.join(examples_dir, ef)
+        try:
+            with open(fpath, 'r', encoding='utf-8') as f:
+                content = f.read()
+            # 提取关键结构信息
+            has_hero = '<div class="hero' in content or 'class="hero-section"' in content
+            has_cards = '<div class="card"' in content or 'class="content-card"' in content
+            has_table = '<table' in content
+            has_sidebar = 'sidebar' in content.lower()
+            has_faq = 'faq' in content.lower() or 'accordion' in content.lower()
+            has_form = '<form' in content or '<input' in content
+            has_theme = 'data-theme' in content
+            has_lucide = 'data-lucide' in content
+            has_counter = 'data-target' in content or 'counter' in content
+
+            features = []
+            if has_hero: features.append("Hero区")
+            if has_cards: features.append("卡片网格")
+            if has_table: features.append("数据表格")
+            if has_sidebar: features.append("侧边栏布局")
+            if has_faq: features.append("折叠面板")
+            if has_form: features.append("表单")
+            if has_theme: features.append("亮暗切换")
+            if has_lucide: features.append("Lucide图标")
+            if has_counter: features.append("数字滚动动画")
+
+            name = ef.replace('.html', '').replace('-', ' ').title()
+            info_parts.append(f"  {name}: {', '.join(features)}")
+        except Exception:
+            pass
+
+    if info_parts:
+        return "以下为Claude Design System参考页面的组件覆盖：\n" + "\n".join(info_parts)
+    return ""
+
+def build_slide_prompt(video_info: dict, subtitle_text: str, theme_name: str = "dark") -> str:
+    """构建AI生成PPT幻灯片内容的提示词"""
     title = video_info.get('title', '未知视频')
     up_name = video_info.get('author', '未知UP主')
     video_url = video_info.get('url', '')
     bvid = video_info.get('bvid', '')
     stats = video_info.get('stats', {})
     desc = video_info.get('desc', '')[:500]
-    is_claude = False
-    is_claude_slides = theme_name == "claude_slides"
+    is_claude = (theme_name == "claude")
 
-    # ── 详情级别配置 ──
-    _detail_cfg = {
-        "simple":   {"label": "简单", "sub_limit": 8000,  "slide_factor": (700, 450), "depth_prompt": "提炼最核心的3-5个观点，每个观点用1-2句话概括即可，不需要长篇展开"},
-        "medium":   {"label": "中长", "sub_limit": 15000, "slide_factor": (550, 350), "depth_prompt": "保持适中的内容密度，每个观点展开说明但不要太冗长，兼顾全面性和可读性"},
-        "detailed": {"label": "详细", "sub_limit": 30000, "slide_factor": (350, 220), "depth_prompt": "深入详细地展开每个观点，包含具体的例子、论据和细节。充分利用字幕内容，尽可能完整地呈现视频中的所有知识点"},
-    }
-    _dc = _detail_cfg.get(detail_level, _detail_cfg["medium"])
-
-    # Claude 幻灯片统一使用项目根目录的参考模板与同一份输出契约。
-    if is_claude_slides:
-        prompt = _build_slide_prompt_v2(
-            video_info,
-            subtitle_text,
-            detail_level=detail_level,
-            enhanced_animations=enhanced_animations,
-            slide_count=slide_count,
-        )
-        if custom_prompt.strip():
-            prompt += f"\n\n【用户自定义要求（优先遵守，不得破坏HTML结构）】\n{custom_prompt.strip()}"
-        return prompt
-
-    # 截取字幕（AI prompt用，根据详情级别保留不同长度的上下文）
+    # 截取字幕（AI prompt用，保留足够上下文）
     sub_for_ai = subtitle_text
-    _sub_limit = _dc["sub_limit"]
-    if len(sub_for_ai) > _sub_limit:
-        head = _sub_limit // 3
-        tail = _sub_limit // 3
-        mid_start = max(head, len(sub_for_ai) // 2 - head // 2)
-        mid = min(head, len(sub_for_ai) - mid_start)
-        sub_for_ai = sub_for_ai[:head] + "\n...[中间部分省略]...\n" + sub_for_ai[mid_start:mid_start+mid] + "\n...[末尾部分]...\n" + sub_for_ai[-tail:]
+    if len(sub_for_ai) > 15000:
+        # 保留前5000 + 中间5000 + 末尾5000
+        third = len(sub_for_ai) // 3
+        sub_for_ai = sub_for_ai[:5000] + "\n...[中间部分省略]...\n" + sub_for_ai[third:third+5000] + "\n...[末尾部分]...\n" + sub_for_ai[-5000:]
 
-    # 根据字幕长度 + 详情级别动态计算推荐页数
+    # 根据字幕长度动态计算推荐页数（约350~500字/slide）
     _sub_len = len(subtitle_text)
-    _sf = _dc["slide_factor"]
-    _min_slides = {"simple": 4, "medium": 6, "detailed": 8}.get(detail_level, 6)
-    _min_slides = max(_min_slides, _sub_len // _sf[0])
-    _max_slides = max(_min_slides + 2, _sub_len // _sf[1])
-    _slide_range = str(slide_count) if slide_count else f"{_min_slides}-{_max_slides}"
+    _min_slides = max(6, _sub_len // 550)
+    _max_slides = max(10, _sub_len // 350)
+    _slide_range = f"{_min_slides}-{_max_slides}"
 
     # Claude 专属设计规范注入
     claude_guidelines = ""
@@ -1232,19 +865,8 @@ def build_slide_prompt(
 - 禁止: 渐变背景、彩色阴影、彩色文字、弹跳/旋转/脉冲动画、emoji图标、Font Awesome图标
 """
 
-    style_direction = STYLE_ART_DIRECTION.get(theme_name, STYLE_ART_DIRECTION["dark"])
     prompt = f"""你是顶级知识萃取师和前端设计师。根据以下B站视频信息，生成一个**多页PPT风格HTML页面**的内容。
 {claude_guidelines}
-
-【本次风格方向】
-{style_direction}
-
-【全风格质量契约】
-- 只输出 `<div class="ppt-container">` 到对应闭合标签；禁止输出 Markdown、DOCTYPE、style、script 或解释文字。
-- 只使用引擎已提供的 class、CSS 变量和 Lucide 图标。不要在内容元素写 `background:#fff`、`background:white`、固定黑白文字或整页 CSS。
-- 每页只服务一个结论：标题、依据、必要的例子/数据和一句可带走的结论。禁止空洞营销文案、重复卡片和虚构事实。
-- 深浅主题都必须可读：正文和卡片使用变量；暗色主题不得出现白底大块或低对比灰字。
-- 把图片/截图作为证据时要保留来源时间点；没有可靠材料时写“资料不足”，不要编造。
 
 【视频信息】
 - 标题: {title}
@@ -1368,195 +990,24 @@ def build_slide_prompt(
 ```
 
 【严格要求】
-1. **必须生成{_slide_range}个完整slide**，不要偷懒只生成3-4个
+1. **必须生成6-8个完整slide**，不要偷懒只生成3-4个
 2. 内容必须基于字幕/对白实际内容提炼，不要编造
-3. **内容深度要求：{_dc['depth_prompt']}**
-4. 章节分主题展开，每个章节一个slide，有层次感
-5. 图标使用 Lucide Icons: <i data-lucide="xxx"></i>，参考常用映射选择相关图标
-6. 强调样式：<span class="em"> 包裹重点关键词，统一使用主题强调色（**禁止使用多种颜色**）
-7. **只输出 <div class="ppt-container"> 到 </div> 结束的完整HTML代码块**，包括导航UI
-8. 不要输出 markdown 代码块标记，不要输出解释文字
-9. 直接从 <div class="ppt-container"> 开始，到最后一个 </div> 结束
+3. 章节分主题展开，每个章节一个slide，有层次感
+4. 图标使用 Lucide Icons: <i data-lucide="xxx"></i>，参考常用映射选择相关图标
+5. 强调样式：<span class="em"> 包裹重点关键词，统一使用主题强调色（**禁止使用多种颜色**）
+6. **只输出 <div class="ppt-container"> 到 </div> 结束的完整HTML代码块**，包括导航UI
+7. 不要输出 markdown 代码块标记，不要输出解释文字
+8. 直接从 <div class="ppt-container"> 开始，到最后一个 </div> 结束
 
 现在开始生成："""
     return prompt
 
 
-def _build_slide_prompt_v2(
-    video_info: dict,
-    subtitle_text: str,
-    detail_level: str = "medium",
-    enhanced_animations: bool = True,
-    slide_count: int | None = None,
-) -> str:
-    """构建基于参考页面的 Claude 幻灯片提示词。"""
-    title = video_info.get('title', '未知视频')
-    up_name = video_info.get('author', '未知UP主')
-    video_url = video_info.get('url', '')
-    bvid = video_info.get('bvid', '')
-    stats = video_info.get('stats', {})
-    desc = video_info.get('desc', '')[:500]
-
-    # ── 详情级别配置 ──
-    _detail_cfg = {
-        "simple":   {"label": "简单", "sub_limit": 8000,  "slide_factor": (700, 500), "depth_prompt": "提炼最核心的3-5个观点，每个观点简要概括，追求极简精炼"},
-        "medium":   {"label": "中长", "sub_limit": 15000, "slide_factor": (600, 400), "depth_prompt": "保持适中的内容密度，每个观点展开说明但不要太冗长"},
-        "detailed": {"label": "详细", "sub_limit": 30000, "slide_factor": (400, 250), "depth_prompt": "深入详细地展开每个观点，包含具体例子、论据和细节，尽可能完整呈现所有知识点"},
-    }
-    _dc = _detail_cfg.get(detail_level, _detail_cfg["medium"])
-
-    # 截取字幕
-    sub_for_ai = subtitle_text
-    _sub_limit = _dc["sub_limit"]
-    if len(sub_for_ai) > _sub_limit:
-        head = _sub_limit // 3
-        tail = _sub_limit // 3
-        mid_start = max(head, len(sub_for_ai) // 2 - head // 2)
-        mid = min(head, len(sub_for_ai) - mid_start)
-        sub_for_ai = sub_for_ai[:head] + "\n...[省略]...\n" + sub_for_ai[mid_start:mid_start+mid] + "\n...[省略]...\n" + sub_for_ai[-tail:]
-
-    # 页数计算
-    _sub_len = len(subtitle_text)
-    _sf = _dc["slide_factor"]
-    _min_slides = {"simple": 4, "medium": 6, "detailed": 8}.get(detail_level, 6)
-    _min_slides = max(_min_slides, _sub_len // _sf[0])
-    _max_slides = max(_min_slides + 2, _sub_len // _sf[1])
-    _slide_range = str(slide_count) if slide_count else f"{_min_slides}-{_max_slides}"
-
-    animation_guidance = (
-        "使用参考页面的分段入场节奏：标题/分割线先出现，卡片或列表依次入场；可使用数据卡片、流程步骤、表格行的短暂级联动画。"
-        if enhanced_animations
-        else "保持轻量入场动画：仅使用标题、正文和卡片的淡入上升，不添加粒子、数字滚动或复杂的逐项动画。"
-    )
-    prompt = f"""你是知识萃取师和前端设计师。根据B站视频信息，生成多页幻灯片HTML。
-
-【引擎说明】
-你生成的内容会被注入基于 `bilibili_learning_bot_slides.html` 的 Claude 幻灯片引擎。只输出幻灯片内容HTML（从<div class="ppt-container">开始），不要写CSS/JS。
-引擎提供：亮暗主题切换、进度条、键盘/触摸翻页、Lucide 图标和响应式布局。
-动画偏好：{animation_guidance}
-
-【设计与质量要求】
-1. 使用克制的白/黑/灰与暖橙强调色，Inter 字体体系；只使用 Lucide 图标，禁止 emoji 和 Font Awesome
-2. 标题字重 200-300，正文 400，卡片标题 500；不要使用渐变背景、彩色阴影或夸张动效
-3. 每页只讲一个主题，避免溢出、遮挡、超长段落与无意义的重复卡片
-4. 内容必须基于字幕、简介和真实统计数据提炼；不可编造事实或修改数据
-5. 输出的标签、标题、卡片、列表、表格和总结页必须使用下方列出的既有组件类名
-
-【视频信息】
-- 标题: {title}
-- UP主: {up_name}
-- 链接: {video_url}
-- 真实数据: 播放={stats.get('view','?')} | 点赞={stats.get('like','?')} | 硬币={stats.get('coin','?')} | 收藏={stats.get('favorite','?')} | 弹幕={stats.get('danmaku','?')} | 评论={stats.get('comment','?')}
-- ⚠️ 以上数据为B站API真实数据，必须严格使用，禁止编造！
-- 简介: {desc}
-
-【字幕/对白】
-{sub_for_ai}
-
-【可用组件】
-## 幻灯片结构
-```html
-<div class="ppt-container">
-  <div class="slide active" data-index="0">
-    <!-- 内容 -->
-    <div class="logo-mark">bilibili_learning_bot</div>
-  </div>
-  <div class="slide" data-index="1">...</div>
-</div>
-```
-
-## 标签
-```html
-<span class="tag">DEEP DIVE</span>
-```
-
-## 标题
-```html
-<h1 class="slide-title sm">标题 <span class="accent-text">强调</span></h1>
-```
-
-## 分割线
-```html
-<div class="divider"></div>
-```
-
-## 卡片 + 网格
-```html
-<div class="content-grid three">
-  <div class="card">
-    <i data-lucide="zap" class="card-icon"></i>
-    <h3>标题</h3>
-    <p>描述...</p>
-    <div class="card-tags"><span>标签</span></div>
-  </div>
-</div>
-```
-- .content-grid (2列), .content-grid.three, .content-grid.four
-- card-icon的Lucide图标: zap/lightbulb/book-open/globe/cpu/eye/thumbs-up/coins/message-square/share-2/heart/brain/shield/code-2/settings/play/clock
-
-## 要点列表
-```html
-<ul class="feature-list">
-  <li><span class="num">01</span> <strong>标题</strong> — 描述</li>
-</ul>
-```
-
-## 两栏布局
-```html
-<div class="two-col">
-  <div>左</div>
-  <div>右</div>
-</div>
-```
-
-## 表格
-```html
-<div class="table-wrap"><table>
-  <thead><tr><th>列1</th><th>列2</th></tr></thead>
-  <tbody><tr><td>数据</td><td>说明</td></tr></tbody>
-</table></div>
-```
-
-## 总结页
-```html
-<div class="end-card">
-  <span class="tag">SUMMARY</span>
-  <h1 class="slide-title">总结标题</h1>
-  <p>总结描述</p>
-  <div class="divider center"></div>
-</div>
-```
-
-【页面结构】
-Slide 1 (封面): tag + h1标题 + 可选元数据
-Slide 2 (数据): 真实统计数据展示
-Slide 3-N-1 (内容): 按主题分页，每页一个主题
-最后Slide (总结): end-card结构
-
-【严格要求】
-1. 生成 {_slide_range} 个完整slide
-2. 内容基于字幕提取，禁止编造
-3. **内容深度要求：{_dc['depth_prompt']}**
-4. 统计数据严格使用真实数值
-5. 每页底部必须有 <div class="logo-mark">bilibili_learning_bot</div>
-6. 图标仅用 Lucide Icons (<i data-lucide="xxx"></i>)，禁止emoji
-7. 只输出 <div class="ppt-container">...最后</div> 的HTML
-8. 不要输出markdown代码块标记或解释文字
-
-现在开始："""
-    return prompt
-
-def build_full_html(
-    slide_html: str,
-    theme_name: str = "dark",
-    enhanced_animations: bool = False,
-) -> str:
-    """将AI生成的 slide 内容包装成完整 HTML 页面。"""
-    theme_name = normalize_theme_name(theme_name)
+def build_full_html(slide_html: str, theme_name: str = "dark") -> str:
+    """将AI生成的slide内容包装成完整HTML页面"""
     theme = THEMES.get(theme_name, THEMES["dark"])
-    is_claude = False
-    is_claude_slides = theme_name == "claude_slides"
-    is_claude_slides_v2 = is_claude_slides
+    is_claude = (theme_name == "claude")
+    is_claude_slides = (theme_name == "claude_slides")
 
     # 生成CSS变量
     css_vars = f""":root{{
@@ -1568,32 +1019,7 @@ def build_full_html(
     }}"""
 
     # 根据主题选择CSS/JS + Google Fonts
-    if is_claude_slides_v2:
-        # V2: 完整动画系统 (Inter字体 + Lucide图标 + 11种动画 + 亮暗切换)
-        use_css = CLAUDE_SLIDES_V2_CSS
-        if enhanced_animations:
-            use_css += r"""
-@keyframes enhancedSlideLeft { from { opacity:0; transform:translateX(-24px); } to { opacity:1; transform:translateX(0); } }
-@keyframes enhancedPopIn { 0% { opacity:0; transform:scale(.90); } 70% { opacity:1; transform:scale(1.02); } 100% { opacity:1; transform:scale(1); } }
-.slide.animating .feature-list > li { animation:enhancedSlideLeft .45s cubic-bezier(.22,.61,.36,1) both; }
-.slide.animating .feature-list > li:nth-child(1) { animation-delay:.10s; }
-.slide.animating .feature-list > li:nth-child(2) { animation-delay:.18s; }
-.slide.animating .feature-list > li:nth-child(3) { animation-delay:.26s; }
-.slide.animating .feature-list > li:nth-child(n+4) { animation-delay:.34s; }
-.slide.animating .content-grid > .card { animation:enhancedPopIn .48s cubic-bezier(.22,.61,.36,1) both; }
-.slide.animating .content-grid > .card:nth-child(1) { animation-delay:.12s; }
-.slide.animating .content-grid > .card:nth-child(2) { animation-delay:.20s; }
-.slide.animating .content-grid > .card:nth-child(3) { animation-delay:.28s; }
-.slide.animating .content-grid > .card:nth-child(n+4) { animation-delay:.36s; }
-"""
-        use_js = CLAUDE_SLIDES_V2_JS
-        body_extra = '<button class="theme-toggle" aria-label="切换主题"><i data-lucide="moon"></i></button>'
-        canvas_tag = '<div class="progress-bar"></div>'
-        google_fonts = '<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:wght@100;200;300;400;500;600;700;800&display=swap" rel="stylesheet">'
-        # Strip outer ppt-container wrapper (AI prompt generates it) to avoid double-wrap with slide-container
-        _s = _unwrap_ppt_container(slide_html)
-        slide_html = f'<div class="slide-container">{_s}</div>'
-    elif is_claude_slides:
+    if is_claude_slides:
         # Claude Slides: 纯白+暖橙+亮暗切换+进度条
         use_css = CLAUDE_SLIDES_CSS
         use_js = CLAUDE_SLIDES_JS
@@ -1614,7 +1040,6 @@ def build_full_html(
         body_extra = ""
         canvas_tag = '<canvas id="particlesCanvas"></canvas>'
         google_fonts = ""
-    style_override = "" if is_claude_slides_v2 or is_claude_slides else _style_css_override(theme_name)
 
     # 构建导航点JS
     nav_dots_js = """
@@ -1644,11 +1069,10 @@ def build_full_html(
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>{theme['name']} Theme - B站视频知识卡片</title>
 {google_fonts}
-{"<script src=\"https://unpkg.com/lucide@latest/dist/umd/lucide.js\"></script>" if is_claude or is_claude_slides or is_claude_slides_v2 else "<link rel=\"stylesheet\" href=\"https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css\">"}
+{"<script src=\"https://unpkg.com/lucide@latest/dist/umd/lucide.js\"></script>" if is_claude or is_claude_slides else "<link rel=\"stylesheet\" href=\"https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css\">"}
 <style>
 {css_vars}
 {use_css}
-{style_override}
 </style>
 </head>
 <body>
@@ -1657,7 +1081,7 @@ def build_full_html(
 <script>
 {use_js}
 {nav_dots_js}
-{"lucide.createIcons({attrs:{'stroke-width':1.5}});" if is_claude or is_claude_slides or is_claude_slides_v2 else ""}
+{"lucide.createIcons({attrs:{'stroke-width':1.5}});" if is_claude or is_claude_slides else ""}
 </script>
 </body>
 </html>"""
@@ -1674,14 +1098,6 @@ def _hex_to_rgb(hex_color: str) -> str:
 
 
 # ── 便捷API ──
-async def _heartbeat_dots(interval: float = 2.0):
-    """心跳动画：每隔interval秒打印一个点，表示在等待AI响应"""
-    try:
-        while True:
-            await asyncio.sleep(interval)
-            print(".", end="", flush=True)
-    except asyncio.CancelledError:
-        pass
 def _find_free_port(start=18800, end=18900) -> int:
     """查找可用端口"""
     for port in range(start, end):
@@ -1753,8 +1169,13 @@ def save_html_to_path(html_content: str, save_path: str = None) -> str:
         实际保存的完整文件路径
     """
     if save_path is None:
-        from core.user_data import HTML_EXPORTS_DIR
-        default_dir = HTML_EXPORTS_DIR
+        # 默认路径（跨平台）
+        if os.name == 'nt':  # Windows
+            default_dir = Path(os.environ.get('USERPROFILE', os.path.expanduser('~'))) / 'Documents' / 'bilibili_html_exports'
+        elif os.uname().sysname == 'Darwin':  # macOS
+            default_dir = Path.home() / 'Documents' / 'bilibili_html_exports'
+        else:  # Linux
+            default_dir = Path.home() / 'bilibili_html_exports'
         default_dir.mkdir(parents=True, exist_ok=True)
         save_path = str(default_dir)
 
@@ -1785,10 +1206,6 @@ async def generate_ppt_from_bvid(
     model: str,
     cookies_obj=None,
     theme: str = "dark",
-    detail_level: str = "medium",
-    custom_prompt: str = "",
-    enhanced_animations: bool = False,
-    slide_count: int = 10,
     output_dir: str = None,
     open_browser: bool = True,
     auto_save: bool = True,
@@ -1807,16 +1224,7 @@ async def generate_ppt_from_bvid(
     """
     from api.subtitles import fetch_bilibili_subtitles
 
-    requested_theme = normalize_theme_name(theme)
-    # "auto" must select a maintained high-quality engine, not fall through to
-    # the first legacy theme in the mapping.
-    theme = "claude_slides" if requested_theme in ("", "auto") else requested_theme
-    slide_count = max(4, min(int(slide_count or 10), 20))
-    result = {
-        "success": False, "html_path": "", "title": "", "subtitle_chars": 0,
-        "theme": theme, "slide_count": 0, "requested_slide_count": slide_count,
-        "error": None,
-    }
+    result = {"success": False, "html_path": "", "title": "", "subtitle_chars": 0, "error": None}
 
     # Step 1: 获取字幕+视频信息
     import httpx as _httpx
@@ -1895,14 +1303,7 @@ async def generate_ppt_from_bvid(
         }
 
         # Step 2: 获取字幕
-        try:
-            ok, subtitle_text, video_desc, _ = await fetch_bilibili_subtitles(
-                bvid, cookies_obj=cookies_obj, title=title)
-        except RecursionError:
-            # Retry once with a clean cookie jar if a malformed third-party
-            # cookie structure makes the HTTP client recurse while encoding it.
-            ok, subtitle_text, video_desc, _ = await fetch_bilibili_subtitles(
-                bvid, cookies_obj=None, title=title)
+        ok, subtitle_text, video_desc, _ = await fetch_bilibili_subtitles(bvid, cookies_obj=cookies_obj, title=title)
         if not ok or not subtitle_text:
             result["error"] = f"字幕获取失败: {subtitle_text}"
             return result
@@ -1910,59 +1311,26 @@ async def generate_ppt_from_bvid(
         result["subtitle_chars"] = len(subtitle_text)
 
     # Step 3: AI 生成PPT内容
-    _dl_map = {"simple": "简单", "medium": "中长", "detailed": "详细"}
-    prompt = build_slide_prompt(
-        video_info,
-        subtitle_text,
-        theme,
-        detail_level=detail_level,
-        custom_prompt=custom_prompt,
-        enhanced_animations=enhanced_animations,
-        slide_count=slide_count,
-    )
-    _prompt_chars = len(prompt)
-    _prompt_k = _prompt_chars / 1000
-    print(f"\n[PPT] 正在调用AI生成幻灯片... (详情:{_dl_map.get(detail_level, detail_level)}, prompt {_prompt_k:.1f}K字符, 字幕{result['subtitle_chars']:,}字符, 最长等待5分钟)")
-    _safe_flush(sys.stdout)
-
+    prompt = build_slide_prompt(video_info, subtitle_text, theme)
     messages = [{"role": "user", "content": prompt}]
-    request_body, request_headers = _utf8_json_request({
-        'model': model, 'messages': messages, 'temperature': 0.7, 'max_tokens': 16384,
-    })
+
     html_content = ""
-    _ai_start = time.time()
-    _heartbeat = asyncio.ensure_future(_heartbeat_dots(2.0))
-    try:
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            r = await client.post(
-                f"{base_url}/chat/completions",
-                headers={'Authorization': f'Bearer {api_key}', **request_headers},
-                content=request_body,
-            )
-            _elapsed = time.time() - _ai_start
-            if r.status_code >= 400:
-                result["error"] = f"API错误 {r.status_code}: {r.text[:300]}"
-                return result
-            d = r.json()
-            choices = d.get('choices', [])
-            for ch in choices:
-                msg = ch.get('message', {})
-                c = msg.get('content', '')
-                if c:
-                    html_content += c
-            print(f"\n[PPT] AI生成完成 ({_elapsed:.1f}秒, {len(html_content):,}字符)")
-    except httpx.RequestError as exc:
-        result["error"] = f"AI接口连接失败: {exc}"
-        return result
-    except (ValueError, KeyError, TypeError) as exc:
-        result["error"] = f"AI响应格式异常: {exc}"
-        return result
-    finally:
-        _heartbeat.cancel()
-        try:
-            await _heartbeat
-        except asyncio.CancelledError:
-            pass
+    async with httpx.AsyncClient(timeout=300.0) as client:
+        r = await client.post(
+            f"{base_url}/chat/completions",
+            headers={'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'},
+            json={'model': model, 'messages': messages, 'temperature': 0.7, 'max_tokens': 16384}
+        )
+        if r.status_code >= 400:
+            result["error"] = f"API错误 {r.status_code}: {r.text[:300]}"
+            return result
+        d = r.json()
+        choices = d.get('choices', [])
+        for ch in choices:
+            msg = ch.get('message', {})
+            c = msg.get('content', '')
+            if c:
+                html_content += c
 
     if not html_content:
         result["error"] = "AI未返回内容"
@@ -1976,77 +1344,15 @@ async def generate_ppt_from_bvid(
     if start_idx > 0:
         html_content = html_content[start_idx:]
 
-    generated_slide_count = count_slide_elements(html_content)
-    if generated_slide_count != slide_count:
-        print(f"[PPT] 页数验收未通过：要求 {slide_count} 页，实际 {generated_slide_count} 页，正在请求修复...")
-        repair_prompt = f"""你刚才生成的幻灯片页数不符合要求。
-目标：严格输出 {slide_count} 个完整的 <div class=\"slide ...\"> 页面，不能少也不能多。
-保留原有真实内容并补齐缺少的独立主题页；不要重复封面，不要写 CSS、JS、Markdown 或解释。
-只返回完整 <div class=\"ppt-container\">...</div>。
-
-原始任务：
-{prompt}
-
-待修复草稿：
-{html_content}"""
-        try:
-            repair_body, repair_headers = _utf8_json_request({
-                'model': model,
-                'messages': [{'role': 'user', 'content': repair_prompt}],
-                'temperature': 0.35,
-                'max_tokens': 16384,
-            })
-            async with httpx.AsyncClient(timeout=300.0) as client:
-                repair_response = await client.post(
-                    f"{base_url}/chat/completions",
-                    headers={'Authorization': f'Bearer {api_key}', **repair_headers},
-                    content=repair_body,
-                )
-            if repair_response.status_code >= 400:
-                result["error"] = f"页数修复请求失败：API {repair_response.status_code}"
-                return result
-            repaired = "".join(
-                (choice.get('message') or {}).get('content', '')
-                for choice in (repair_response.json().get('choices') or [])
-            ).strip()
-        except (httpx.RequestError, ValueError, KeyError, TypeError) as exc:
-            result["error"] = f"页数修复失败：{exc}"
-            return result
-        repaired_start = repaired.find('<div class="ppt-container"')
-        if repaired_start == -1:
-            repaired_start = repaired.find('<div class="ppt-container')
-        if repaired_start >= 0:
-            repaired = repaired[repaired_start:]
-        repaired_count = count_slide_elements(repaired)
-        if repaired_count != slide_count:
-            result["error"] = (
-                f"生成页数不符合要求：要求 {slide_count} 页，修复后仍为 {repaired_count} 页；"
-                "未保存该不合格网页。"
-            )
-            return result
-        html_content = repaired
-        generated_slide_count = repaired_count
-        print(f"[PPT] 页数修复通过：{generated_slide_count}/{slide_count} 页")
-
-    result["slide_count"] = generated_slide_count
-
     # Step 4: 包装完整HTML
-    print("[PPT] 正在组装HTML页面...")
-    _safe_flush(sys.stdout)
-    full_html = build_full_html(
-        html_content,
-        theme,
-        enhanced_animations=enhanced_animations,
-    )
-    print(f"[PPT] HTML组装完成 ({len(full_html):,}字符)")
+    full_html = build_full_html(html_content, theme)
 
     # Step 5: 保存（可选）
     result["html_content"] = full_html
 
     if auto_save:
         if output_dir is None:
-            from core.user_data import HTML_EXPORTS_DIR
-            output_dir = str(HTML_EXPORTS_DIR)
+            output_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "html_exports")
         os.makedirs(output_dir, exist_ok=True)
 
         safe_title = re.sub(r'[\\/*?:"<>|]', '_', title)[:40]
@@ -2057,7 +1363,6 @@ async def generate_ppt_from_bvid(
             f.write(full_html)
 
         result["html_path"] = html_path
-        print(f"[PPT] 已保存: {html_path}")
 
     result["success"] = True
 
@@ -2074,8 +1379,7 @@ if __name__ == "__main__":
     theme = sys.argv[2] if len(sys.argv) > 2 else "dark"
 
     # 从config读取API配置
-    from core.config import CONFIG_FILE, COOKIE_FILE
-    config_path = CONFIG_FILE
+    config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "Data", "config.json")
     api_key = ""
     base_url = ""
     model = "qwen/qwen3.5-122b-a10b"
@@ -2088,11 +1392,11 @@ if __name__ == "__main__":
             model = api_cfg.get('model_name', model)
 
     if not api_key or not base_url:
-        print(f"请在 {CONFIG_FILE} 中配置 unified_api_key 和 unified_base_url")
+        print("请在 Data/config.json 中配置 unified_api_key 和 unified_base_url")
         sys.exit(1)
 
     # 加载cookies
-    cookie_file = COOKIE_FILE
+    cookie_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "Data", "bilibili_cookies.json")
     cookies = None
     if os.path.exists(cookie_file):
         with open(cookie_file, 'r', encoding='utf-8') as f:

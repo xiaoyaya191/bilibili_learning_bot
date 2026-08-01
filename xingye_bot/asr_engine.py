@@ -13,16 +13,9 @@ import shutil
 import asyncio
 import subprocess
 import contextlib
-import sys
 from pathlib import Path
 from typing import Any
 from dataclasses import dataclass, field
-
-
-def _hidden_subprocess_kwargs() -> dict:
-    """Avoid flashing ffmpeg helper windows on Windows."""
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    return {"creationflags": flags} if flags else {}
 
 # ── 运行时延迟导入（避免无依赖时崩溃）──
 
@@ -31,9 +24,7 @@ def _get_funasr():
     try:
         from funasr import AutoModel
         return AutoModel
-    except Exception:
-        # Optional ML packages can also fail with missing DLLs or incompatible
-        # native wheels.  Keep ASR optional and allow the normal fallback path.
+    except ImportError:
         return None
 
 def _get_whisper():
@@ -41,7 +32,7 @@ def _get_whisper():
     try:
         import whisper
         return whisper
-    except Exception:
+    except ImportError:
         return None
 
 def _get_pyannote_pipeline():
@@ -194,7 +185,7 @@ class ASREngine:
         try:
             subprocess.run(
                 [ffmpeg, "-version"], check=False,
-                capture_output=True, timeout=10, **_hidden_subprocess_kwargs()
+                capture_output=True, timeout=10,
             )
             self._ffmpeg_ok_cache = True
             return True
@@ -204,14 +195,10 @@ class ASREngine:
 
     def _get_model_dir(self) -> str:
         """获取 FunASR 模型目录（自动创建，供 AutoModel 下载模型）"""
-        if self.funasr_model_dir:
+        if self.funasr_model_dir and os.path.isdir(self.funasr_model_dir):
             return self.funasr_model_dir
         # 默认路径：项目下的 model/asr，自动创建目录
-        if getattr(sys, "frozen", False):
-            from core.user_data import USER_DATA_DIR
-            default = USER_DATA_DIR / "models" / "asr"
-        else:
-            default = Path(__file__).parent.parent / "model" / "asr"
+        default = Path(__file__).parent.parent / "model" / "asr"
         os.makedirs(str(default), exist_ok=True)
         return str(default)
 
@@ -324,8 +311,7 @@ class ASREngine:
                     str(audio_path),
                 ]
                 try:
-                    subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=600,
-                                   **_hidden_subprocess_kwargs())
+                    subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=600)
                     if audio_path.exists() and audio_path.stat().st_size > 1024:
                         return audio_path, _time.time() - _start
                     return None, _time.time() - _start
@@ -564,7 +550,7 @@ class ASREngine:
                 str(chunk_path),
             ]
             try:
-                subprocess.run(cmd, capture_output=True, timeout=120, **_hidden_subprocess_kwargs())
+                subprocess.run(cmd, capture_output=True, timeout=120)
             except subprocess.TimeoutExpired:
                 continue
             if chunk_path.exists() and chunk_path.stat().st_size > 1024:
@@ -1036,8 +1022,7 @@ class ASREngine:
             str(audio_path),
         ]
         try:
-            result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=30,
-                                    **_hidden_subprocess_kwargs())
+            result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=30)
             dur = float(result.stdout.strip())
             if dur > 0:
                 return dur

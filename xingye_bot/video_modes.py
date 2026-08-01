@@ -16,14 +16,6 @@ import httpx
 
 from .llm import ModelClient
 from .settings import BotSettings, DATA_DIR
-from utils.subtitles import subtitle_priority
-
-from .grid_frames import (
-    extract_visual_note_grids,
-    grid_images_to_base64,
-    replace_markers_with_screenshots,
-    visual_note_prompt_suffix,
-)
 
 # imageio-ffmpeg 回退检测
 try:
@@ -35,17 +27,6 @@ except ImportError:
 
 CACHE_DIR = DATA_DIR / "video_cache"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
-
-# B站画质 qn 映射：下载抽帧时选用的清晰度。best=127 即自动最高画质（默认），
-# DASH(fnval=4048) 会按 qn 返回所请求的最高可用流，FLV 回退直接用 qn。
-VIDEO_QUALITY_MAP = {
-    "best": 127,   # 自动最高画质（默认，DASH 返回最高可用流）
-    "1080p": 80,   # 1080P 高清
-    "720p": 64,    # 720P 高清
-    "480p": 32,    # 480P 清晰
-    "360p": 16,    # 360P 流畅
-}
-VIDEO_QUALITY_OPTIONS = ["best", "1080p", "720p", "480p", "360p"]
 
 
 @dataclass
@@ -177,22 +158,7 @@ class VideoUnderstanding:
         video_path: Path | None = None
         try:
             video_path = await self.download_video(asset, cookies=cookies)
-            if self.settings.frame_note_mode == "visual_note" and video_path:
-                grid_imgs = extract_visual_note_grids(video_path, {
-                    "visual_note_frame_interval": self.settings.visual_note_frame_interval,
-                    "visual_note_max_frames": self.settings.visual_note_max_frames,
-                    "visual_note_grid_cols": self.settings.visual_note_grid_cols,
-                    "visual_note_grid_rows": self.settings.visual_note_grid_rows,
-                })
-                if grid_imgs:
-                    asset.frames = []
-                    summary = await self.summarize_with_grid(asset, video_path, grid_imgs, selected in {"hybrid", "smart"}, self.settings.custom_video_prompt)
-                    if self.settings.video_delete_after_understand:
-                        self.delete_downloaded_video(video_path)
-                    return UnderstandingResult(selected, True, "", asset, summary, gate)
-                download_reason = "网格抽帧为空，回退字幕模式"
-            else:
-                asset.frames = self.extract_frames(video_path, self.settings.video_frame_count)
+            asset.frames = self.extract_frames(video_path, self.settings.video_frame_count)
         except Exception as exc:
             download_reason = f"下载或抽帧失败，已降级到字幕模式：{exc}"
 
@@ -261,7 +227,14 @@ class VideoUnderstanding:
                 asset.subtitles = "[该视频没有可用 CC 字幕]"
                 return
             # [AI字幕] 优先选AI中文 > 人工中文 > 其他中文
-            best_sub = min(subs, key=subtitle_priority)
+            def _sub_priority(s):
+                lan = s.get('lan', '')
+                if lan == 'ai-zh': return 0
+                if lan == 'zh': return 10
+                if 'zh' in lan: return 20
+                if lan.startswith('ai-'): return 30
+                return 50
+            best_sub = min(subs, key=_sub_priority)
             sub_url = best_sub.get("subtitle_url", '')
             # [FIX] player/wbi/v2 返回的 URL 可能为空但 subtitle_url_v2 有效
             if not sub_url or sub_url in ('/', ''):
@@ -338,11 +311,6 @@ class VideoUnderstanding:
     # ═══════════════════════════════════════════════════════════════
     # ⬇️ download_video — DASH 音视频分离下载 + ffmpeg 合并带声音
     # ═══════════════════════════════════════════════════════════════
-    def _resolve_quality(self) -> int:
-        """把配置中的画质档位解析为 B站 qn 值；默认 best=127（自动最高画质）。"""
-        raw = (getattr(self.settings, "video_quality", "best") or "best").strip().lower()
-        return VIDEO_QUALITY_MAP.get(raw, 127)
-
     async def download_video(self, asset: VideoAsset, cookies: dict[str, str] | None = None) -> Path:
         """下载 B站视频，优先使用 DASH（音视频分离）+ ffmpeg 合并确保有声音。
         无 ffmpeg 时回退到 FLV 一体流。"""
@@ -355,9 +323,6 @@ class VideoUnderstanding:
         # 查找 ffmpeg（合并音视频必需）
         ffmpeg = (find_ffmpeg() if find_ffmpeg else None) or shutil.which("ffmpeg")
 
-        # 解析下载画质（默认最高）
-        qn = self._resolve_quality()
-
         out_dir = self.download_root / asset.bvid
         out_dir.mkdir(parents=True, exist_ok=True)
         safe_title = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", asset.title).strip()[:80] or asset.bvid
@@ -367,7 +332,7 @@ class VideoUnderstanding:
             # ── 方案A: DASH 音视频分离 + ffmpeg 合并（有声音 + 高清）──
             if ffmpeg:
                 try:
-                    result = await self._download_dash(client, asset, wbi_keys, ffmpeg, out_path, headers, qn)
+                    result = await self._download_dash(client, asset, wbi_keys, ffmpeg, out_path, headers)
                     if result:
                         return result
                 except Exception as e:
@@ -377,7 +342,7 @@ class VideoUnderstanding:
             # ── 方案B: FLV 单流回退（音视频一体，无需 ffmpeg）──
             flv_params = self._wbi_sign_params({
                 "bvid": asset.bvid, "cid": asset.cid,
-                "qn": qn, "fnval": 0, "fnver": 0, "fourk": 1,
+                "qn": 80, "fnval": 0, "fnver": 0, "fourk": 1,
             }, wbi_keys)
             play = await client.get("https://api.bilibili.com/x/player/wbi/playurl", params=flv_params)
             play.raise_for_status()
@@ -396,12 +361,11 @@ class VideoUnderstanding:
 
     async def _download_dash(self, client: httpx.AsyncClient, asset: VideoAsset,
                              wbi_keys, ffmpeg_path: str, out_path: Path,
-                             headers: dict, qn: int = 127) -> Path | None:
-        """DASH 模式：分别下载视频流+音频流，ffmpeg 合并为带声音的 mp4。
-        qn 决定请求画质（默认 127=最高）。"""
+                             headers: dict) -> Path | None:
+        """DASH 模式：分别下载视频流+音频流，ffmpeg 合并为带声音的 mp4。"""
         dash_params = self._wbi_sign_params({
             "bvid": asset.bvid, "cid": asset.cid,
-            "qn": qn, "fnval": 4048, "fnver": 0, "fourk": 1,
+            "qn": 127, "fnval": 4048, "fnver": 0, "fourk": 1,
         }, wbi_keys)
         play = await client.get("https://api.bilibili.com/x/player/wbi/playurl", params=dash_params)
         play.raise_for_status()
@@ -444,7 +408,7 @@ class VideoUnderstanding:
                 "-c:a", "aac", "-b:a", "192k",
                 "-movflags", "+faststart",
                 str(out_path),
-            ], capture_output=True, text=True, **_hidden_subprocess_kwargs())
+            ], capture_output=True, text=True)
 
             if result.returncode != 0:
                 # AAC 编码失败，回退到纯 copy 模式
@@ -454,7 +418,7 @@ class VideoUnderstanding:
                     "-c", "copy",
                     "-movflags", "+faststart",
                     str(out_path),
-                ], check=True, capture_output=True, **_hidden_subprocess_kwargs())
+                ], check=True, capture_output=True)
         finally:
             # 清理临时音视频分片文件
             video_tmp.unlink(missing_ok=True)
@@ -497,8 +461,7 @@ class VideoUnderstanding:
             pattern,
         ]
         try:
-            subprocess.run(command, check=True, capture_output=True, text=True, timeout=120,
-                           **_hidden_subprocess_kwargs())
+            subprocess.run(command, check=True, capture_output=True, text=True, timeout=120)
         except subprocess.CalledProcessError as e:
             raise RuntimeError(
                 f"ffmpeg 抽帧失败 (rc={e.returncode}): {e.stderr.strip()[-300:]}"
@@ -557,8 +520,7 @@ class VideoUnderstanding:
                 "-of", "default=noprint_wrappers=1:nokey=1",
                 str(video_path),
             ]
-            result = subprocess.run(command, check=False, text=True, capture_output=True, timeout=15,
-                                    **_hidden_subprocess_kwargs())
+            result = subprocess.run(command, check=False, text=True, capture_output=True, timeout=15)
             try:
                 return int(float(result.stdout.strip()))
             except ValueError:
@@ -570,7 +532,7 @@ class VideoUnderstanding:
             try:
                 result = subprocess.run(
                     [ffmpeg, "-i", str(video_path), "-f", "null", "-"],
-                    capture_output=True, text=True, timeout=30, **_hidden_subprocess_kwargs()
+                    capture_output=True, text=True, timeout=30
                 )
                 import re
                 m = re.search(r"Duration:\s*(\d+):(\d+):(\d+)\.(\d+)", result.stderr)
@@ -652,33 +614,3 @@ class VideoUnderstanding:
             {"role": "system", "content": "你是视频理解助手，必须同时参考画面证据和文本证据。"},
             {"role": "user", "content": content},
         ], model_role="vision", purpose="video-frame-understand")
-
-    # ═══════════════════════════════════════════════════════════════
-    # 🖼️📝 summarize_with_grid — 图文学习笔记（网格帧 + 标记回写）
-    # ═══════════════════════════════════════════════════════════════
-    async def summarize_with_grid(self, asset: VideoAsset, video_path: Path, grid_imgs: list, include_subtitles: bool, custom_prompt: str = "") -> str:
-        """frame_note_mode='visual_note' 时调用：把网格图发给 LLM 生成图文笔记，
-        并把 `*Screenshot-[mm:ss]` / `*Content-[mm:ss]` 标记替换为真实截图。
-        custom_prompt: 用户自定义提示词，追加在标准 prompt 之后。"""
-        grid_b64 = grid_images_to_base64(grid_imgs) if grid_imgs else []
-        text = (
-            "你正在为 B 站视频生成一份「图文笔记」。请结合网格截图、基础信息"
-            f"{'、字幕' if include_subtitles else ''}理解视频。\n"
-            f"标题：{asset.title}\nUP：{asset.up_name}\n时长：{asset.duration}s\n"
-            f"简介：{asset.description[:1000]}\n"
-            f"字幕：{(asset.subtitles if include_subtitles else '[本模式不使用字幕]')[:6000]}\n"
-            + visual_note_prompt_suffix(custom_prompt)
-        )
-        content: list[dict[str, Any]] = [{"type": "text", "text": text}]
-        for b64 in grid_b64:
-            content.append({"type": "image_url", "image_url": {"url": b64}})
-        md = await self.model.chat([
-            {"role": "system", "content": "你是视频图文笔记助手，必须同时参考画面证据和文本证据，输出带目录、带配图的 Markdown。"},
-            {"role": "user", "content": content},
-        ], model_role="vision", purpose="video-visual-note")
-        md, _ = replace_markers_with_screenshots(md, video_path, inline=True)
-        return md
-def _hidden_subprocess_kwargs() -> dict:
-    """Avoid flashing an ffmpeg console window on Windows."""
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    return {"creationflags": flags} if flags else {}

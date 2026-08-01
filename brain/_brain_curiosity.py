@@ -175,7 +175,7 @@ class BrainCuriosityMixin:
             try:
                 self.write_learning_log(f"深度搜索/{topic}", topic, "")
                 # 写入日记
-                if (config.get("diary", {}) or {}).get("enabled", False) and hasattr(self, "diary_mgr"):
+                if hasattr(self, "diary_mgr"):
                     self.diary_mgr.add_entry(
                         f"好奇心深度搜索: {topic}",
                         f"搜索主题「{topic}」观看了{videos_watched}个视频。\n关键发现:\n{summary_text}",

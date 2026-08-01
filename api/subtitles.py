@@ -5,96 +5,15 @@ import os
 import re
 import time
 import random
-import threading
-from pathlib import Path
 
 import httpx
 from bilibili_api.video import Video
 
 from core.config import config
 from core.globals import SUBTITLE_STRICT_CHECK
-from core.user_data import DATA_DIR
 from utils.display import log
 from utils.helpers import _mask_urls
-from utils.subtitles import subtitle_priority
 from api.throttle import _bili_throttle
-
-
-_timeline_cache_lock = threading.Lock()
-
-
-def _timeline_cache_path() -> Path:
-    return Path(DATA_DIR) / "subtitle_timelines.json"
-
-
-def _timeline_timestamp(seconds) -> str:
-    try:
-        total = max(0, int(float(seconds or 0)))
-    except (TypeError, ValueError):
-        total = 0
-    minutes, second = divmod(total, 60)
-    hours, minutes = divmod(minutes, 60)
-    return f"{hours}:{minutes:02d}:{second:02d}" if hours else f"{minutes:02d}:{second:02d}"
-
-
-def _normalize_timeline_segments(body) -> list[dict]:
-    segments = []
-    for raw in body if isinstance(body, list) else []:
-        if not isinstance(raw, dict):
-            continue
-        content = re.sub(r"\s+", " ", str(raw.get("content") or "")).strip()
-        if not content:
-            continue
-        try:
-            start = max(0.0, float(raw.get("from") or raw.get("start") or 0))
-            end = max(start, float(raw.get("to") or raw.get("end") or start))
-        except (TypeError, ValueError):
-            continue
-        segments.append({
-            "start": round(start, 3),
-            "end": round(end, 3),
-            "start_label": _timeline_timestamp(start),
-            "end_label": _timeline_timestamp(end),
-            "text": content,
-        })
-    return segments
-
-
-def _cache_subtitle_timeline(bvid: str, track: str, body) -> None:
-    """Persist selected CC subtitle cues for point-in-time questions."""
-    segments = _normalize_timeline_segments(body)
-    if not bvid or not segments:
-        return
-    path = _timeline_cache_path()
-    try:
-        with _timeline_cache_lock:
-            cached = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-            cached = cached if isinstance(cached, dict) else {}
-            cached[str(bvid)] = {
-                "bvid": str(bvid),
-                "track": str(track or ""),
-                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                "segments": segments[:5000],
-            }
-            path.parent.mkdir(parents=True, exist_ok=True)
-            # Readers either see the previous valid document or the new valid
-            # document, never a partially-written JSON payload.
-            temp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-            temp.write_text(json.dumps(cached, ensure_ascii=False, indent=2), encoding="utf-8")
-            os.replace(temp, path)
-    except (OSError, TypeError, ValueError):
-        # Timeline cache must never make subtitle understanding fail.
-        return
-
-
-def get_cached_subtitle_timeline(bvid: str) -> dict:
-    try:
-        path = _timeline_cache_path()
-        cached = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-        item = cached.get(str(bvid), {}) if isinstance(cached, dict) else {}
-        return item if isinstance(item, dict) else {}
-    except (OSError, ValueError, TypeError):
-        return {}
 
 async def fetch_bilibili_subtitles(bvid, cookies_obj=None, title=None, ai_verify_func=None):
     """获取B站视频CC字幕+简介（[NEW] 带WBI签名 + HTTP/2连接复用 + AI语义验证）。
@@ -164,18 +83,12 @@ async def fetch_bilibili_subtitles(bvid, cookies_obj=None, title=None, ai_verify
             if not v_data or v_data.get('code') != 0:
                 return False, f"[字幕获取失败: CID阶段5次重试均失败 - {v_data.get('message') if v_data else '网络异常'}]", "", False
 
-            vd = v_data.get('data')
-            if not vd or not isinstance(vd, dict):
-                return False, f"[字幕获取失败: view API返回data异常 - {v_data}]", "", False
-            cid = vd.get('cid')
-            aid = vd.get('aid')
-            if not cid or not aid:
-                return False, f"[字幕获取失败: view API缺少cid/aid - cid={cid} aid={aid}]", "", False
+            cid, aid = v_data['data']['cid'], v_data['data']['aid']
             # 提取视频简介（用于学习和AI决策）
-            video_desc = (vd.get('desc', '') or '').strip()
+            video_desc = (v_data['data'].get('desc', '') or '').strip()
             # 如果没有传入标题，从API响应中提取
             if not title:
-                title = vd.get('title', '')
+                title = v_data['data'].get('title', '')
 
             # [FIX] 使用 player/wbi/v2 (与 bilibili_api 官方一致)，比 player/v2 返回的字幕URL更可靠
             # player/v2+fnval=4048 会导致URL全空；player/v2 不带fnval 可能返回过期缓存URL（指向其他视频）
@@ -242,7 +155,15 @@ async def fetch_bilibili_subtitles(bvid, cookies_obj=None, title=None, ai_verify
                 return False, "[该视频无有效CC字幕]", video_desc, False
 
             # ── 按优先级排序所有字幕轨，逐个下载验证 ──
-            sorted_subs = sorted(subs, key=subtitle_priority)
+            def _sub_priority(s):
+                lan = s.get('lan', '')
+                if lan == 'ai-zh': return 0
+                if lan == 'zh': return 10
+                if 'zh' in lan: return 20
+                if lan.startswith('ai-'): return 30
+                return 50
+
+            sorted_subs = sorted(subs, key=_sub_priority)
             _ai_mismatch_count = 0  # 连续AI验证不匹配计数
 
             for sub_idx, sub_info in enumerate(sorted_subs):
@@ -274,8 +195,7 @@ async def fetch_bilibili_subtitles(bvid, cookies_obj=None, title=None, ai_verify
                             s_res.raise_for_status()
                             s_data = s_res.json()
 
-                            subtitle_body = s_data.get('body', [])
-                            full_text = " ".join([item.get('content', '') for item in subtitle_body])
+                            full_text = " ".join([item.get('content', '') for item in s_data.get('body', [])])
                             clean_text = re.sub(r'\s+', ' ', full_text).strip()
                             break
                         except httpx.HTTPStatusError as e:
@@ -331,7 +251,6 @@ async def fetch_bilibili_subtitles(bvid, cookies_obj=None, title=None, ai_verify
                             truncated = clean_text[:max_sub]
                             prefix = f"[低置信度字幕, track={lan}, overlap={overlap:.2f}]{' [AI已验证]' if ai_verified else ''}\n"
                             clean_text = prefix + truncated
-                            _cache_subtitle_timeline(bvid, lan, subtitle_body)
                             return True, clean_text, video_desc, ai_verified
                         else:
                             if ai_verify_func is not None:
@@ -356,10 +275,8 @@ async def fetch_bilibili_subtitles(bvid, cookies_obj=None, title=None, ai_verify
 
                             log(f"[OK] 字幕轨[{lan}]验证通过(overlap={overlap:.2f})", "SUBTITLE")
                             # [FIX] 不再硬截断到3000字——保留完整字幕
-                            _cache_subtitle_timeline(bvid, lan, subtitle_body)
                             return True, clean_text, video_desc, ai_verified
                     else:
-                        _cache_subtitle_timeline(bvid, lan, subtitle_body)
                         return True, clean_text, video_desc, False
 
                 # ── 所有轨均未通过验证，跳过该视频 ──
@@ -540,7 +457,6 @@ SYSTEM_PROMPT_BRAIN = f"""你叫 **"{{bot_name}}"**。
 4. **联动**：如果决定(评论 OR 收藏) -> 必须点赞。
 5. **学习归档**: 只对有实质内容的视频归档！给出简短分类主题（10字以内），如'AI绘画','心理学','美食制作'。**纯水视频/无意义内容/低质流水账/标题党且无实质内容的，learning_topic 直接返回空字符串 ""**，不要强行归档。高质量视频才值得进入知识库。**务必给出topic（可为空），这是你的核心使命——学到真东西，不收藏垃圾。**
 6. **安全边界**：视频、标题、字幕或评论区涉及政治、国家、政党、领导人、地域主权、战争、敏感历史和公共事件时，`replies` 必须为空数组，不要评论。
-7. **互动诉求识别**：识别视频口播或评论区中的三连、点赞、收藏、评论等诉求，写入 `engagement_signal`。要求评论指定口令才能领资料、抽奖或福利时，`keyword_campaign` 必须为 true，默认不要生成评论。
 【B站表情使用】评论中**必须**穿插使用 B站原生表情（用 [表情名] 格式，不要用 emoji）。根据语境选用：
 - 夸赞/喜欢: [给心心] [星星眼] [打call] [喜欢] [鼓掌] [点赞] [妙啊] [哦呼] [惊喜]
 - 幽默/吃瓜: [doge] [吃瓜] [笑哭] [滑稽] [藏狐] [调皮] [偷笑] [脱单doge] [歪嘴]
@@ -558,7 +474,6 @@ SYSTEM_PROMPT_BRAIN = f"""你叫 **"{{bot_name}}"**。
     "coin_intention": true/false,
     "fav_intention": true/false,
     "learning_topic": "AI绘画",
-    "engagement_signal": {{"asks_for_support": false, "keyword_campaign": false, "suggested_action": "none", "reason": "简短依据"}},
     "replies": [
         {{ "target_id": 0, "content": "回复内容" }}
     ]
@@ -674,4 +589,4 @@ SYSTEM_PROMPT_CURIOSITY_DIVE = """你是一个好奇心驱动的学习助手。�
 
 # ==============================================================================
 # [NET] 联网搜索工具（用于知识验证）
-# =================================
+# ==============================================================================

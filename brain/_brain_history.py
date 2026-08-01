@@ -24,7 +24,7 @@ class BrainHistoryMixin:
         except OSError as e:
             log(f'文件操作失败: {e}', 'DEBUG')
 
-    def add_history_video(self, bvid, title, up, aid, action, score=0, pic=""):
+    def add_history_video(self, bvid, title, up, aid, action, score=0):
         if score < REVISIT_MIN_SCORE:
             return
         videos = self.history_videos.get("videos", [])
@@ -38,47 +38,11 @@ class BrainHistoryMixin:
             "aid": aid,
             "action": action,
             "score": score,
-            "pic": str(pic or ""),
             "time": datetime.now().isoformat(),
             "revisit_count": 0,
             "last_revisit": None
         }
         videos.append(entry)
-        self.history_videos["videos"] = videos[-200:]
-        self._save_history_videos()
-
-    def record_watched_video(self, bvid, title, up, aid, *, pic="", duration=0,
-                             source="推荐流", result="已浏览", interest_reason="", score=None):
-        """Persist a real analysis target for the web viewing-history workspace.
-
-        This is deliberately separate from interaction history: one video can be
-        browsed, liked and favorited without creating three visual cards.
-        """
-        bvid = str(bvid or "").strip()
-        if not bvid:
-            return
-        videos = self.history_videos.get("videos", [])
-        entry = next((item for item in videos if item.get("bvid") == bvid and item.get("action") == "view"), None)
-        payload = {
-            "bvid": bvid,
-            "title": str(title or ""),
-            "up": str(up or ""),
-            "aid": aid or 0,
-            "action": "view",
-            "pic": str(pic or ""),
-            "duration": duration or 0,
-            "source": str(source or "推荐流"),
-            "result": str(result or "已浏览"),
-            "interest_reason": str(interest_reason or ""),
-            "score": score,
-            "time": datetime.now().isoformat(),
-            "revisit_count": 0,
-            "last_revisit": None,
-        }
-        if entry is None:
-            videos.append(payload)
-        else:
-            entry.update({key: value for key, value in payload.items() if value not in (None, "")})
         self.history_videos["videos"] = videos[-200:]
         self._save_history_videos()
 

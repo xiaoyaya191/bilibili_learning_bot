@@ -20,11 +20,6 @@ class BrainAutoMixin:
             )
             self.last_auto_diary_at = datetime.now()
             log(f"自动日记已生成: {entry.get('title')}", "NOTE")
-
-            # ── Phase 3: 日记生长点 → OB 好奇心关键词注入 ──
-            if hasattr(self, '_inject_curiosity_from_diary'):
-                await self._inject_curiosity_from_diary(entry)
-
             return True
         except Exception as e:
             log(f"自动日记生成失败: {e}", "WARN")
@@ -61,14 +56,6 @@ class BrainAutoMixin:
                 self.evolution_mgr.mark_applied(item.get("id"))
             self.events_at_last_evolution = self.processed_event_count
             log(f"自我进化复盘完成: {str(parsed.get('reflection', ''))[:80]}", "EVOLVE")
-
-            # ── Phase 4: 进化策略 → OB 配置桥接（含AB上下文）──
-            if hasattr(self, '_apply_strategy_to_ob_v2'):
-                ab_context = ""
-                if hasattr(self, '_ob_ab_tracker') and self._ob_ab_tracker:
-                    ab_context = self._ob_ab_tracker.evolution_context()
-                await self._apply_strategy_to_ob_v2(item, ab_context)
-
             return True
         except Exception as e:
             log(f"自我进化失败: {e}", "WARN")
@@ -96,26 +83,18 @@ class BrainAutoMixin:
     async def _agent_goal_async(self, goal, score=0):
         if not AGENT_ENABLED:
             return
-        if getattr(self, "_agent_goal_running", False):
-            log("Agent 后台探索已在运行，本次触发已合并跳过", "INFO")
-            return
-        self._agent_goal_running = True
         try:
             log(f"🤖 Agent后台探索: {goal[:60]}...", "CONFIG")
-            agent_cfg = config.get("agent", {}) if isinstance(config, dict) else {}
-            timeout_seconds = max(30, min(1800, int(agent_cfg.get("deep_learning_timeout_seconds", 180) or 180)))
             run = await asyncio.wait_for(
                 self.agent_runner.run_goal(goal),
-                timeout=timeout_seconds
+                timeout=180
             )
             ok_steps = sum(1 for item in run.get("results", []) if item.get("result", {}).get("ok"))
             log(f"🤖 Agent后台完成: {ok_steps}/{len(run.get('results', []))}步骤", "CONFIG")
         except asyncio.TimeoutError:
-            log(f"🤖 Agent后台探索超时，已跳过", "WARN")
+            log(f"🤖 Agent后台探索超时(180s)，已跳过", "WARN")
         except Exception as e:
             log(f"🤖 Agent后台异常: {e}", "WARN")
-        finally:
-            self._agent_goal_running = False
 
     async def _pick_agent_dive_topic(self):
         if getattr(self, "_last_interesting_topic", ""):

@@ -1,52 +1,55 @@
-# Claude Learning Web 模板库
+# Claude Design System — 模板库
 
-用于 `视频→网页`、`知识辅导→HTML`、`深入了解/深研计划` 的统一网页生成规范与参考页面。
+> 用于「视频→网页」功能生成的 Claude 风格 HTML 页面参考。
+> 将此目录下的设计规范文件提供给 AI，可生成风格一致的专业网页。
 
 ## 目录结构
 
-```text
+```
 templates/claude/
-├── README.md
+├── README.md                              ← 本文件
 ├── prompts/
-│   └── claude-style-prompt.md      # 统一 AI 网页生成提示词
+│   └── claude-style-prompt.md             ← ★ AI 生成提示词（严格规范）
 └── examples/
-    ├── 01-landing-page.html
-    ├── 02-dashboard.html
-    ├── 03-pricing-page.html
-    ├── 04-blog-article.html
-    ├── 05-faq-page.html
-    ├── 06-signin-page.html
-    ├── 07-warm-slides.html
-    ├── 08-learning-summary.html    # 视频/知识学习页参考
-    └── 09-research-brief.html      # 深研证据链报告参考
+    ├── 01-landing-page.html               ← 产品落地页（含数字滚动动画）
+    ├── 02-dashboard.html                  ← 仪表盘
+    ├── 03-pricing-page.html               ← 定价页
+    ├── 04-blog-article.html               ← 博客文章
+    ├── 05-faq-page.html                   ← FAQ 帮助中心
+    └── 06-signin-page.html                ← 登录页
+    └── 07-warm-slides.html               ← 暖橙幻灯片（Inter+暖灰背景+紫粉渐变标题）
 ```
 
-## 统一入口
+## 使用方式
 
-所有新功能都应通过 `services.html_renderer` 接入网页生成：
+### 方式一：视频→网页（自动）
+在 Web 控制台选择 **Claude** 主题，生成的 PPT 风格 HTML 自动使用 Claude 设计规范（Fraunces + Inter 字体、暖色调背景、卡片式布局）。
 
-- `load_claude_prompt()`：读取统一提示词。
-- `render_slide_html(fragment, title=...)`：把模型输出的 `.ppt-container` 片段包装成完整 HTML。
-- `markdown_to_reading_html(markdown, title)`：把 Markdown 报告导出为阅读页。
-- `markdown_to_slides_html(markdown, title)`：把 Markdown 报告导出为幻灯片页。
+### 方式二：作为 AI Prompt 参考
+将 `prompts/claude-style-prompt.md` 内容提供给 AI，要求生成特定类型的页面：
 
-不要在业务模块里手写完整 HTML、CSS 或 JS。业务模块只负责生成结构化内容片段。
+```
+请参考以下 Claude 设计规范，帮我生成一个用户设置页面：
 
-## 提示词原则
+[粘贴 claude-style-prompt.md 全文]
 
-`prompts/claude-style-prompt.md` 是单一事实源。修改网页设计规则时优先改这个文件，再让业务提示词引用它。
+页面需求：
+- 左侧导航栏 + 右侧内容区
+- 包含头像上传、昵称修改、通知设置
+- 支持亮色/暗色模式切换
+```
 
-关键要求：
+### 方式三：直接打开示例参考
+在浏览器中打开 `examples/` 下的 `.html` 文件，查看视觉效果。
 
-- 根节点必须是 `<div class="ppt-container">`。
-- 只使用项目已有组件类名。
-- 只使用 Lucide 图标。
-- 内容必须基于输入资料，不编造事实、数字和来源。
-- 每页只讲一个主题，避免文字溢出和重复卡片。
+## 设计核心
 
-## 参考页用途
-
-`examples/` 页面不是运行时依赖，主要用于帮助模型学习布局模式，也方便开发者人工查看视觉标准。
-
-- `08-learning-summary.html`：适合视频总结、知识辅导、学习路线。
-- `09-research-brief.html`：适合深研计划、证据表、分歧与待验证问题。
+| 要素 | 规范 |
+|------|------|
+| 字体 | Inter (100-800)，标题细体 200/300 |
+| 图标 | Lucide Icons，stroke-width: 1.5 |
+| 配色 | 黑/白/灰 + 暖橙点缀 `#D97757` |
+| 圆角 | 卡片 14px，按钮 8px |
+| 模式 | 亮色/暗色自动切换 + localStorage 持久化 |
+| 动画 | 数字滚动动画（easeOutExpo），入场上浮 |
+| 禁止 | ❌ emoji、渐变、粗阴影、衬线体、多彩图标 |

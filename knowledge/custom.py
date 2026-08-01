@@ -2,22 +2,17 @@
 import asyncio, json, os, re, time, hashlib
 from datetime import datetime
 from colorama import Fore, Style
-from core.config import config, save_config, KNOWLEDGE_BASE_DIR
-from core.user_data import USER_DATA_DIR
+from core.config import config, save_config, KNOWLEDGE_BASE_DIR, BASE_DIR
+# 从 config 实时读取，避免 import * 缓存问题
+def _get_model_brain():
+    return config.get("api", {}).get("model_brain", "")
 from utils.display import log
 from utils.helpers import sanitize_filename, _mask_urls
 from knowledge.classifier import KnowledgeBaseClassifier
 from knowledge.web_search import web_search
+from openai import OpenAI
 
 CUSTOM_KNOWLEDGE_DIR = os.path.join(KNOWLEDGE_BASE_DIR, "自定义知识")
-KB_METADATA_FILE = str(USER_DATA_DIR / "knowledge_metadata.json")
-
-# ── 统一 AI 调用（不再依赖 openai / xingye_bot） ──
-async def _ai_chat(messages, model="", timeout=120, temperature=0.7, max_tokens=4096):
-    """一次性 AI 调用，返回 content 字符串。"""
-    from services._services_ai import call_ai
-    return await call_ai(messages=messages, model=model, timeout=timeout,
-                         temperature=temperature, max_tokens=max_tokens, verbose=False)
 
 
 def _atomic_write_json(path, data):
@@ -30,7 +25,7 @@ def _atomic_write_json(path, data):
 def _init_custom_knowledge_dir():
     """确保自定义知识目录存在，并初始化 metadata 中的索引"""
     os.makedirs(CUSTOM_KNOWLEDGE_DIR, exist_ok=True)
-    meta_path = KB_METADATA_FILE
+    meta_path = os.path.join(BASE_DIR, "knowledge_metadata.json")
     if os.path.exists(meta_path):
         try:
             with open(meta_path, "r", encoding="utf-8") as f:
@@ -135,21 +130,21 @@ async def _ai_search_bilibili_and_add():
     # 2. AI生成搜索关键词
     print(f"{Fore.CYAN}[INFO] AI正在生成B站搜索关键词...{Style.RESET_ALL}")
     try:
-        content = await _ai_chat(
+        client = OpenAI(api_key=config.get("api", {}).get("unified_api_key", ""), base_url=config.get("api", {}).get("unified_base_url", ""), timeout=15)
+        resp = client.chat.completions.create(
+            model=_get_model_brain(),
             messages=[
                 {"role": "system", "content": "你是一个B站搜索助手。用户想学习某个主题，请生成1-3个适合在B站搜索的短关键词（每个不超过15字），用中文输出，逗号分隔。只输出关键词，不要多余文字。"},
                 {"role": "user", "content": f"我想在B站学习: {topic}"}
-            ],
-            timeout=15,
+            ]
         )
-        search_queries = [q.strip() for q in content.strip().split(",") if q.strip()]
+        search_queries = [q.strip() for q in resp.choices[0].message.content.strip().split(",") if q.strip()]
         print(f"{Fore.GREEN}[OK] 搜索关键词: {' | '.join(search_queries)}{Style.RESET_ALL}")
     except Exception as e:
         print(f"{Fore.YELLOW}[WARN] AI生成关键词失败，直接使用原输入: {e}{Style.RESET_ALL}")
         search_queries = [topic]
 
     # 3. 搜索B站
-    from brain.agent_brain import AgentBrain  # 延迟导入，避免循环依赖
     brain = AgentBrain()
     all_results = []
     seen_bvids = set()
@@ -218,7 +213,6 @@ async def _ai_search_bilibili_and_add():
         print(f"\n{Fore.CYAN}[{idx}/{len(chosen)}] 正在分析: {title[:40]}...{Style.RESET_ALL}")
         
         # 获取字幕
-        from api.subtitles import fetch_bilibili_subtitles  # 延迟导入，避免循环依赖
         subtitle_ok, subtitle_text, video_desc, ai_verified = await fetch_bilibili_subtitles(
             bvid, cookies_obj=brain.cookies, title=title
         )
@@ -230,13 +224,15 @@ async def _ai_search_bilibili_and_add():
         # AI总结
         print(f"{Fore.CYAN}[INFO] AI正在总结内容...{Style.RESET_ALL}")
         try:
-            summary = await _ai_chat(
+            client = OpenAI(api_key=config.get("api", {}).get("unified_api_key", ""), base_url=config.get("api", {}).get("unified_base_url", ""), timeout=30)
+            resp = client.chat.completions.create(
+                model=_get_model_brain(),
                 messages=[
                     {"role": "system", "content": "你是B站视频学习助手。请根据视频字幕内容，提取核心知识点和关键信息，用简洁的markdown格式输出总结。突出重点，去除口语化填充。"},
                     {"role": "user", "content": f"标题: {title}\nUP主: {author}\n\n字幕内容:\n{subtitle_text[:3000]}"}
-                ],
-                timeout=30,
+                ]
             )
+            summary = resp.choices[0].message.content
             
             # 保存到知识库
             clean_title = sanitize_filename(title)
@@ -265,7 +261,7 @@ async def _ai_search_bilibili_and_add():
                 f.write(full_content)
             
             # 更新metadata
-            meta_path = KB_METADATA_FILE
+            meta_path = os.path.join(BASE_DIR, "knowledge_metadata.json")
             with open(meta_path, "r", encoding="utf-8") as f:
                 meta = json.load(f)
             meta.setdefault("file_index", {}).setdefault("自定义知识", [])
@@ -308,13 +304,15 @@ async def _ai_search_bilibili_and_add():
         print(f"\n{Fore.CYAN}[INFO] AI正在生成综合总结...{Style.RESET_ALL}")
         try:
             combined_text = "\n\n".join(all_summaries)
-            final_summary = await _ai_chat(
+            client = OpenAI(api_key=config.get("api", {}).get("unified_api_key", ""), base_url=config.get("api", {}).get("unified_base_url", ""), timeout=30)
+            resp = client.chat.completions.create(
+                model=_get_model_brain(),
                 messages=[
                     {"role": "system", "content": "你是知识整合助手。下面是从多个B站视频中提取的知识总结，请将它们整合成一篇连贯、结构清晰的学习笔记。按主题分类，去除重复内容，补充逻辑连接。用markdown格式输出。"},
                     {"role": "user", "content": f"学习主题: {topic}\n\n各视频总结:\n{combined_text[:4000]}"}
-                ],
-                timeout=30,
+                ]
             )
+            final_summary = resp.choices[0].message.content
         except Exception:
             final_summary = combined_text[:2000]
         
@@ -340,7 +338,7 @@ async def _ai_search_bilibili_and_add():
             f.write(combined_content)
         
         # 更新metadata
-        meta_path = KB_METADATA_FILE
+        meta_path = os.path.join(BASE_DIR, "knowledge_metadata.json")
         with open(meta_path, "r", encoding="utf-8") as f:
             meta = json.load(f)
         meta.setdefault("file_index", {}).setdefault("自定义知识", [])
@@ -398,13 +396,15 @@ async def _add_custom_knowledge():
     # AI总结
     print(f"{Fore.CYAN}[INFO] AI正在生成摘要...{Style.RESET_ALL}")
     try:
-        summary = await _ai_chat(
+        client = OpenAI(api_key=config.get("api", {}).get("unified_api_key", ""), base_url=config.get("api", {}).get("unified_base_url", ""), timeout=30)
+        resp = client.chat.completions.create(
+            model=_get_model_brain(),
             messages=[
                 {"role": "system", "content": "你是一个知识总结助手。请用简洁markdown格式总结以下用户提供的内容，提取核心知识点和关键信息。"},
                 {"role": "user", "content": f"标题: {title}\n\n内容:\n{content}"}
-            ],
-            timeout=30,
+            ]
         )
+        summary = resp.choices[0].message.content
     except Exception as e:
         print(f"{Fore.YELLOW}[WARN] AI总结失败: {e}，使用原始内容{Style.RESET_ALL}")
         summary = content[:500]
@@ -432,7 +432,7 @@ async def _add_custom_knowledge():
         f.write(full_content)
     
     # 更新 metadata
-    meta_path = KB_METADATA_FILE
+    meta_path = os.path.join(BASE_DIR, "knowledge_metadata.json")
     with open(meta_path, "r", encoding="utf-8") as f:
         meta = json.load(f)
     meta.setdefault("file_index", {}).setdefault("自定义知识", [])
@@ -454,7 +454,6 @@ async def _add_custom_knowledge():
     
     # 更新向量索引
     try:
-        from brain.agent_brain import AgentBrain  # 延迟导入，避免循环依赖
         brain = AgentBrain()
         if brain.kb_search:
             await brain.kb_search.update_entry(filepath)
@@ -586,13 +585,15 @@ async def _edit_custom_knowledge(entries):
         # AI重新生成摘要
         print(f"{Fore.CYAN}[INFO] AI正在重新生成摘要...{Style.RESET_ALL}")
         try:
-            new_summary = await _ai_chat(
+            client = OpenAI(api_key=config.get("api", {}).get("unified_api_key", ""), base_url=config.get("api", {}).get("unified_base_url", ""), timeout=30)
+            resp = client.chat.completions.create(
+                model=_get_model_brain(),
                 messages=[
                     {"role": "system", "content": "你是一个知识总结助手。请用简洁markdown格式总结以下内容。"},
                     {"role": "user", "content": f"标题: {new_title}\n\n内容:\n{new_content_text}"}
-                ],
-                timeout=30,
+                ]
             )
+            new_summary = resp.choices[0].message.content
             full_content = (
                 f"# 📝 自定义知识\n\n"
                 f"【信息】\n"
@@ -635,7 +636,7 @@ async def _edit_custom_knowledge(entries):
         os.remove(fpath)
     
     # 更新 metadata
-    meta_path = KB_METADATA_FILE
+    meta_path = os.path.join(BASE_DIR, "knowledge_metadata.json")
     with open(meta_path, "r", encoding="utf-8") as f:
         meta = json.load(f)
     for e in meta.setdefault("file_index", {}).setdefault("自定义知识", []):
@@ -649,7 +650,6 @@ async def _edit_custom_knowledge(entries):
     
     # 更新向量索引
     try:
-        from brain.agent_brain import AgentBrain  # 延迟导入，避免循环依赖
         brain = AgentBrain()
         if brain.kb_search:
             await brain.kb_search.update_entry(new_filepath)
@@ -686,7 +686,7 @@ async def _delete_custom_knowledge(entries):
         print(f"{Fore.GREEN}[OK] 文件已删除{Style.RESET_ALL}")
     
     # 更新 metadata
-    meta_path = KB_METADATA_FILE
+    meta_path = os.path.join(BASE_DIR, "knowledge_metadata.json")
     with open(meta_path, "r", encoding="utf-8") as f:
         meta = json.load(f)
     meta.setdefault("file_index", {}).setdefault("自定义知识", [])
@@ -758,12 +758,15 @@ async def _search_custom_knowledge():
 
 
 async def _call_ai_with_retry_static(model, messages, request_timeout=30, max_retries=2):
-    """静态AI调用辅助函数（统一 AI 通道，不依赖 openai/xingye_bot），带重试。
-    返回 AI 回复字符串（不再返回 OpenAI response 对象，兼容旧调用方）。"""
+    """静态AI调用辅助函数（不依赖brain实例），带重试"""
     for attempt in range(max_retries + 1):
         try:
-            content = await _ai_chat(messages=messages, model=model, timeout=request_timeout)
-            return content
+            client = OpenAI(api_key=config.get("api", {}).get("unified_api_key", ""), base_url=config.get("api", {}).get("unified_base_url", ""), timeout=request_timeout)
+            resp = client.chat.completions.create(
+                model=model,
+                messages=messages
+            )
+            return resp
         except Exception as e:
             if attempt < max_retries:
                 wait = min(3 * (2 ** attempt), 10)

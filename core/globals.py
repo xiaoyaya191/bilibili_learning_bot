@@ -11,17 +11,7 @@ from datetime import datetime
 from colorama import Fore, Style
 
 from core.config import config, load_config as _load_config, save_config as _save_config
-from core.user_data import (
-    DATA_DIR as _USER_DATA_DIR,
-    HIGHLIGHTS_DIR as _USER_HIGHLIGHTS_DIR,
-    KNOWLEDGE_BASE_DIR as _USER_KNOWLEDGE_BASE_DIR,
-    USER_DATA_DIR as _USER_DATA_ROOT,
-)
-from core.config import (
-    get_backup_dir, mask_secret, get_config_or_env,
-    _get_vision_api_key, _get_vision_base_url, _get_fallback_models,
-    resolve_knowledge_base_dir,
-)
+from core.config import get_backup_dir, mask_secret, get_config_or_env
 from utils.display import log
 
 # ══════════════════════════════════════════════════════════
@@ -59,7 +49,7 @@ _CONFIG_PATHS = {
     "PROB_COMMENT_OTHERS":   (("interaction", "prob_comment_others"), 0.3),
     "RANDOM_ENABLED":        (("interaction", "random_enabled"), True),
     "PROB_LIKE_SOLO":        (("interaction", "prob_like_solo"), 0.5),
-    "COMMENT_CHECK_ENABLED": (("interaction", "comment_check_enabled"), True),
+    "COMMENT_CHECK_ENABLED": (("comment", "enabled"), True),
 
     # 私信
     "PRIVATE_MESSAGE_ENABLED":         (("private_message", "enabled"), True),
@@ -74,18 +64,18 @@ _CONFIG_PATHS = {
     "PER_VIDEO_CHECK_PRIVATE_MESSAGES":   (("per_video_check", "check_private_messages"), True),
     "PER_VIDEO_CHECK_OWN_COMMENTS":        (("per_video_check", "check_own_comments"), True),
     "PER_VIDEO_CHECK_MAX_AT":             (("per_video_check", "max_at_per_check"), 5),
-    "PER_VIDEO_CHECK_COOLDOWN":           (("per_video_check", "cooldown_seconds"), 10),
+    "PER_VIDEO_CHECK_COOLDOWN":           (("per_video_check", "cooldown_seconds"), 30),
 
     # 日记
-    "DIARY_ENABLED":              (("diary", "enabled"), False),
-    "DIARY_AUTO_ENABLED":         (("diary", "auto_enabled"), False),
+    "DIARY_ENABLED":              (("diary", "enabled"), True),
+    "DIARY_AUTO_ENABLED":         (("diary", "auto_enabled"), True),
     "DIARY_AUTO_INTERVAL_MINUTES":(("diary", "auto_interval_minutes"), 60),
     "DIARY_MIN_EVENTS_FOR_AUTO":  (("diary", "min_events_for_auto"), 3),
 
     # 自我进化
-    "EVOLUTION_ENABLED":                  (("self_evolution", "enabled"), False),
-    "EVOLUTION_AUTO_ENABLED":             (("self_evolution", "auto_enabled"), False),
-    "EVOLUTION_AUTO_APPLY":               (("self_evolution", "auto_apply"), False),
+    "EVOLUTION_ENABLED":                  (("self_evolution", "enabled"), True),
+    "EVOLUTION_AUTO_ENABLED":             (("self_evolution", "auto_enabled"), True),
+    "EVOLUTION_AUTO_APPLY":               (("self_evolution", "auto_apply"), True),
     "EVOLUTION_REFLECT_INTERVAL_EVENTS":  (("self_evolution", "reflect_interval_events"), 8),
     "EVOLUTION_MIN_EVENTS_FOR_REFLECT":   (("self_evolution", "min_events_for_reflect"), 3),
 
@@ -141,9 +131,9 @@ _CONFIG_PATHS = {
     "VIDEO_DOWNLOAD_DIR":                (("video", "download_dir"), ""),
     "VIDEO_DELETE_AFTER_UNDERSTAND":     (("video", "delete_video_after_understand"), True),
     "VIDEO_FILTER_MODE":                 (("video", "filter_mode"), "cover_and_title"),
-    "SMART_FRAME_ENABLED":               (("vision", "smart_frame_enabled"), False),
-    "SMART_FRAME_MIN":                   (("vision", "smart_frame_min"), 10),
-    "SMART_FRAME_MAX":                   (("vision", "smart_frame_max"), 60),
+    "SMART_FRAME_ENABLED":               (("video", "smart_frame_enabled"), False),
+    "SMART_FRAME_MIN":                   (("video", "smart_frame_min"), 10),
+    "SMART_FRAME_MAX":                   (("video", "smart_frame_max"), 60),
 
     # 视觉
     "VISION_COVER_ENABLED":           (("vision", "cover_enabled"), True),
@@ -261,24 +251,6 @@ _CONFIG_PATHS = {
     "CURIOSITY_DEEP_DIVE_PROB":            (("curiosity_search", "prob_trigger"), 0.3),
     "CURIOSITY_DEEP_DIVE_COOLDOWN_MINUTES":(("curiosity_search", "cooldown_minutes"), 120),
 
-    # 图文学习笔记功能
-    "CHAPTER_LOCK_ENABLED":       (("chapter_lock", "enabled"), True),
-    "CHAPTER_LOCK_MIN_MINUTES":   (("chapter_lock", "min_duration_minutes"), 15),
-    "CHAPTER_LOCK_MAX_CHAPTERS":  (("chapter_lock", "max_chapters_per_video"), 12),
-    "CHAPTER_LOCK_STRATEGY":      (("chapter_lock", "chapter_strategy"), "ai_split"),
-    "MINDMAP_ENABLED":            (("mindmap", "enabled"), True),
-    "MINDMAP_AUTO_GENERATE":      (("mindmap", "auto_generate"), True),
-    "MINDMAP_OUTPUT_DIR":         (("mindmap", "output_dir"), "MindMaps/"),
-    "MINDMAP_PROMPT":             (("mindmap", "prompt"), ""),
-    "MINDMAP_INCLUDE_IMAGES":     (("mindmap", "include_images"), True),
-    "DOC_EXPORT_ENABLED":         (("document_export", "enabled"), True),
-    "DOC_EXPORT_DIR":             (("document_export", "output_dir"), "Word/"),
-    "DOC_EXPORT_FOLDER":          (("document_export", "folder_name"), "Word"),
-    "DOC_EXPORT_PROMPT":          (("document_export", "prompt"), ""),
-    "NOTE_STYLE_ENABLED":         (("note_style", "enabled"), True),
-    "NOTE_STYLE_ACTIVE":          (("note_style", "active_style"), "balanced"),
-    "RAG_QA_ENABLED":             (("rag_qa", "enabled"), False),
-
     # 心理分析引擎
     "PSYCHO_ENGINE_ENABLED":            (("psycho_engine", "enabled"), True),
     "PSYCHO_DEEP_ANALYZE_INTERVAL":     (("psycho_engine", "deep_analyze_interval_videos"), 100),
@@ -295,6 +267,21 @@ _CONFIG_PATHS = {
 }
 
 # 特殊处理的 getter：需要回退逻辑或额外计算
+def _get_vision_api_key():
+    val = config.get("api", {}).get("vision_api_key")
+    if val:
+        return val
+    return get_config_or_env("api", "unified_api_key", "BILI_AI_API_KEY")
+
+def _get_vision_base_url():
+    val = config.get("api", {}).get("vision_base_url")
+    if val:
+        return val
+    return get_config_or_env("api", "unified_base_url", "BILI_AI_BASE_URL")
+
+def _get_fallback_models():
+    return config.get("fallback_models", {})
+
 def _get_fallback_model_chat():
     return config.get("fallback_models", {}).get("chat", "")
 
@@ -363,8 +350,7 @@ def __getattr__(name):
 # 路径变量
 # ══════════════════════════════════════════════════════════
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-USER_DATA_DIR = str(_USER_DATA_ROOT)
-DATA_DIR = str(_USER_DATA_DIR)
+DATA_DIR = os.path.join(BASE_DIR, "Data")
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 BOT_LOCK_FILE = os.path.join(DATA_DIR, "bot.lock")
 BACKUP_DIR = get_backup_dir()
@@ -382,13 +368,13 @@ SELF_EVOLUTION_FILE = os.path.join(DATA_DIR, "self_evolution.json")
 AGENT_SKILL_LOG_FILE = os.path.join(DATA_DIR, "agent_skill_log.json")
 SEARCH_HISTORY_FILE = os.path.join(DATA_DIR, "search_history.json")
 RUNTIME_STATE_FILE = os.path.join(DATA_DIR, "bot_runtime_state.json")
-JOURNAL_FILE = os.path.join(USER_DATA_DIR, "bot_journal.md")
-MEMORY_FILE = os.path.join(USER_DATA_DIR, "bot_memory.json")
+JOURNAL_FILE = os.path.join(BASE_DIR, "bot_journal.md")
+MEMORY_FILE = os.path.join(BASE_DIR, "bot_memory.json")
 HISTORY_VIDEOS_FILE = os.path.join(DATA_DIR, "history_videos.json")
-KNOWLEDGE_BASE_DIR = str(resolve_knowledge_base_dir(config))
-DRY_GOODS_DIR = str(_USER_HIGHLIGHTS_DIR)
-LEARNING_LOG_FILE = os.path.join(USER_DATA_DIR, "learning_log.md")
-KB_METADATA_FILE = os.path.join(USER_DATA_DIR, "knowledge_metadata.json")
+KNOWLEDGE_BASE_DIR = os.path.join(BASE_DIR, "KnowledgeBase")
+DRY_GOODS_DIR = os.path.join(BASE_DIR, "highlights")
+LEARNING_LOG_FILE = os.path.join(BASE_DIR, "learning_log.md")
+KB_METADATA_FILE = os.path.join(BASE_DIR, "knowledge_metadata.json")
 
 # [FIX] 以上所有 config 派生变量已改为模块级 __getattr__ 动态属性，
 # 见文件顶部的 _CONFIG_PATHS 映射表和 __getattr__ 函数。

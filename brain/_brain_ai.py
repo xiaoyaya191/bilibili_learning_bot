@@ -40,9 +40,6 @@ class BrainAIMixin:
         vision_api_key = api.get("vision_api_key", "")
         vision_base_url = api.get("vision_base_url", "")
         
-        # 脱敏占位符视为未配置（防 '[已隐藏]' 当真实 key 发送导致 ascii 崩溃）
-        if vision_api_key == "[已隐藏]":
-            vision_api_key = ""
         return {
             "api_key": _or_env("unified_api_key", "BILI_AI_API_KEY"),
             "base_url": _or_env("unified_base_url", "BILI_AI_BASE_URL"),
@@ -76,17 +73,7 @@ class BrainAIMixin:
             if live["base_url"] and "://" in str(live["base_url"]):
                 base_url = live["base_url"]
         
-        # 代理支持
-        _proxy_url = ""
-        try:
-            from services.proxy_config import get_proxy_url
-            _proxy_url = get_proxy_url()
-        except Exception:
-            pass
-        _http_client = httpx.Client(proxy=_proxy_url) if _proxy_url else None
-
-        client = OpenAI(api_key=api_key, base_url=base_url, timeout=float(timeout_val),
-                        max_retries=0, http_client=_http_client)
+        client = OpenAI(api_key=api_key, base_url=base_url, timeout=float(timeout_val))
         kwargs.pop("_vision_api_key", None)
         kwargs.pop("_vision_base_url", None)
         return client.chat.completions.create(**kwargs)
@@ -134,34 +121,13 @@ class BrainAIMixin:
             "Content-Length": str(len(body_bytes)),
         }
 
-        # 代理支持
-        _proxy_url = ""
-        try:
-            from services.proxy_config import get_proxy_url
-            _proxy_url = get_proxy_url()
-        except Exception:
-            pass
-        async with httpx.AsyncClient(timeout=float(timeout),
-                                     proxy=_proxy_url or None) as client:
+        async with httpx.AsyncClient(timeout=float(timeout)) as client:
             resp = await client.post(url, headers=headers, content=body_bytes)
-            try:
-                resp.raise_for_status()
-            except httpx.HTTPStatusError as he:
-                # [DEBUG] 附带API返回的具体错误信息，方便排查
-                try:
-                    body_preview = resp.text[:500] if resp.text else "(empty body)"
-                except Exception:
-                    body_preview = "(read failed)"
-                raise httpx.HTTPStatusError(
-                    f"HTTP {resp.status_code}: {body_preview}",
-                    request=he.request, response=he.response
-                ) from None
+            resp.raise_for_status()
             data = resp.json()
 
         class _Msg:
-            def __init__(self, d):
-                self.content = d.get("content") or d.get("reasoning_content") or ""
-                self.reasoning_content = d.get("reasoning_content") or ""
+            def __init__(self, d): self.content = d.get("content", "")
         class _Choice:
             def __init__(self, d): self.message = _Msg(d.get("message", {}))
         class _Resp:
@@ -171,30 +137,12 @@ class BrainAIMixin:
     async def _call_ai_with_retry(self, **kwargs):
         """多级降级AI调用：后端切换 → 模型降级 → 备用提供商。"""
         live = self._live_config()
+        max_retries = 11
         last_error = None
+        _was_cooled_down = False
         
-        # [FIX] 内容大小保护：防止超长文本导致 400 context_length_exceeded
-        MAX_MESSAGE_LEN = 60000  # ~15K tokens (4 char/token)
-        messages = kwargs.get("messages", [])
-        for mi, msg in enumerate(messages):
-            content = msg.get("content", "")
-            if isinstance(content, str) and len(content) > MAX_MESSAGE_LEN:
-                truncated = content[:MAX_MESSAGE_LEN] + f"\n\n[内容已截断，原{len(content)}字符，截留{MAX_MESSAGE_LEN}字符]"
-                kwargs["messages"][mi] = {**msg, "content": truncated}
-                log(f"[TRUNC] 消息过大({len(content)}字符→{MAX_MESSAGE_LEN})，已截断 #context_guard", "WARN")
-
         if self._is_ai_degraded():
             raise RuntimeError("AI处于降级模式，跳过调用")
-
-        def is_balance_exhausted(error: Exception) -> bool:
-            """A 402 balance response cannot recover through retries."""
-            text = str(error).lower()
-            return (
-                "http 402" in text
-                or "insufficient balance" in text
-                or "insufficient quota" in text
-                or "quota exceeded" in text
-            )
         
         _is_vision = (
             kwargs.get("model") == live["model_vision"]
@@ -207,9 +155,8 @@ class BrainAIMixin:
         _models_to_try = [_primary_model]
         if _fallback_model and _fallback_model != _primary_model:
             _models_to_try.append(_fallback_model)
-        api_cfg = config.get("api", {}) if isinstance(config, dict) else {}
-        _primary_retries = max(1, min(5, int(api_cfg.get("max_retries", 3))))
-        _fallback_retries = max(1, min(3, int(api_cfg.get("fallback_retries", 2))))
+        _fallback_retries = 10
+        _primary_retries = 11
         
         _providers = [{
             "name": "primary",
@@ -250,11 +197,10 @@ class BrainAIMixin:
         
         if self._ai_errors_consecutive >= 5:
             cooldown = 60
-            self._ai_degraded_until = time.time() + cooldown
-            self._ai_degraded_logged = False
+            log(f"[WARN] AI服务器连续{self._ai_errors_consecutive}次失败，进入{cooldown}秒熔断冷却...", "WARN")
+            await asyncio.sleep(cooldown)
             self._ai_errors_consecutive = 0
-            log(f"[WARN] AI服务器连续失败，进入{cooldown}秒非阻塞降级期", "WARN")
-            raise RuntimeError("AI连续失败，已进入非阻塞降级期")
+            _was_cooled_down = True
         
         for pi, provider in enumerate(_providers):
             _is_fallback_provider = provider.get("is_fallback", False)
@@ -281,7 +227,6 @@ class BrainAIMixin:
                 _cur_retries = _fallback_retries if (_is_fallback_provider or mi > 0) else _primary_retries
                 
                 for attempt in range(_cur_retries):
-                    _skip_model_retries = False  # client error → skip all attempts for this model
                     for bi, backend in enumerate(backends):
                         is_last_backend = (bi == len(backends) - 1)
                         try:
@@ -306,54 +251,12 @@ class BrainAIMixin:
                             if is_last_backend:
                                 last_error = e
                                 err_msg = str(e).lower()
-                                if is_balance_exhausted(e):
-                                    # The provider has explicitly rejected the request for lack of
-                                    # balance. Retrying the same key only blocks the learning loop
-                                    # and floods the full log, so wait for the user to recharge or
-                                    # change provider before trying again.
-                                    cooldown = 300
-                                    self._ai_degraded_until = time.time() + cooldown
-                                    self._ai_degraded_logged = True
-                                    log(
-                                        "[FATAL_AI_FAILURE] AI账户余额或配额不足（HTTP 402），已暂停 AI 调用 5 分钟；"
-                                        "请在配置编辑中检查当前 API 提供商的余额或更换可用密钥。",
-                                        "WARN",
-                                    )
-                                    raise RuntimeError("AI账户余额或配额不足（HTTP 402）") from e
                                 is_model_gone = any(kw in err_msg for kw in
                                     ['model_not_found', '无可用渠道', 'model is not found', 'unsupported model'])
                                 is_overload = any(kw in err_msg for kw in 
                                     ['overload', 'not ready', 'too many', 'rate limit', '429', '503', '502', '522', 'timeout'])
-                                # 客户端错误 (400/401/403): 请求本身有问题，重试无效
-                                is_client_error = any(kw in err_msg for kw in
-                                    ['http 400', '400 bad request', '401 unauthorized', '403 forbidden',
-                                     'context length', 'maximum context', 'content is too long',
-                                     'content_filter', 'content filter', 'safety'])
-                                is_empty_plugin_response = (
-                                    'plugin_error' in err_msg
-                                    or 'empty response after retry' in err_msg
-                                    or 'ai returned an empty response' in err_msg
-                                )
-                                is_connection_failure = any(marker in err_msg for marker in (
-                                    'all connection attempts failed',
-                                    'connection refused',
-                                    'actively refused',
-                                    'failed to establish a new connection',
-                                ))
                                 if is_model_gone:
                                     log(f"[SKIP] 模型不可用({err_msg[:120]})，跳过重试直接切换", "WARN")
-                                    _skip_model_retries = True
-                                    break
-                                if is_client_error:
-                                    # 打印API原始错误便于排查
-                                    err_detail = str(e)[:300].replace('\n', ' | ')
-                                    log(f"[FAIL] API拒绝请求(客户端错误): {_mask_urls(err_detail)}", "WARN")
-                                    # 客户端错误不重试，但允许切换后端/模型/提供商
-                                    _skip_model_retries = True
-                                    break
-                                if is_empty_plugin_response or is_connection_failure:
-                                    log("[SKIP] AI网关当前不可用，立即使用本地内容评分", "WARN")
-                                    _skip_model_retries = True
                                     break
                                 if attempt < _cur_retries - 1:
                                     wait = (attempt + 1) * 3.0
@@ -367,9 +270,8 @@ class BrainAIMixin:
                                 else:
                                     break
                             continue
-                    # After all backends tried for this attempt:
-                    if _skip_model_retries:
-                        break  # client/model error → skip remaining attempts, try next model/provider
+                    else:
+                        pass
                     continue
                 if mi > 0 and not _is_fallback_provider:
                     log(f"[REFRESH] 备用模型{model}重试耗尽，回退到默认模型: {_primary_model}", "WARN")
@@ -407,6 +309,12 @@ class BrainAIMixin:
                 self._ai_using_fallback_provider = True
                 self._ai_fallback_recheck_at = time.time() + 600
                 log(f"🔻 主API连续失败{self._ai_primary_failing}次，将在下次调用切换到备用提供商", "WARN")
+        
+        if _was_cooled_down:
+            degrade_sec = 300
+            self._ai_degraded_until = time.time() + degrade_sec
+            self._ai_degraded_logged = False
+            log(f"🔻 熔断恢复后仍失败，进入{degrade_sec}s AI降级模式（跳过封面分析/兴趣判断）", "WARN")
         
         raise last_error or RuntimeError("AI调用全部失败，原因未知")
 
