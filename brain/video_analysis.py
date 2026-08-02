@@ -1418,7 +1418,10 @@ async def _agent_video_analysis(brain, bvid, title, up_name, video_url, aid=0):
 
     def _agent_read_file(rel_path):
         """读取知识库文件"""
-        full_path = os.path.join(KNOWLEDGE_BASE_DIR, rel_path)
+        from services.knowledge_tutor import safe_resolve
+        full_path = safe_resolve(rel_path)
+        if full_path is None:
+            return f"非法路径: {rel_path}\n禁止访问知识库外部路径"
         if not os.path.exists(full_path):
             # 尝试模糊匹配
             all_files = _scan_knowledge_base_md_files()
@@ -1446,7 +1449,10 @@ async def _agent_video_analysis(brain, bvid, title, up_name, video_url, aid=0):
 
     async def _agent_delete_file(rel_path):
         """删除知识库文件（需4选1确认）"""
-        full_path = os.path.join(KNOWLEDGE_BASE_DIR, rel_path)
+        from services.knowledge_tutor import safe_resolve
+        full_path = safe_resolve(rel_path)
+        if full_path is None:
+            return f"非法路径: {rel_path}\n禁止访问知识库外部路径"
         if not os.path.exists(full_path):
             return f"文件不存在: {rel_path}"
         # 先预览文件内容
@@ -1472,7 +1478,10 @@ async def _agent_video_analysis(brain, bvid, title, up_name, video_url, aid=0):
 
     async def _agent_update_file(rel_path, new_content):
         """更新/新建知识库文件（需4选1确认）"""
-        full_path = os.path.join(KNOWLEDGE_BASE_DIR, rel_path)
+        from services.knowledge_tutor import safe_resolve
+        full_path = safe_resolve(rel_path)
+        if full_path is None:
+            return f"非法路径: {rel_path}\n禁止访问知识库外部路径"
         exists = os.path.exists(full_path)
         action = "替换" if exists else "新建"
         action_desc = f"{action}知识库文件: {rel_path}"

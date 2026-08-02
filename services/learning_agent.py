@@ -312,7 +312,10 @@ def _list_kb_files_agent() -> list[dict]:
 
 def _read_kb_file_agent(filename: str, max_chars: int = 15000) -> dict:
     """Agent工具：读取知识库文件"""
-    path = KNOWLEDGE_BASE_DIR / filename
+    from services.knowledge_tutor import safe_resolve
+    path = safe_resolve(filename)
+    if path is None:
+        return {"error": f"非法路径: {filename}"}
     if not path.exists():
         # 尝试全局搜索
         for root, dirs, files in os.walk(KNOWLEDGE_BASE_DIR):

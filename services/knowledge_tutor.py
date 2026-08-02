@@ -37,6 +37,25 @@ def _resolve_kb_dir() -> Path:
 KNOWLEDGE_BASE_DIR = _resolve_kb_dir()
 
 
+def safe_resolve(rel_path: str, kb_root: str | Path | None = None) -> Path | None:
+    """将相对路径安全解析到知识库根目录内，防止路径遍历 (../) 逃逸。
+
+    返回规范化的绝对路径；若路径逃出知识库根目录则返回 None。
+    """
+    if not rel_path:
+        return None
+    # 反斜杠在 Windows 上是路径分隔符，统一拒绝，避免跨平台遍历
+    if '\\' in str(rel_path):
+        return None
+    root = Path(kb_root or KNOWLEDGE_BASE_DIR).resolve()
+    try:
+        target = (root / str(rel_path)).resolve()
+        target.relative_to(root)
+    except (ValueError, OSError):
+        return None
+    return target
+
+
 
 class _AIChatAdapter:
     """统一 AI 调用适配器：暴露 `.chat(messages, purpose=...)` 接口，

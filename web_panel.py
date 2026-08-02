@@ -7682,11 +7682,13 @@ def api_kb_tutor_chat():
         if not message and mode == 'chat':
             return jsonify(dict(ok=False, message='请输入问题')), 400
 
-        from services.knowledge_tutor import get_tutor
+        from services.knowledge_tutor import get_tutor, safe_resolve
         knowledge_base_dir = active_knowledge_base_dir()
         full_paths = []
         for rp in rel_paths:
-            fp = knowledge_base_dir / rp.strip()
+            fp = safe_resolve(rp.strip(), knowledge_base_dir)
+            if fp is None:
+                return jsonify(dict(ok=False, message=f'非法路径: {rp}')), 400
             if not fp.exists():
                 return jsonify(dict(ok=False, message=f'文件不存在: {rp}')), 404
             full_paths.append(str(fp))
@@ -7759,10 +7761,9 @@ def api_kb_tutor_save():
         content = (body.get('content') or '').strip()
         if not rel_path or not content:
             return jsonify(dict(ok=False, message='请提供文件路径和内容')), 400
-        from services.knowledge_tutor import write_md_file
-        full_path = (active_knowledge_base_dir() / rel_path).resolve()
-        kb_root = active_knowledge_base_dir()
-        if full_path != kb_root and kb_root not in full_path.parents:
+        from services.knowledge_tutor import write_md_file, safe_resolve
+        full_path = safe_resolve(rel_path, active_knowledge_base_dir())
+        if full_path is None:
             return jsonify(dict(ok=False, message='非法路径')), 400
         if not full_path.exists():
             return jsonify(dict(ok=False, message='文件不存在')), 404
