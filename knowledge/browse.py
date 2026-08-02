@@ -5,11 +5,12 @@ import re
 from datetime import datetime
 
 from colorama import Fore, Style
-from core.config import KNOWLEDGE_BASE_DIR, config, BASE_DIR
+from core.config import KNOWLEDGE_BASE_DIR, config
+from core.user_data import USER_DATA_DIR
 from utils.display import log
 
-KB_METADATA_FILE = os.path.join(BASE_DIR, "knowledge_metadata.json")
-LEARNING_LOG_FILE = os.path.join(BASE_DIR, "learning_log.md")
+KB_METADATA_FILE = str(USER_DATA_DIR / "knowledge_metadata.json")
+LEARNING_LOG_FILE = str(USER_DATA_DIR / "learning_log.md")
 
 def count_knowledge_categories():
     """统计知识库分类数量（从 file_index 多级路径统计，自动清理失效条目）"""
@@ -112,26 +113,7 @@ def search_knowledge_content():
     
     print(f"\n{Fore.CYAN}正在搜索 '{keyword}'...{Style.RESET_ALL}")
 
-    # 尝试向量搜索
-    used_vector = False
-    vector_results = []
-    if KBSearchEngine and ModelClient and load_modular_settings and BotState:
-        try:
-            settings = load_modular_settings()
-            engine = KBSearchEngine(ModelClient(settings, BotState()))
-            idx_stats = engine.stats()
-            if idx_stats["vectorized"] > 0:
-                vector_results = engine.search(keyword, top_k=20)
-                used_vector = True
-            else:
-                built = engine.build_index()
-                if built > 0:
-                    vector_results = engine.search(keyword, top_k=20)
-                    used_vector = True
-        except Exception:
-            pass
-
-    # 关键词搜索（fallback）
+    # 关键词搜索（原向量搜索依赖未定义的 KBSearchEngine/ModelClient，已移除）
     keyword_results = []
     for root, dirs, files in os.walk(KNOWLEDGE_BASE_DIR):
         dirs[:] = [d for d in dirs if not d.startswith('.')]
@@ -152,20 +134,6 @@ def search_knowledge_content():
                 except (OSError, UnicodeDecodeError, Exception):
                     continue
 
-    if used_vector and vector_results:
-        print(f"\n{Fore.CYAN}🧠 语义搜索结果:{Style.RESET_ALL}")
-        for i, r in enumerate(vector_results[:10]):
-            path = r.get("path", r.get("bvid", "?"))
-            title = r.get("title", "")
-            score = r.get("score", 0)
-            print(f"\n{Fore.YELLOW}{i+1}. [{score:.2f}] {title}{Style.RESET_ALL}")
-            print(f"   路径: {path}")
-            snippet = r.get("snippet", "")
-            if snippet:
-                print(f"   预览: {snippet[:150]}...")
-        if len(vector_results) > 10:
-            print(f"\n{Fore.YELLOW}... 还有 {len(vector_results)-10} 个语义结果{Style.RESET_ALL}")
-
     if keyword_results:
         print(f"\n{Fore.GREEN}[关键词] 找到 {len(keyword_results)} 个结果:{Style.RESET_ALL}")
         keyword_results.sort(key=lambda x: x['count'], reverse=True)
@@ -178,9 +146,9 @@ def search_knowledge_content():
         if len(keyword_results) > 10:
             print(f"\n{Fore.YELLOW}... 还有 {len(keyword_results)-10} 个结果未显示{Style.RESET_ALL}")
 
-    if not used_vector and not keyword_results:
+    if not keyword_results:
         print(f"\n{Fore.YELLOW}[WARN]  未找到包含 '{keyword}' 的内容{Style.RESET_ALL}")
-    elif not vector_results and not keyword_results:
+
         print(f"\n{Fore.YELLOW}[WARN]  未找到包含 '{keyword}' 的内容{Style.RESET_ALL}")
 
 
@@ -234,4 +202,3 @@ def cleanup_duplicates():
             print(f"{Fore.GREEN}[OK] 已删除 {deleted} 个重复文件{Style.RESET_ALL}")
     else:
         print(f"{Fore.GREEN}[OK] 未发现重复内容{Style.RESET_ALL}")
-

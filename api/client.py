@@ -32,6 +32,9 @@ class BiliClient:
         # [FIX] 视频元数据缓存：避免重复 get_video_meta
         self._video_meta_cache = {}  # bvid -> (meta_dict, timestamp)
         self._video_meta_cache_ttl = 300  # 5分钟
+        self._recommendation_cache = []
+        self._recommendation_cache_ts = 0.0
+        self._recommendation_cache_ttl = 300
 
     def _load_credential(self):
         if not os.path.exists(COOKIE_FILE):
@@ -223,23 +226,61 @@ class BiliClient:
                              key=lambda k: self._video_meta_cache[k][1])
                 del self._video_meta_cache[oldest]
 
+    @staticmethod
+    def _is_transient_network_error(error: Exception) -> bool:
+        """只识别可安全重试的网络瞬断，不覆盖 B 站业务错误。"""
+        message = str(error).lower()
+        markers = (
+            "resolving timed out", "temporary failure in name resolution",
+            "name or service not known", "getaddrinfo", "curl: (28)",
+            "readtimeout", "connecttimeout", "connect timeout",
+            "network is unreachable", "connection reset", "connection aborted",
+        )
+        return any(marker in message for marker in markers)
+
+    def _cached_recommendations(self) -> list:
+        if (self._recommendation_cache
+                and time.time() - self._recommendation_cache_ts < self._recommendation_cache_ttl):
+            return list(self._recommendation_cache)
+        return []
+
     async def get_recommendations(self):
-        _logged = False
+        rate_limit_logged = False
+        network_attempts = 3
         for attempt in range(5):
             try:
                 await _bili_throttle()  # 🔒 全局节流
-                res = await homepage.get_videos(credential=self.credential)
-                return [item for item in res['item'] if 'bvid' in item]
+                # bilibili-api 底层可能走 curl；DNS 卡住时不能让后台预取无限等待。
+                res = await asyncio.wait_for(
+                    homepage.get_videos(credential=self.credential), timeout=12.0)
+                items = [item for item in res.get('item', []) if 'bvid' in item]
+                if items:
+                    self._recommendation_cache = list(items)
+                    self._recommendation_cache_ts = time.time()
+                return items
             except Exception as e:
                 err_msg = str(e)
                 if ('-799' in err_msg or '请求过于频繁' in err_msg) and attempt < 4:
                     _bili_trigger_cooldown()  # 🔒 启动全局冷却
                     # 指数退避：2^(attempt+1) * [2, 3.5] 秒
                     wait = (2 ** (attempt + 1)) * random.uniform(2.0, 3.5)
-                    if not _logged:
+                    if not rate_limit_logged:
                         log("[WARN] 推荐流触发-799，全局冷却已启动，静默重试...", "WARN")
-                        _logged = True
+                        rate_limit_logged = True
                     await asyncio.sleep(wait)
+                elif self._is_transient_network_error(e) or isinstance(e, asyncio.TimeoutError):
+                    if attempt < network_attempts - 1:
+                        wait = 2 ** attempt
+                        log(f"[WARN] 推荐流网络异常，{wait}s 后重试 ({attempt + 1}/{network_attempts}): {err_msg[:80]}", "WARN")
+                        await asyncio.sleep(wait)
+                        continue
+                    cached = self._cached_recommendations()
+                    if cached:
+                        age = int(time.time() - self._recommendation_cache_ts)
+                        log(f"[WARN] 推荐流网络暂不可用，使用 {age}s 前缓存的 {len(cached)} 条推荐", "WARN")
+                        return cached
+                    log("[WARN] 推荐流网络暂不可用，稍后会自动重试，不影响当前视频分析", "WARN")
+                    return []
                 else:
                     log(f"获取推荐失败: {e}", "ERROR")
                     return []
@@ -308,8 +349,14 @@ class BiliClient:
                         continue
                     return {'code': -1, 'msg': f"无法获取视频信息: {view_data}"}
 
-                aid = view_data['data']['aid']
-                cid = view_data['data']['cid']
+                view_data_fallback = view_data.get('data')
+                if not view_data_fallback or not isinstance(view_data_fallback, dict):
+                    log(f"视频信息返回异常: {bvid}", "ERROR")
+                    return {'code': -1, 'msg': f"视频信息data为空: {view_data}"}
+                aid = view_data_fallback.get('aid')
+                cid = view_data_fallback.get('cid')
+                if not aid or not cid:
+                    return {'code': -1, 'msg': f"无法获取aid/cid: {view_data}"}
 
                 ts = int(time.time())
                 start_payload = {
@@ -383,6 +430,16 @@ class BiliClient:
         try:
             u = user.User(uid, credential=self.credential)
             await u.modify_relation(user.RelationType.SUBSCRIBE)
+            # [FIX] 执行后验证：B站可能返回成功但实际未生效（风控/降权）。
+            # attribute: 0=未关注 1=已关注 2=已互关 6=已拉黑
+            try:
+                relation = await u.get_relation()
+                attribute = int((relation or {}).get("attribute", 0) or 0)
+                if attribute not in (1, 2):
+                    return {"code": -1, "msg": f"关注接口已调用但未生效(attribute={attribute}，可能被风控)，UID:{uid}"}
+            except Exception as ve:
+                # 验证接口偶发失败时不阻断执行，仅提示
+                return {"code": 0, "msg": f"已关注 UID:{uid}（验证跳过: {ve}）"}
             return {"code": 0, "msg": f"已关注 UID:{uid}"}
         except Exception as e:
             err_str = str(e)
@@ -445,7 +502,8 @@ class BiliClient:
                     "aid": item.get("aid", 0),
                     "play": item.get("play", 0),
                     "created": item.get("created", 0),
-                    "description": item.get("description", "")[:60]
+                    "description": item.get("description", "")[:160],
+                    "pic": item.get("pic", ""),
                 }
                 for item in items[:limit]
             ]

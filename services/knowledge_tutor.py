@@ -22,31 +22,48 @@ from datetime import datetime
 
 # 延迟导入，避免循环依赖
 BASE_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = BASE_DIR / "Data"
-KNOWLEDGE_BASE_DIR = BASE_DIR / "KnowledgeBase"
+from core.config import config, resolve_knowledge_base_dir
+
+
+
+def _resolve_kb_dir() -> Path:
+    """从 config.json 解析知识库目录，未配置则回退到默认 KnowledgeBase。"""
+    return Path(resolve_knowledge_base_dir(config))
+
+
+# Kept for compatibility with older imports.  New callers resolve the path at
+# request time so changing the configured knowledge-base directory takes effect
+# without restarting the process.
+KNOWLEDGE_BASE_DIR = _resolve_kb_dir()
+
+
+
+class _AIChatAdapter:
+    """统一 AI 调用适配器：暴露 `.chat(messages, purpose=...)` 接口，
+    内部复用 services._services_ai.call_ai()，不再依赖 xingye_bot。"""
+    async def chat(self, messages, purpose=""):
+        from services._services_ai import call_ai
+        return await call_ai(messages=messages, temperature=0.7, verbose=False)
 
 
 def _get_llm_client():
-    """获取 LLM 客户端（延迟导入）"""
+    """获取 LLM 客户端（使用本项目统一 AI 通道，不再依赖 xingye_bot）。"""
     try:
-        from bili_core.llm import ModelClient
-        from bili_core.settings import load_settings
-        from bili_core.state import BotState
-        settings = load_settings()
-        return ModelClient(settings, BotState())
+        return _AIChatAdapter()
     except Exception:
         return None
 
 
-def scan_md_files() -> list[dict[str, Any]]:
+def scan_md_files(kb_dir: str | Path | None = None) -> list[dict[str, Any]]:
     """扫描 KnowledgeBase/ 下所有 .md 文件。
     返回: [{"bvid", "title", "file_path", "rel_path", "up_name", "category_path", "size_kb"}, ...]
     """
     results = []
-    if not KNOWLEDGE_BASE_DIR.exists():
+    knowledge_base_dir = Path(kb_dir) if kb_dir is not None else _resolve_kb_dir()
+    if not knowledge_base_dir.exists():
         return results
 
-    for root, dirs, files in os.walk(KNOWLEDGE_BASE_DIR):
+    for root, dirs, files in os.walk(knowledge_base_dir):
         dirs[:] = [d for d in dirs if not d.startswith('.')]
         for fname in files:
             if not fname.endswith('.md'):
@@ -57,7 +74,7 @@ def scan_md_files() -> list[dict[str, Any]]:
             bvid = bv_match.group(1) if bv_match else ""
             title = bv_match.group(2).strip() if bv_match else fname.replace('.md', '')
 
-            rel_path = os.path.relpath(fpath, KNOWLEDGE_BASE_DIR)
+            rel_path = os.path.relpath(fpath, knowledge_base_dir).replace(os.sep, '/')
             category_path = os.path.dirname(rel_path).replace(os.sep, '/')
             if not category_path or category_path == '.':
                 category_path = '未分类'
@@ -148,25 +165,17 @@ SYSTEM_PROMPT_REWRITE = """你是一位知识整理专家。用户会给你一�
 - 然后用 --- 分隔
 - 最后输出修改后的完整文件内容"""
 
-SYSTEM_PROMPT_HTML = """你是一位前端开发和教学设计专家。用户会给你一份知识内容，请你创建一个美观的HTML网页来呈现这些知识。
+SYSTEM_PROMPT_HTML = """你是一位前端开发和教学设计专家。用户会给你一份知识内容，请创建可注入项目 Claude 页面引擎的结构化网页内容。
 
 要求：
-1. 输出完整的<!DOCTYPE html>起始的HTML文件
-2. 设计精美的现代化UI（暗色主题或清新主题）
-3. 包含：
-   - 顶部标题区（视频标题、UP主等元信息）
-   - 目录/导航
-   - 主体内容区（用卡片、表格、列表等呈现）
-   - 关键概念高亮/标注
-   - 底部总结区
-4. 使用内联CSS（不依赖外部文件）
-5. 响应式设计，支持手机和桌面
-6. 适当使用图标emoji装饰
-7. 代码简洁清晰，注释合理
-8. 所有样式写在 <style> 标签内
-9. JavaScript 仅用于交互增强（如平滑滚动、回到顶部）
+1. 只输出 `<div class="ppt-container">` 到对应闭合标签，不输出 <!DOCTYPE html>、CSS、JavaScript 或 Markdown 代码块
+2. 每个 `.slide` 只讲一个主题，使用 `.tag`、`.slide-title`、`.divider`、`.content-grid`、`.card`、`.feature-list`、`.two-col`、`.table-wrap`、`.end-card` 等既有组件
+3. 使用 Lucide 图标 `<i data-lucide="..."></i>`，禁止 emoji、Font Awesome、渐变、彩色阴影和大段文字
+4. 适配手机与桌面，控制每页信息密度，避免溢出、遮挡和重复卡片
+5. 内容必须基于提供的知识文件，不得编造事实；最后一页使用 `.end-card` 总结
+6. 每页添加 `<div class="logo-mark">bilibili_learning_bot</div>`
 
-特别注意：HTML 必须完整可独立打开，不能引用任何外部资源（CDN除外，可引用Chart.js等用于数据可视化）"""
+项目包装器会自动提供亮暗主题、翻页、进度条、Lucide 图标和响应式样式。"""
 
 
 # ═══════════════════════════════════════════
@@ -232,7 +241,7 @@ class KnowledgeTutor:
             if not fc:
                 continue
             fname = os.path.basename(fp)
-            bv_match = re.match(r'^\[BV[0-9A-Za-z]{10}\]\s*-\s*(.+)\.md$', fname)
+            bv_match = re.match(r'^\[(BV[0-9A-Za-z]{10})\]\s*-\s*(.+)\.md$', fname)
             ftitle = bv_match.group(2).strip() if bv_match else fname
 
             truncated = fc[:per_file_limit]
@@ -364,7 +373,7 @@ class KnowledgeTutor:
             if not fc:
                 continue
             fname = os.path.basename(fp)
-            bv_match = re.match(r'^\[BV[0-9A-Za-z]{10}\]\s*-\s*(.+)\.md$', fname)
+            bv_match = re.match(r'^\[(BV[0-9A-Za-z]{10})\]\s*-\s*(.+)\.md$', fname)
             ftitle = bv_match.group(2).strip() if bv_match else fname
             if not bvid and bv_match:
                 bvid = bv_match.group(1)
@@ -385,12 +394,12 @@ class KnowledgeTutor:
         main_title = titles[0] if len(paths) == 1 else f"{len(paths)} 个知识文件的综合讲解"
 
         style_desc = {
-            "dark": "暗色科技风（深色背景、蓝色/青色强调色）",
-            "light": "清新白底风（白色背景、柔和的彩色点缀）",
-            "modern": "现代极简风（大量留白、灰度层次）",
-        }.get(style, "暗色科技风")
+            "dark": "Claude 暗色主题",
+            "light": "Claude 亮色主题",
+            "modern": "Claude 极简亮色主题",
+        }.get(style, "Claude 亮色主题")
 
-        user_prompt = f"""请为以下知识内容创建一个HTML网页用于可视化讲解：
+        user_prompt = f"""请为以下知识内容创建一个可视化讲解页面：
 
 【知识来源】: {main_title}
 {f'【BV号】: {bvid}' if bvid else ''}
@@ -401,7 +410,7 @@ class KnowledgeTutor:
 
 设计风格：{style_desc}
 
-请输出完整的 <!DOCTYPE html> 开头的 HTML 代码。"""
+请仅输出 `<div class="ppt-container">...</div>` 内容。"""
 
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT_HTML},
@@ -423,11 +432,8 @@ class KnowledgeTutor:
                 html = html[:-3]
             html = html.strip()
 
-            # 确保以 DOCTYPE 开头
-            if not html.lower().startswith("<!doctype"):
-                html = "<!DOCTYPE html>\n" + html
-
-            return html
+            from services.html_renderer import render_slide_html
+            return render_slide_html(html, title=main_title, enhanced_animations=True)
         except Exception as e:
             return f"<html><body><h1>❌ 生成失败: {e}</h1></body></html>"
 # ═══════════════════════════════════════════

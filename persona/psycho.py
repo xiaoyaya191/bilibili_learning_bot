@@ -24,12 +24,14 @@ import json
 import os
 import time
 import random
+import asyncio
 from datetime import datetime, timedelta
 from collections import defaultdict, Counter
 from math import log2
+from core.user_data import DATA_DIR as _SHARED_DATA_DIR
 
 # ── 文件路径 ─────────────────────────────────────────────────
-DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Data")
+DATA_DIR = str(_SHARED_DATA_DIR)
 PROFILE_FILE = os.path.join(DATA_DIR, "psycho_profile.json")
 RECOMMENDATION_LOG = os.path.join(DATA_DIR, "recommendation_log.json")
 ACTION_LOG_FILE = os.path.join(DATA_DIR, "action_log.json")

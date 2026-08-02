@@ -107,7 +107,7 @@ class JsonStore:
 # ── API Key 脱敏 ──
 SENSITIVE_KEYS = {
     "api_key", "unified_api_key", "vision_api_key",
-    "password", "access_token", "refresh_token",
+    "password", "recovery_code", "recovery_answer", "access_token", "refresh_token",
     "sessdata", "bili_jct", "dedeuserid", "DedeUserID",
 }
 
@@ -133,6 +133,42 @@ def sanitize_export(data: Any) -> Any:
 def sanitize_config_for_export(config: dict) -> dict:
     """对配置对象做导出脱敏，保留结构但隐藏敏感值。"""
     return sanitize_export(config)
+
+
+
+HIDDEN_PLACEHOLDER = "[已隐藏]"
+
+
+def is_hidden_placeholder(value) -> bool:
+    """判断是否为脱敏占位符（导出时写入的 '[已隐藏]'）。"""
+    return value == HIDDEN_PLACEHOLDER
+
+
+def strip_hidden_placeholders(obj, existing=None):
+    """递归移除导入数据中的 '[已隐藏]' 脱敏占位符。
+
+    导出配置时敏感字段会被替换为 '[已隐藏]'；如果直接导入会覆盖真实配置，
+    导致 API Key / Cookie 变成无效占位符。导入时应：
+    - 目标文件已有有效值时：保留现有值；
+    - 目标文件没有值时：删除该字段（缺失字段按空值处理，等待用户重新填写）。
+    """
+    if isinstance(obj, dict):
+        result = {}
+        for key, value in obj.items():
+            if value == "[已隐藏]":
+                if isinstance(existing, dict) and existing.get(key) not in (None, "", "[已隐藏]"):
+                    result[key] = existing[key]
+                continue
+            if isinstance(value, (dict, list)):
+                existing_child = existing.get(key) if isinstance(existing, dict) else None
+                result[key] = strip_hidden_placeholders(value, existing_child)
+            else:
+                result[key] = value
+        return result
+    if isinstance(obj, list):
+        return [strip_hidden_placeholders(item) for item in obj if item != "[已隐藏]"]
+    return obj
+
 
 
 # ── 路径安全校验 ──
@@ -168,8 +204,11 @@ def get_backup_dir() -> Path:
     其他 → ~/bilibili_claw_backup
     """
     import sys
+    custom_dir = os.getenv("BILI_BACKUP_DIR", "").strip()
+    if custom_dir:
+        return Path(custom_dir).expanduser()
     if sys.platform == 'win32':
-        return Path("C:/bilibili_claw_backup")
+        return Path.home() / "bilibili_claw_backup"
     # Android (Termux) 检测：使用共享存储，方便文件管理器访问/跨实例迁移
     android_storage = Path("/storage/emulated/0")
     if android_storage.exists():

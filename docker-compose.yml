@@ -1,48 +1,36 @@
 services:
   bilibili-bot:
-    # 发布到 Docker Hub 后，把 DOCKER_IMAGE 改成你的镜像名即可，例如 yourname/bilibili_learning_bot:latest
-    image: ${DOCKER_IMAGE:-bilibili_learning_bot:3.0.1}
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        APP_VERSION: ${APP_VERSION:-3.0.1}
-    container_name: ${CONTAINER_NAME:-bilibili_learning_bot}
+    image: bilibili_learning_bot:3.1.2
+    container_name: bilibili_learning_bot
     restart: unless-stopped
     ports:
-      # 与 Web 管理面板保持一致：容器内外默认都是 7860
-      - "${WEB_PORT:-7860}:7860"
+      - "${WEB_PORT:-8080}:8080"
     volumes:
-      - bili_data:/app/Data
-      - bili_knowledge:/app/KnowledgeBase
-      - bili_highlights:/app/highlights
-      - bili_exports:/app/html_exports
+      # 持久化数据目录（挂载到宿主机，方便备份和迁移）
+      - ./Data:/app/Data
+      - ./KnowledgeBase:/app/KnowledgeBase
+      - ./highlights:/app/highlights
+      # 可选：挂载自定义配置
+      # - ./config.json:/app/Data/config.json:ro
     environment:
-      WEB_HOST: 0.0.0.0
-      WEB_PORT: 7860
-      NO_PROXY: 127.0.0.1,localhost
-      no_proxy: 127.0.0.1,localhost
-      BOT_MODE: ${BOT_MODE:-web}
-      APP_VERSION: ${APP_VERSION:-3.0.1}
-      # 默认空值表示不主动联网；发布者可填 GitHub raw VERSION 或自托管 version.txt。
-      UPDATE_CHECK_URL: ${UPDATE_CHECK_URL:-}
-      UPDATE_CHECK_TTL: ${UPDATE_CHECK_TTL:-3600}
-      TZ: Asia/Shanghai
-      BILI_DISCLAIMER_SKIP: ${BILI_DISCLAIMER_SKIP:-1}
+      - WEB_PORT=${WEB_PORT:-8080}
+      - WEB_HOST=0.0.0.0
+      - BOT_MODE=${BOT_MODE:-web}
+      # AI API 配置（推荐用 .env 文件，更安全）
+      # - BILI_AI_API_KEY=sk-你的APIKey
+      # - BILI_AI_BASE_URL=https://api.openai.com/v1
+      # - BILI_BOT_NAME=你的机器人名字
     logging:
-      driver: json-file
+      driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7860/api/version', timeout=5)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/health')"]
       interval: 30s
       timeout: 10s
-      start_period: 20s
+      start_period: 15s
       retries: 3
-
-volumes:
-  bili_data:
-  bili_knowledge:
-  bili_highlights:
-  bili_exports:

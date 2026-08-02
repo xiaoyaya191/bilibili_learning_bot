@@ -10,10 +10,14 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE_DIR)
 
 import httpx
+from core.config import config as _core_config, resolve_knowledge_base_dir
+from core.user_data import DATA_DIR as _USER_DATA_DIR
+from core.platform_actions import public_commenting_enabled
 from colorama import Fore, Style, init as colorama_init
 colorama_init(autoreset=True)
 
-DATA_DIR = os.path.join(BASE_DIR, "Data")
+DATA_DIR = str(_USER_DATA_DIR)
+
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 COOKIE_FILE = os.path.join(DATA_DIR, "bilibili_cookies.json")
 STANDBY_CONFIG_FILE = os.path.join(DATA_DIR, "standby_config.json")
@@ -108,6 +112,8 @@ class StandbyBot:
                     cfg = json.load(f)
                 api = cfg.get('api', {})
                 self.api_key = api.get('unified_api_key', '') or os.getenv('BILI_AI_API_KEY', '')
+                if self.api_key == '[已隐藏]':  # 脱敏占位符视为未配置
+                    self.api_key = ''
                 self.base_url = api.get('unified_base_url', '') or os.getenv('BILI_AI_BASE_URL', '')
                 self.model = api.get('model_brain', self.model)  # 使用 model_brain 而非 model_name
                 self.my_mid = cfg.get('account', {}).get('uid', 0)
@@ -153,6 +159,9 @@ class StandbyBot:
     async def _post_comment(self, client: httpx.AsyncClient, bvid_or_aid: str, root_rpid: int,
                             parent_rpid: int, content: str) -> bool:
         """回复评论（自动兼容oid=aid和bvid）"""
+        if not public_commenting_enabled():
+            self._log("评论回复已被全局安全策略禁用", "WARN")
+            return False
         try:
             oid = bvid_or_aid
             if not oid.isdigit() or len(oid) > 10:
@@ -274,7 +283,14 @@ class StandbyBot:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
         try:
-            async with httpx.AsyncClient(timeout=120.0) as c:
+            # 代理支持
+            _proxy_url = ""
+            try:
+                from services.proxy_config import get_proxy_url
+                _proxy_url = get_proxy_url()
+            except Exception:
+                pass
+            async with httpx.AsyncClient(timeout=120.0, proxy=_proxy_url or None) as c:
                 r = await c.post(
                     f"{self.base_url}/chat/completions",
                     headers={'Authorization': f'Bearer {self.api_key}', 'Content-Type': 'application/json'},
@@ -479,6 +495,20 @@ class StandbyBot:
 
         aid_str = str(aid) if aid else target_bv
 
+        if self._is_rag_question(ntf.get('content', '')):
+            reply_text = await self._answer_rag_question(ntf.get('content', ''))
+            if len(reply_text) > 500:
+                reply_text = reply_text[:480] + "...[完整回答请在Web面板知识库问答查看]"
+            await self._post_comment(
+                client, aid_str,
+                int(rpid) if rpid.isdigit() else 0,
+                int(rpid) if rpid.isdigit() else 0,
+                reply_text or "知识库暂未找到相关内容。"
+            )
+            self.stats['at_replies'] += 1
+            save_stats(self.stats)
+            return
+
         # 获取视频信息 + 字幕
         video_info = await self._get_video_info(client, target_bv)
         if not video_info:
@@ -505,7 +535,7 @@ class StandbyBot:
             self.stats['notifications_handled'] = self.stats.get('notifications_handled', 0) + 1
 
         if len(reply_text) > 500:
-            reply_text = reply_text[:480] + "...[完整版请查看私信]"
+            reply_text = reply_text[:480] + "...[内容较长已截断]"
 
         success = await self._post_comment(
             client, aid_str,
@@ -522,6 +552,14 @@ class StandbyBot:
         """legacy: 在自己视频下的@触发处理"""
         self._log(f"[AT] {comment['uname']} @请求: {bv_or_topic}", "AT")
         target_bv = bv_or_topic if bv_or_topic and bv_or_topic != "auto" else my_bvid
+
+        if self._is_rag_question(comment.get('content', '')):
+            reply_text = await self._answer_rag_question(comment.get('content', ''))
+            if len(reply_text) > 500:
+                reply_text = reply_text[:480] + "...[完整回答请在Web面板知识库问答查看]"
+            await self._post_comment(client, my_bvid, int(comment['rpid']), int(comment['rpid']), reply_text or "知识库暂未找到相关内容。")
+            save_stats(self.stats)
+            return
 
         video_info = await self._get_video_info(client, target_bv)
         if not video_info:
@@ -541,7 +579,7 @@ class StandbyBot:
         if summary:
             self.stats['at_replies'] += 1
             if len(summary) > 500:
-                summary = summary[:480] + "...[完整版请查看私信]"
+                summary = summary[:480] + "...[内容较长已截断]"
         else:
             summary = f"生成视频《{video_info['title'][:30]}》总结时遇到问题。"
 
@@ -661,6 +699,58 @@ class StandbyBot:
 回复要自然、有人情味，像是在跟朋友聊天。不要用markdown格式，用纯文本。"""
 
         return await self._ai_chat(prompt)
+
+    # ── RAG 知识库问答（回答基于已学知识的提问）──
+    def _is_rag_question(self, comment_text: str) -> bool:
+        """检测是否为知识问答类问题（而非总结/分析请求）。
+        如果评论里含有总结类关键词（已在 at_trigger_keywords 中触发），则走正常总结流程；
+        否则检测是否像提问（问号/提问词/求解答）。"""
+        at_keywords = self.config.get('at_trigger_keywords',
+                                      ["总结", "总结一下", "分析", "概括", "讲解", "归纳", "梳理"])
+        text = comment_text or ""
+        # 已经命中总结关键词的，不走 RAG
+        if any(kw in text for kw in at_keywords):
+            return False
+        q_patterns = ["?", "？", "是什么", "什么是", "怎么", "如何", "为什么", "介绍一下",
+                      "解释", "说明", "科普", "讲讲", "讲一下", "说下", "教我"]
+        return any(p in text for p in q_patterns)
+
+    async def _answer_rag_question(self, comment_text: str) -> str:
+        """从本地知识库检索相关内容来回答用户问题。
+        简单实现：扫描 KnowledgeBase 目录下的 .md 文件，关键词匹配标题和内容。"""
+        import glob as _glob
+        text = comment_text or ""
+        kb_dir = resolve_knowledge_base_dir(_core_config)
+        results: list[tuple[int, str, str]] = []  # (score, title, snippet)
+        try:
+            for md_file in _glob.glob(os.path.join(kb_dir, "**", "*.md"), recursive=True):
+                try:
+                    with open(md_file, "r", encoding="utf-8", errors="replace") as _f:
+                        content = _f.read()
+                except Exception:
+                    continue
+                fname = os.path.splitext(os.path.basename(md_file))[0]
+                # 简单关键词打分：标题匹配 + 内容匹配
+                score = 0
+                for word in text.replace("?", "").replace("？", "").split():
+                    if len(word) < 2:
+                        continue
+                    if word in fname:
+                        score += 10
+                    score += content.count(word)
+                if score > 0:
+                    snippet = content[:400].replace("\n", " ").strip()
+                    results.append((score, fname, snippet))
+            results.sort(key=lambda x: x[0], reverse=True)
+            if results:
+                top = results[:3]
+                lines = ["📚 知识库中找到以下相关内容："]
+                for score, fname, snippet in top:
+                    lines.append(f"  · 【{fname}】{snippet[:120]}...")
+                return "\n".join(lines)
+        except Exception:
+            pass
+        return ""
 
     def stop(self):
         self.running = False

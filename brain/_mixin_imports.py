@@ -8,6 +8,7 @@ import time
 import sys
 import shutil
 from datetime import datetime, timedelta
+from typing import Optional
 from io import BytesIO
 from pathlib import Path
 
@@ -21,12 +22,20 @@ from bilibili_api.utils.network import Api
 
 from core.config import *
 from core.globals import *
-from api.subtitles import SYSTEM_PROMPT_BRAIN, SYSTEM_PROMPT_VISION, SYSTEM_PROMPT_SUMMARY
+from api.subtitles import (
+    SYSTEM_PROMPT_BRAIN,
+    SYSTEM_PROMPT_VISION,
+    SYSTEM_PROMPT_SUMMARY,
+    SYSTEM_PROMPT_COMMENT_SUMMARY,
+)
 from persona.managers import PersonaManager, MoodManager, UserProfileManager, BotDiaryManager, SelfEvolutionManager, PrivateContextDB
 from security.guard import ReplySafetyGuard
 from services.utils import InterestManager, BiliToolbox
 from services.agent_service import AgentSkillRunner
 from services.knowledge_tutor import KnowledgeTutor, scan_md_files, read_md_file, write_md_file
+from services.mindmap_export import export_mindmap
+from services.version_history import save_note_version
+from brain._chapter_lock import should_use_chapter_lock, generate_chapter_locked_note
 from utils.display import log, mask_secret
 from utils.helpers import _mask_urls, sanitize_filename, ensure_ai_marker, human_reply_delay, _clean_ai_output, _load_json_file, _save_json_file, _safe_task_callback, find_ffmpeg, find_ffprobe
 from utils.lock import _acquire_bot_lock, _release_bot_lock

@@ -1,5 +1,12 @@
 """utils/display.py — 显示/日志工具函数"""
 from colorama import Fore, Style
+import re
+import sys
+
+_SENSITIVE = re.compile(r"(?i)(SESSDATA|bili_jct|DedeUserID|access_token|refresh_token|api[_ -]?key|authorization|password)(\s*:\s*Bearer\s+|\s*[=:]\s*[\"']?|\s+Bearer\s+)([^,\s\"'};]+)")
+
+def redact_sensitive_text(value):
+    return _SENSITIVE.sub(lambda m: f"{m.group(1)}{m.group(2)}***", str(value or ""))
 
 
 def mask_secret(value):
@@ -37,9 +44,15 @@ def log(msg, level="INFO"):
     icon = icons.get(level, '[INFO]')
 
     # [FIX] Windows GBK终端无法打印emoji，用ASCII标签替代
-    text = f"{icon} [{level:<7}] {msg}"
+    text = f"{icon} [{level:<7}] {redact_sensitive_text(msg)}"
     try:
         print(f"{color}{text}{Style.RESET_ALL}")
     except UnicodeEncodeError:
-        # 如果colorama也有编码问题，降级为纯文本
-        print(text)
+        # Some embedded/background Windows processes still expose a GBK stream.
+        # Replace only unsupported glyphs so logging can never abort real work.
+        encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+        safe_text = text.encode(encoding, errors="replace").decode(encoding, errors="replace")
+        try:
+            print(safe_text)
+        except UnicodeEncodeError:
+            sys.stdout.buffer.write((safe_text + "\n").encode(encoding, errors="replace"))

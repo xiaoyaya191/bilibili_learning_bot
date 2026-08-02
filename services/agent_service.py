@@ -150,7 +150,12 @@ class AgentSkillRunner:
             return {"error": "No credential"}
         try:
             from bilibili_api import search as bili_search
-            data = await bili_search.search_by_type(keyword=query, search_type=bili_search.SearchObjectType.VIDEO, credential=cred)
+            # 不同 bilibili-api 版本对 credential 支持不同：新版签名无 credential 参数，
+            # 传了会 TypeError；先尝试带登录态，失败则回退无凭据搜索。
+            try:
+                data = await bili_search.search_by_type(keyword=query, search_type=bili_search.SearchObjectType.VIDEO, credential=cred)
+            except TypeError:
+                data = await bili_search.search_by_type(keyword=query, search_type=bili_search.SearchObjectType.VIDEO)
             items = data.get("result") or []
             return [{"title": re.sub(r"<.*?>", "", str(v.get("title", ""))), "bvid": v.get("bvid")}
                     for v in items[:count]]
@@ -160,12 +165,69 @@ class AgentSkillRunner:
     async def _watch_videos(self, max_videos: int):
         if not self.brain:
             return {"error": "No brain"}
+        agent_cfg = _global_config.get("agent", {}) if isinstance(_global_config, dict) else {}
+        if not agent_cfg.get("deep_learning_enabled", True):
+            log("[AGENT] 深入学习已在配置中关闭，本次只保留搜索结果", "INFO")
+            return {"watched": 0, "videos": [], "skipped": "deep_learning_disabled"}
+
+        try:
+            configured_limit = int(agent_cfg.get("deep_learning_max_videos", 2))
+        except (TypeError, ValueError):
+            configured_limit = 2
+        try:
+            requested_limit = int(max_videos or configured_limit)
+        except (TypeError, ValueError):
+            requested_limit = configured_limit
+        limit = max(1, min(5, configured_limit, requested_limit))
+
+        try:
+            timeout_seconds = int(agent_cfg.get("deep_learning_timeout_seconds", 180))
+        except (TypeError, ValueError):
+            timeout_seconds = 180
+        timeout_seconds = max(30, min(1800, timeout_seconds))
+
+        # Reuse the same non-interactive pipeline used by the web panel.  A
+        # watched item now means subtitles/ASR, comments, danmaku, scoring and
+        # the knowledge-base decision actually ran; it is no longer a label.
+        from brain.video_analysis import analyze_bilibili_video_input
+
         watched = []
         results = self._search_results if hasattr(self, '_search_results') else []
-        for item in results[:max_videos]:
+        for item in results[:limit]:
             bvid = item.get("bvid")
-            if bvid:
-                watched.append({"bvid": bvid, "title": item.get("title", ""), "status": "watched"})
+            if not bvid:
+                continue
+            title = item.get("title", "")
+            try:
+                log(f"[AGENT] 开始深入学习 {bvid} | {title[:48]}", "LEARN")
+                ok, message = await asyncio.wait_for(
+                    analyze_bilibili_video_input(
+                        bvid,
+                        force_mode=None,
+                        intent="Agent 深入学习：检索完整证据并决定是否归档。",
+                    ),
+                    timeout=timeout_seconds,
+                )
+                archived = "归档=是" in str(message)
+                status = "archived" if ok and archived else ("analyzed" if ok else "failed")
+                watched.append({
+                    "bvid": bvid,
+                    "title": title,
+                    "status": status,
+                    "archived": archived,
+                    "message": str(message),
+                })
+                level = "SUCCESS" if ok else "WARN"
+                log(f"[AGENT] 深入学习{'完成' if ok else '失败'} {bvid}: {message}", level)
+            except asyncio.TimeoutError:
+                message = f"单视频深入学习超时（{timeout_seconds}秒）"
+                watched.append({"bvid": bvid, "title": title, "status": "timeout", "archived": False, "message": message})
+                log(f"[AGENT] {bvid} {message}", "WARN")
+            except Exception as exc:
+                message = f"深入学习异常: {exc}"
+                watched.append({"bvid": bvid, "title": title, "status": "failed", "archived": False, "message": message})
+                log(f"[AGENT] {bvid} {message}", "WARN")
+            await asyncio.sleep(random.uniform(0.5, 1.2))
         return {"watched": len(watched), "videos": watched}
 
     def _summarize(self):
