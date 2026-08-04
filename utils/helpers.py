@@ -34,7 +34,8 @@ def ensure_ai_marker(text):
     text = (text or "").strip()
     marker = config.get("behavior", {}).get("ai_marker", "（内容由AI生成并由AI回复）")
     if not text:
-        return marker
+        # 空内容不加 AI 标记：调用方应跳过空回复，而不是发送一个只有标记的回复。
+        return ""
     if marker in text or "(内容由AI生成并由AI回复)" in text:
         return text
     return f"{text}{marker}"

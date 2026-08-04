@@ -230,7 +230,10 @@ DEFAULT_CONFIG = {
         "prob_like_solo": 0.5, "prob_comment_others": 0.3,
         "comment_check_interval": 300, "max_replies_per_check": 3,
         "random_enabled": True, "comment_check_enabled": True,
-        "coin_cooldown_minutes": 0, "coin_max_per_hour": 0
+        "coin_cooldown_minutes": 0, "coin_max_per_hour": 0,
+        "comment_reply_three_actions": {
+            "enabled": True, "like": True, "coin": True, "favorite": True
+        }
     },
     "energy": {
         "energy_recovery_min": 5, "energy_recovery_max": 10,

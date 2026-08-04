@@ -181,6 +181,10 @@ def export_deep_dive_file(md_path: str | Path, formats: list[str] | None = None)
     export_root.mkdir(parents=True, exist_ok=True)
     if 'md' in fmt_set or 'markdown' in fmt_set:
         out['md'] = str(src)
+    if 'txt' in fmt_set or 'text' in fmt_set:
+        p = export_root / f"{_safe_filename(title)}.txt"
+        p.write_text(text, encoding='utf-8')
+        out['txt'] = str(p)
     if 'html' in fmt_set:
         p = export_root / f"{_safe_filename(title)}.html"
         p.write_text(_markdown_to_html(text, title), encoding='utf-8')
@@ -611,6 +615,7 @@ async def deep_dive_menu_cli():
     print("  3. PDF")
     print("  4. PPT风格HTML")
     print("  5. 思维导图HTML")
+    print("  6. TXT纯文本")
     fmt_choice = input(f"{Fore.CYAN}请选择，如 1245 / 直接回车跳过: {Style.RESET_ALL}").strip()
     export_formats: list[str] = []
     if '1' in fmt_choice:
@@ -623,6 +628,8 @@ async def deep_dive_menu_cli():
         export_formats.append('ppt')
     if '5' in fmt_choice:
         export_formats.append('mindmap')
+    if '6' in fmt_choice:
+        export_formats.append('txt')
 
     print(f"\n{Fore.GREEN}[DEEP DIVE] 开始学习...")
     print(f"  主题: {topic}")
@@ -697,6 +704,7 @@ def export_deep_dive_menu_cli():
     print("  3. PDF")
     print("  4. PPT风格HTML")
     print("  5. 思维导图HTML")
+    print("  6. TXT纯文本")
     fmt_choice = input(f"{Fore.CYAN}请选择，如 12345: {Style.RESET_ALL}").strip()
     fm: list[str] = []
     if '1' in fmt_choice:
@@ -709,6 +717,8 @@ def export_deep_dive_menu_cli():
         fm.append('ppt')
     if '5' in fmt_choice:
         fm.append('mindmap')
+    if '6' in fmt_choice:
+        fm.append('txt')
     if not fm:
         print(f"{Fore.YELLOW}[INFO] 未选择格式，已取消{Style.RESET_ALL}")
         return

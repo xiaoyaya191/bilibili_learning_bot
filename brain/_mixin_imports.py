@@ -13,7 +13,11 @@ from io import BytesIO
 from pathlib import Path
 
 import httpx
-from openai import OpenAI
+try:
+    from openai import OpenAI
+except Exception:
+    # openai 包是可选的：缺失或版本过旧（<1.0）时全部 AI 调用走 httpx 直连。
+    OpenAI = None
 from colorama import Fore, Style
 from bilibili_api import Credential, user, homepage, comment, video, Danmaku, favorite_list
 from bilibili_api.comment import CommentResourceType

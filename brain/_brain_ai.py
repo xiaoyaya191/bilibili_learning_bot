@@ -8,6 +8,8 @@ class BrainAIMixin:
     def _get_ai_backends(self):
         """返回按优先级排列的AI调用后端列表（当前优选排第一）。"""
         all_backends = ["openai", "httpx"]
+        if OpenAI is None:
+            all_backends = ["httpx"]
         if self._preferred_ai_method and self._preferred_ai_method in all_backends:
             return [self._preferred_ai_method] + [m for m in all_backends if m != self._preferred_ai_method]
         return all_backends
@@ -62,6 +64,8 @@ class BrainAIMixin:
 
     async def _call_ai_via_openai(self, **kwargs):
         """通过 openai 库调用（新版 openai>=1.0.0 客户端）。"""
+        if OpenAI is None:
+            raise RuntimeError("openai 库未安装或版本过低，已自动改用 httpx 直连")
         timeout_val = kwargs.pop("request_timeout", kwargs.pop("timeout", 120))
         live = self._live_config()
         
