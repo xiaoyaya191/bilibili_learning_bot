@@ -86,8 +86,7 @@ fi
 # ---------- 4. 项目依赖 ----------
 if [ -d "$WHEELHOUSE" ] && [ -n "$(ls -A "$WHEELHOUSE")" ]; then
   echo "[3/5] 使用仓库内置 ARM64 轮子离线安装..."
-  "$PY" -m pip install --no-index --find-links "$WHEELHOUSE" \
-    --no-build-isolation -r "$ROOT/arm/requirements-arm64.txt"
+  "$PY" "$ROOT/arm/install_offline_deps.py"
 else
   echo "[3/5] 未找到内置 wheelhouse，使用清华源在线安装..."
   "$PY" -m pip install --no-build-isolation -r "$ROOT/arm/requirements-arm64.txt" -i "$MIRROR"
