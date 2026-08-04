@@ -24,6 +24,9 @@ Data/
 config.json
 
 # Runtime files
+# Local ARM wheelhouse variants kept on the build machine only
+arm/wheelhouse-cp312/
+arm/wheelhouse-cp313/
 bot_memory.json
 bot_journal.md
 upstream-bilibili-ai-bot.zip

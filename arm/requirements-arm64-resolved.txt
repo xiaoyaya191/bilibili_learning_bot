@@ -28,6 +28,7 @@ lxml==6.1.1
 multidict==6.7.1
 pillow==12.1.0
 propcache==0.5.2
+pip==26.1.2
 pycryptodomex==3.23.0
 pydantic==2.13.4
 pydantic-core==2.46.4
@@ -42,7 +43,9 @@ soupsieve==2.9.1
 typing-inspection==0.4.2
 typing_extensions==4.16.0
 tzdata==2026.3
+setuptools==82.0.1
 tzlocal==5.4.4
 urllib3==2.7.0
 yarl==1.24.5
+wheel==0.47.0
 yt-dlp==2026.7.4

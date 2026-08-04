@@ -14,6 +14,7 @@ MIRROR="${PYPI_MIRROR:-https://pypi.tuna.tsinghua.edu.cn/simple}"
 MODE="${1:-install}"
 VENV="$ROOT/.venv"
 PY="$VENV/bin/python"
+WHEELHOUSE="$ROOT/arm/wheelhouse"
 
 echo "========================================"
 echo " bilibili_learning_bot ARM64 安装"
@@ -33,7 +34,9 @@ case "$ARCH" in
 esac
 
 # ---------- 2. 系统依赖 ----------
-if [ -n "$PREFIX" ] && command -v pkg >/dev/null 2>&1; then
+if [ "$TERMUX_OFFLINE" = "1" ]; then
+  echo "[1/5] 离线模式：跳过 pkg/apt，改用本地 .deb（install_offline.sh）"
+elif [ -n "$PREFIX" ] && command -v pkg >/dev/null 2>&1; then
   echo "[1/5] Termux 系统依赖..."
   pkg install -y python python-pip ffmpeg libyaml clang make
 elif command -v apt-get >/dev/null 2>&1; then
@@ -60,10 +63,13 @@ else
 fi
 
 echo "      升级 pip/setuptools/wheel..."
-"$PY" -m pip install --upgrade pip setuptools wheel
+if [ -d "$WHEELHOUSE" ] && [ -n "$(ls -A "$WHEELHOUSE")" ]; then
+  "$PY" -m pip install --no-index --find-links "$WHEELHOUSE" pip setuptools wheel
+else
+  "$PY" -m pip install --upgrade pip setuptools wheel
+fi
 
 # ---------- 4. 项目依赖 ----------
-WHEELHOUSE="$ROOT/arm/wheelhouse"
 if [ -d "$WHEELHOUSE" ] && [ -n "$(ls -A "$WHEELHOUSE")" ]; then
   echo "[3/5] 使用仓库内置 ARM64 轮子离线安装..."
   "$PY" -m pip install --no-index --find-links "$WHEELHOUSE" \
