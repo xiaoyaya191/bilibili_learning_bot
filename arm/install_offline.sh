@@ -71,8 +71,8 @@ while IFS= read -r deb; do
 done < "$ORDER"
 echo "      安装 $INSTALL_COUNT 个，跳过 $SKIP_COUNT 个已存在包"
 
-echo "[2/3] 创建 .venv 并离线安装 Python 轮子..."
-TERMUX_OFFLINE=1 bash "$ROOT/arm/install_arm.sh"
+echo "[2/3] 安装系统/构建依赖 + 创建 .venv + 安装 Python 依赖..."
+bash "$ROOT/arm/install_arm.sh"
 
 echo "[3/3] 离线安装完成"
 case "$MODE" in

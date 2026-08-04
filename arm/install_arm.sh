@@ -48,7 +48,9 @@ if [ "$TERMUX_OFFLINE" = "1" ]; then
   echo "[1/5] 离线模式：跳过 pkg/apt，改用本地 .deb（install_offline.sh）"
 elif [ -n "$PREFIX" ] && command -v pkg >/dev/null 2>&1; then
   echo "[1/5] Termux 系统依赖..."
-  pkg install -y python python-pip ffmpeg libyaml clang make
+  pkg install -y python python-pip ffmpeg libyaml clang make pkg-config binutils rust \
+    python-ensurepip-wheels python-lxml python-pillow python-brotli python-pycryptodomex pybind11 \
+    libxml2 libxslt libjpeg-turbo freetype libpng zlib openssl brotli
 elif command -v apt-get >/dev/null 2>&1; then
   echo "[1/5] Debian/Ubuntu 系统依赖..."
   apt-get update -y
@@ -61,7 +63,7 @@ fi
 # ---------- 3. 创建虚拟环境 ----------
 if [ ! -x "$PY" ]; then
   echo "[2/5] 创建虚拟环境 .venv ..."
-  if python -m venv "$VENV"; then
+  if python -m venv --system-site-packages "$VENV"; then
     :
   else
     echo "      python -m venv 失败，改用 virtualenv..."
@@ -70,7 +72,7 @@ if [ ! -x "$PY" ]; then
     else
       python -m pip install --upgrade virtualenv -i "$MIRROR"
     fi
-    python -m virtualenv "$VENV"
+    python -m virtualenv --system-site-packages "$VENV"
   fi
 else
   echo "[2/5] 虚拟环境已存在，跳过创建"

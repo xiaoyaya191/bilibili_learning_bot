@@ -111,7 +111,8 @@ def main() -> int:
         print(f"  wheelhouse 无可用 {name} 轮子，改用清华源安装依赖后重装...")
         print("  离线 pip 输出（末尾）:")
         _print_pip_tail(output)
-        online = ["--no-build-isolation", "-i", MIRROR, line]
+        # 在线回退让 pip 使用构建隔离，自动从清华源拉 maturin/cython 等构建依赖
+        online = ["-i", MIRROR, line]
         code, output = pip_install(python, online)
         if code != 0:
             print(f"  ERROR 安装 {line} 失败", file=sys.stderr)
