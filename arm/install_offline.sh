@@ -33,12 +33,24 @@ echo " MODE: $MODE"
 echo "========================================"
 
 echo "[1/3] 安装本地 Termux .deb（依赖顺序安装）..."
+SKIP_COUNT=0
+INSTALL_COUNT=0
 while IFS= read -r deb; do
   [ -z "$deb" ] && continue
   deb="${deb//$'\r'/}"  # 防止 Windows CRLF 残留
+  pkg="$(dpkg-deb -f "$DEBS/$deb" Package 2>/dev/null || true)"
+  ver="$(dpkg-deb -f "$DEBS/$deb" Version 2>/dev/null || true)"
+  installed="$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null || true)"
+  if [ -n "$installed" ] && dpkg --compare-versions "$installed" ge "$ver" 2>/dev/null; then
+    echo "  skip $deb（已安装 $installed >= $ver）"
+    SKIP_COUNT=$((SKIP_COUNT + 1))
+    continue
+  fi
   echo "  dpkg -i $deb"
-  dpkg -i "$DEBS/$deb"
+  dpkg -i --force-overwrite "$DEBS/$deb"
+  INSTALL_COUNT=$((INSTALL_COUNT + 1))
 done < "$ORDER"
+echo "      安装 $INSTALL_COUNT 个，跳过 $SKIP_COUNT 个已存在包"
 
 echo "[2/3] 创建 .venv 并离线安装 Python 轮子..."
 TERMUX_OFFLINE=1 bash "$ROOT/arm/install_arm.sh"
