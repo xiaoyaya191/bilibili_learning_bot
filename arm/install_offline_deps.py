@@ -56,15 +56,27 @@ def should_skip(installed: str | None, spec: str) -> bool:
     return False
 
 
-def pip_install(python: str, args: list[str]) -> int:
-    return subprocess.run(
+def pip_install(python: str, args: list[str]) -> tuple[int, str]:
+    result = subprocess.run(
         [python, "-m", "pip", "install", *args],
-        capture_output=True, text=True, timeout=600,
-    ).returncode
+        capture_output=True, text=True, timeout=900,
+    )
+    return result.returncode, result.stdout + "\n" + result.stderr
+
+
+def _print_pip_tail(output: str, limit: int = 25) -> None:
+    lines = [line for line in output.splitlines() if line.strip()]
+    for line in lines[-limit:]:
+        print("      | " + line)
 
 
 def main() -> int:
     python = sys.executable
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+        sys.stderr.reconfigure(line_buffering=True)
+    except Exception:
+        pass
     lines = [
         line.strip()
         for line in REQUIREMENTS.read_text(encoding="utf-8").splitlines()
@@ -91,14 +103,20 @@ def main() -> int:
             "--no-index", "--find-links", str(WHEELHOUSE),
             "--no-build-isolation", line,
         ]
-        if pip_install(python, offline) == 0:
+        code, output = pip_install(python, offline)
+        if code == 0:
             installed_count += 1
             continue
 
         print(f"  wheelhouse 无可用 {name} 轮子，改用清华源安装依赖后重装...")
+        print("  离线 pip 输出（末尾）:")
+        _print_pip_tail(output)
         online = ["--no-build-isolation", "-i", MIRROR, line]
-        if pip_install(python, online) != 0:
+        code, output = pip_install(python, online)
+        if code != 0:
             print(f"  ERROR 安装 {line} 失败", file=sys.stderr)
+            print("  清华源 pip 输出（末尾）:")
+            _print_pip_tail(output)
             return 1
         installed_count += 1
         fallback_count += 1
