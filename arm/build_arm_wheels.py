@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+import tarfile
 
 ROOT = Path(__file__).resolve().parent.parent
 RESOLVED = ROOT / "arm" / "requirements-arm64-resolved.txt"
@@ -54,6 +55,7 @@ def main() -> int:
     parser.add_argument("--python", default="312", help="Target CPython version, e.g. 312 or 313")
     parser.add_argument("--out", default=str(ROOT / "arm" / "wheelhouse"))
     parser.add_argument("--mirror", default=DEFAULT_MIRROR)
+    parser.add_argument("--no-archive", action="store_true", help="Skip wheelhouse.tar.gz creation")
     args = parser.parse_args()
 
     py_version = args.python
@@ -81,6 +83,9 @@ def main() -> int:
 
     for name, version in specs:
         normalized = _normalize(name)
+        if any(_normalize(artifact.name).startswith(normalized + "-") for artifact in out_dir.iterdir()):
+            print(f"skip existing: {name}=={version}")
+            continue
         if normalized in SDIST_ONLY:
             # Pure-Python sdist: pip builds it on the ARM device.
             cmd = [
@@ -115,6 +120,13 @@ def main() -> int:
     total_mb = sum(artifact.stat().st_size for artifact in artifacts) / 1024 / 1024
     print(f"\nARM64 wheelhouse ready: {out_dir}")
     print(f"artifacts={len(artifacts)} size={total_mb:.1f} MB python=cp{py_version}")
+    if not args.no_archive:
+        archive = out_dir.with_suffix(out_dir.suffix + ".tar.gz")
+        with tarfile.open(archive, "w:gz") as tar:
+            for artifact in artifacts:
+                tar.add(artifact, arcname=f"wheelhouse/{artifact.name}")
+        archive_mb = archive.stat().st_size / 1024 / 1024
+        print(f"archive={archive} size={archive_mb:.1f} MB")
     print("Commit arm/wheelhouse and run install_arm.sh on the ARM device.")
     return 0
 

@@ -44,10 +44,16 @@ bash arm/install_arm.sh web
 
 # 安装并启动机器人菜单
 bash arm/install_arm.sh bot
+
+# 安装后把 .venv + wheelhouse 打包成单个 tar.gz
+bash arm/install_arm.sh pack
 ```
 
 Termux 会自动执行 `pkg install python ffmpeg libyaml ...`；
 Debian/Ubuntu 自动执行 `apt-get install ...`。
+
+脚本会在项目根目录创建 `.venv` 虚拟环境，依赖全部装进 `.venv`，
+Web/bot 都用 `.venv/bin/python` 启动，不污染系统 Python。
 
 ## 为什么不需要整机 QEMU
 
