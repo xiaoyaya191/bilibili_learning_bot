@@ -16,6 +16,16 @@ ORDER="$DEBS/termux-debs-order.txt"
 MODE="${1:-install}"
 
 if [ -z "$PREFIX" ] || ! command -v dpkg >/dev/null 2>&1; then
+
+# ---------- 0. 日志 ----------
+LOG_DIR="$ROOT/logs"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/offline-install-$(date +%Y%m%d_%H%M%S).log"
+if [ -z "$BILILEARN_TEE_DONE" ]; then
+  export BILILEARN_TEE_DONE=1
+  echo "日志文件: $LOG_FILE"
+  exec bash "$0" "$@" 2>&1 | tee -a "$LOG_FILE"
+fi
   echo "[ERROR] 只能在 Termux 内运行（需要 \$PREFIX 和 dpkg）"
   exit 1
 fi

@@ -16,6 +16,16 @@ VENV="$ROOT/.venv"
 PY="$VENV/bin/python"
 WHEELHOUSE="$ROOT/arm/wheelhouse"
 
+# ---------- 0. 日志 ----------
+LOG_DIR="$ROOT/logs"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/arm-install-$(date +%Y%m%d_%H%M%S).log"
+if [ -z "$BILILEARN_TEE_DONE" ]; then
+  export BILILEARN_TEE_DONE=1
+  echo "日志文件: $LOG_FILE"
+  exec bash "$0" "$@" 2>&1 | tee -a "$LOG_FILE"
+fi
+
 echo "========================================"
 echo " bilibili_learning_bot ARM64 安装"
 echo " ROOT: $ROOT"
@@ -51,11 +61,15 @@ fi
 # ---------- 3. 创建虚拟环境 ----------
 if [ ! -x "$PY" ]; then
   echo "[2/5] 创建虚拟环境 .venv ..."
-  if python -m venv "$VENV" 2>/dev/null; then
+  if python -m venv "$VENV"; then
     :
   else
     echo "      python -m venv 失败，改用 virtualenv..."
-    python -m pip install --upgrade virtualenv
+    if [ -d "$WHEELHOUSE" ] && [ -n "$(ls -A "$WHEELHOUSE")" ]; then
+      python -m pip install --no-index --find-links "$WHEELHOUSE" virtualenv
+    else
+      python -m pip install --upgrade virtualenv
+    fi
     python -m virtualenv "$VENV"
   fi
 else
@@ -64,9 +78,9 @@ fi
 
 echo "      升级 pip/setuptools/wheel..."
 if [ -d "$WHEELHOUSE" ] && [ -n "$(ls -A "$WHEELHOUSE")" ]; then
-  "$PY" -m pip install --no-index --find-links "$WHEELHOUSE" pip setuptools wheel
+  "$PY" -m pip install --no-index --find-links "$WHEELHOUSE" pip setuptools wheel packaging
 else
-  "$PY" -m pip install --upgrade pip setuptools wheel
+  "$PY" -m pip install --upgrade pip setuptools wheel packaging
 fi
 
 # ---------- 4. 项目依赖 ----------

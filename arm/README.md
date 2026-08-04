@@ -78,6 +78,12 @@ bash arm/install_arm.sh pack       # 安装后把 .venv + wheelhouse 打包
 脚本会在项目根目录创建 `.venv` 虚拟环境，依赖全部装进 `.venv`，
 Web/bot 都用 `.venv/bin/python` 启动，不污染系统 Python。
 
+## 日志位置
+
+- 安装脚本日志：`logs/offline-install-*.log`、`logs/arm-install-*.log`
+- Python 运行时日志：`$HOME/AppData/Local/BiliLearn/Data/bot_console.log`（Termux）
+- Web 面板子进程日志：`$HOME/AppData/Local/BiliLearn/Data/web_bot_runtime.log`
+
 ## 为什么不需要整机 QEMU
 
 - 依赖产物已经是 aarch64 原生 wheel / deb，运行速度接近原生，不需要 x86 模拟。

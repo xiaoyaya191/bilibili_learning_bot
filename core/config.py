@@ -9,7 +9,7 @@ import json
 import hashlib, base64, secrets
 from colorama import Fore, Style
 from utils.storage import get_backup_dir
-from utils.display import mask_secret
+from utils.display import _append_console_log, mask_secret, redact_sensitive_text
 from core.user_data import (
     DATA_DIR as _USER_DATA_DIR,
     HIGHLIGHTS_DIR as _USER_HIGHLIGHTS_DIR,
@@ -824,3 +824,4 @@ def log(msg, level="INFO"):
     timestamp = datetime.now().strftime("%H:%M:%S")
     color = colors.get(level, Fore.WHITE)
     print(f"{color}[{timestamp}][{level}] {msg}{Style.RESET_ALL}")
+    _append_console_log(f"[{timestamp}][{level}] {redact_sensitive_text(msg)}")
