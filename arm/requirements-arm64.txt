@@ -1,0 +1,16 @@
+# ARM64 完整依赖清单：离线安装时从本地 wheelhouse 一次装完
+bilibili-api-python==17.4.1
+pydantic>=2.0.0
+httpx==0.28.1
+colorama==0.4.6
+qrcode==8.2
+qrcode-terminal==0.8
+Pillow==12.1.0
+pystray==0.19.5
+Flask==3.1.2
+flask-cors==6.0.2
+requests==2.32.5
+imageio-ffmpeg==0.6.0
+yt-dlp>=2025.6.30
+python-docx>=1.1.2
+reportlab>=4.2.5

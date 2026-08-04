@@ -803,9 +803,15 @@ def _cache_watch_history_metadata(bvids: list[str], maximum: int = 8) -> tuple[i
 
 _observation_cover_backfill_queued: set = set()
 _observation_cover_backfill_lock = threading.Lock()
+_observation_cover_backfill_last_try: dict = {}
+_OBSERVATION_COVER_BACKFILL_COOLDOWN = 60.0
 
 
 def _run_observation_cover_backfill(bvids: list[str]) -> None:
+    with _observation_cover_backfill_lock:
+        now = time.time()
+        for value in bvids:
+            _observation_cover_backfill_last_try[value] = now
     try:
         _cache_watch_history_metadata(bvids, maximum=len(bvids))
     except Exception:
@@ -822,7 +828,8 @@ def _ensure_observation_cover_backfill(bvid: str, recent_bvids: list[str]) -> No
     with _observation_cover_backfill_lock:
         for value in candidates:
             safe = _safe_watch_bvid(value)
-            if safe and safe not in _observation_cover_backfill_queued and len(wanted) < 5:
+            last_try = _observation_cover_backfill_last_try.get(safe, 0.0)
+            if safe and safe not in _observation_cover_backfill_queued and (time.time() - last_try) >= _OBSERVATION_COVER_BACKFILL_COOLDOWN and len(wanted) < 5:
                 wanted.append(safe)
                 _observation_cover_backfill_queued.add(safe)
     if not wanted:

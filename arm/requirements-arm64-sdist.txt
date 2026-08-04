@@ -1,0 +1,2 @@
+# ARM64 专用：只有 sdist 的纯 Python 包，在设备上由 pip 现场构建（无 C 编译）
+qrcode-terminal==0.8
