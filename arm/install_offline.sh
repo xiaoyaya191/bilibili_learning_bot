@@ -35,6 +35,7 @@ echo "========================================"
 echo "[1/3] 安装本地 Termux .deb（依赖顺序安装）..."
 while IFS= read -r deb; do
   [ -z "$deb" ] && continue
+  deb="${deb//$'\r'/}"  # 防止 Windows CRLF 残留
   echo "  dpkg -i $deb"
   dpkg -i "$DEBS/$deb"
 done < "$ORDER"

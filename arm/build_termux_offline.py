@@ -150,7 +150,9 @@ def main() -> int:
         order_lines.append(deb_name)
         total_bytes += target.stat().st_size
 
-    order_path.write_text("\n".join(order_lines) + "\n", encoding="utf-8")
+    # 必须用 LF 换行：Windows 默认会写成 CRLF，Termux 里 read 会把包名末尾带上 \r
+    with open(order_path, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write("\n".join(order_lines) + "\n")
     print(f"\ntermux debs ready: {out_dir}")
     print(f"packages={len(order_lines)} size={total_bytes / 1024 / 1024:.1f} MB")
     print("install order file:", order_path)
