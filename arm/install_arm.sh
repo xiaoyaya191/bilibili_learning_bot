@@ -66,9 +66,9 @@ if [ ! -x "$PY" ]; then
   else
     echo "      python -m venv 失败，改用 virtualenv..."
     if [ -d "$WHEELHOUSE" ] && [ -n "$(ls -A "$WHEELHOUSE")" ]; then
-      python -m pip install --no-index --find-links "$WHEELHOUSE" virtualenv
+      python -m pip install --upgrade --no-index --find-links "$WHEELHOUSE" virtualenv
     else
-      python -m pip install --upgrade virtualenv
+      python -m pip install --upgrade virtualenv -i "$MIRROR"
     fi
     python -m virtualenv "$VENV"
   fi
@@ -76,21 +76,21 @@ else
   echo "[2/5] 虚拟环境已存在，跳过创建"
 fi
 
-echo "      升级 pip/setuptools/wheel..."
+echo "      补齐 setuptools/wheel/packaging（不降级 pip）..."
 if [ -d "$WHEELHOUSE" ] && [ -n "$(ls -A "$WHEELHOUSE")" ]; then
-  "$PY" -m pip install --no-index --find-links "$WHEELHOUSE" pip setuptools wheel packaging
+  "$PY" -m pip install --upgrade --no-index --find-links "$WHEELHOUSE" setuptools wheel packaging
 else
-  "$PY" -m pip install --upgrade pip setuptools wheel packaging
+  "$PY" -m pip install --upgrade setuptools wheel packaging -i "$MIRROR"
 fi
 
 # ---------- 4. 项目依赖 ----------
 if [ -d "$WHEELHOUSE" ] && [ -n "$(ls -A "$WHEELHOUSE")" ]; then
   echo "[3/5] 使用仓库内置 ARM64 轮子离线安装..."
   "$PY" -m pip install --no-index --find-links "$WHEELHOUSE" \
-    -r "$ROOT/arm/requirements-arm64-resolved.txt"
+    --no-build-isolation -r "$ROOT/arm/requirements-arm64.txt"
 else
   echo "[3/5] 未找到内置 wheelhouse，使用清华源在线安装..."
-  "$PY" -m pip install -r "$ROOT/arm/requirements-arm64.txt" -i "$MIRROR"
+  "$PY" -m pip install --no-build-isolation -r "$ROOT/arm/requirements-arm64.txt" -i "$MIRROR"
 fi
 
 # ---------- 5. 启动 / 打包 ----------

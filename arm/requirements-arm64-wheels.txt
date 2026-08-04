@@ -13,3 +13,8 @@ imageio-ffmpeg==0.6.0
 yt-dlp>=2025.6.30
 python-docx>=1.1.2
 reportlab>=4.2.5
+# 离线引导工具：venv 创建 / sdist 构建所需（不降级系统 pip）
+setuptools==82.0.1
+wheel==0.47.0
+packaging==26.2
+virtualenv==21.7.1

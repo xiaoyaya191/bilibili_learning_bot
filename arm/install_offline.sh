@@ -56,6 +56,15 @@ while IFS= read -r deb; do
     SKIP_COUNT=$((SKIP_COUNT + 1))
     continue
   fi
+  echo "  $deb 需要从 $ver 升级，先从清华源安装依赖..."
+  deps="$(dpkg-deb -f "$DEBS/$deb" Depends 2>/dev/null | tr ',' '\n' | sed -E 's/\([^)]*\)//g; s/\|[^,]*//g; s/[[:space:]]+//g' | grep -E '^[A-Za-z0-9+.-]+$' | sort -u | tr '\n' ' ')"
+  if [ -n "$deps" ]; then
+    if [ -n "$PREFIX" ] && command -v pkg >/dev/null 2>&1; then
+      pkg install -y $deps
+    elif command -v apt-get >/dev/null 2>&1; then
+      apt-get install -y $deps
+    fi
+  fi
   echo "  dpkg -i $deb"
   dpkg -i --force-overwrite "$DEBS/$deb"
   INSTALL_COUNT=$((INSTALL_COUNT + 1))

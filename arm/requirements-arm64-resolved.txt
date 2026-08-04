@@ -28,7 +28,6 @@ lxml==6.1.1
 multidict==6.7.1
 pillow==12.1.0
 propcache==0.5.2
-pip==26.1.2
 packaging==26.2
 pycryptodomex==3.23.0
 pydantic==2.13.4
