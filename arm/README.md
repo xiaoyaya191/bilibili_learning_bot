@@ -12,6 +12,7 @@ ARM 设备（Termux）直接用本地文件安装，不需要联网。
 - `requirements-arm64-resolved.txt` pip 解析后的精确版本锁
 - `build_arm_wheels.py` 在本机生成 ARM64 Python wheelhouse
 - `build_termux_offline.py` 在本机下载 Termux aarch64 .deb 依赖闭包
+- `build_arm_sdists.py` 下载全部依赖源码包到 `wheelhouse-src/`（Termux 源码构建用）
 - `wheelhouse/` Python 编译产物（默认 CPython 3.14，和 Termux 当前版本一致）
 - `termux-debs/` Termux .deb 闭包 + 安装顺序
 - `install_arm.sh` 在线/半离线安装运行脚本（自动创建 .venv）
