@@ -413,6 +413,16 @@ class MonitorBot:
             if not bvid and str(notification.get("aid") or "").isdigit():
                 info = await bili_video.Video(aid=int(notification["aid"]), credential=self.bili.credential).get_info()
                 bvid = str((info or {}).get("bvid") or "")
+            if bvid:
+                # 真实观看：先上报播放心跳，再读取元数据/字幕作为证据。
+                try:
+                    report = await self.bili.report_history(bvid, played_time=30)
+                    if report and str(report.get("code") or "") == "0":
+                        log(f"[监听][@] 已上报观看心跳 {bvid}", "MENTION")
+                    else:
+                        log(f"[监听][@] 观看心跳未确认 {bvid}: {report}", "WARN")
+                except Exception as exc:
+                    log(f"[监听][@] 观看心跳上报失败（不阻塞回答）: {str(exc)[:160]}", "WARN")
             if bvid and self.comment_mgr and getattr(self.comment_mgr, "toolbox", None):
                 evidence = await self.comment_mgr.toolbox.video_details(bvid)
         except Exception as exc:
@@ -422,7 +432,7 @@ class MonitorBot:
         from utils.helpers import ensure_ai_marker
         prompt = (
             "Reply to this Bilibili @ mention naturally and briefly. Use only the supplied evidence. "
-            "Do not say the video was watched or completed; subtitles are evidence of text read, not playback. "
+            "A playback heartbeat was reported when evidence exists; base the reply only on supplied evidence. "
             "If evidence is missing, say that it cannot be confirmed. Reply in the language used by the commenter.\n\n"
             f"Commenter: {notification.get('user')}\n"
             f"Comment: {notification.get('content')}\n"
@@ -433,7 +443,11 @@ class MonitorBot:
              {"role": "user", "content": prompt}],
             timeout=60, verbose=False,
         )
-        return ensure_ai_marker(str(reply or "").strip())
+        reply = str(reply or "").strip()
+        if not reply:
+            log(f"[监听][@] AI 未生成回复，跳过 @{notification.get('user')}", "WARN")
+            return ""
+        return ensure_ai_marker(reply)
 
     async def _check_mentions(self):
         self._last_at_check = datetime.now()
@@ -477,6 +491,7 @@ class MonitorBot:
                     reply_target = {
                         "id": notification["comment_id"], "aid": notification["aid"],
                         "content": notification["content"], "user": notification["user"],
+                        "bvid": notification.get("bvid") or "",
                         "user_id": notification.get("user_id"),
                         "root_id": notification.get("root_id"), "parent_id": notification["comment_id"],
                         "source": "at_notification",
@@ -489,6 +504,13 @@ class MonitorBot:
                     sent = await self.comment_mgr.reply_to_comment(
                         self.bili, reply_target, reply, is_at_mention=True
                     )
+                    if sent:
+                        three_actions = getattr(self.comment_mgr, "_one_click_three_for_video", None)
+                        if callable(three_actions):
+                            try:
+                                await three_actions(reply_target, reason="评论区@回复")
+                            except Exception as exc:
+                                log(f"[监听][@] 一键三连失败: {str(exc)[:160]}", "WARN")
                 terminal = bool(getattr(self.comment_mgr, "last_reply_failure", {}).get("terminal"))
                 if not attempted or sent or terminal:
                     if comment_id and (sent or terminal):

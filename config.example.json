@@ -69,7 +69,8 @@
     "enable_affection": true,
     "enable_embedding_memory": true,
     "comment_poll_interval": 300,
-    "max_replies_per_check": 3
+    "max_replies_per_check": 3,
+    "comment_reply_three_actions": {"enabled": true, "like": true, "coin": true, "favorite": true}
   },
   "video": {
     "browse_mode": "candidate_review",

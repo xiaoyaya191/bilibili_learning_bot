@@ -116,6 +116,19 @@ def export_docx(md_path: str | Path, kb_root: str | Path | None = None, out_dir:
     return str(out)
 
 
+def export_txt(md_path: str | Path, kb_root: str | Path | None = None, out_dir: str | Path | None = None) -> str:
+    target = _read_md(md_path, kb_root)
+    return export_txt_text(target.read_text(encoding="utf-8", errors="replace"), target.stem, out_dir=out_dir)
+
+def export_md_copy(md_path: str | Path, kb_root: str | Path | None = None, out_dir: str | Path | None = None) -> str:
+    """复制一份 Markdown 到导出目录，保证多格式导出包含原文。"""
+    target = _read_md(md_path, kb_root)
+    output_dir = _resolve_out_dir(out_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out = output_dir / f"{_safe_name(target)}.md"
+    out.write_text(target.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+    return str(out)
+
 def export_pdf(md_path: str | Path, kb_root: str | Path | None = None, out_dir: str | Path | None = None) -> str:
     target = _read_md(md_path, kb_root)
     try:
@@ -164,7 +177,11 @@ def export_document(md_path: str | Path, fmt: str, kb_root: str | Path | None = 
         return export_docx(md_path, kb_root=kb_root, out_dir=out_dir)
     if fmt == "pdf":
         return export_pdf(md_path, kb_root=kb_root, out_dir=out_dir)
-    raise ValueError("仅支持 pdf/docx")
+    if fmt in {"txt", "text"}:
+        return export_txt(md_path, kb_root=kb_root, out_dir=out_dir)
+    if fmt in {"md", "markdown"}:
+        return export_md_copy(md_path, kb_root=kb_root, out_dir=out_dir)
+    raise ValueError("仅支持 pdf/docx/txt/md")
 
 
 # ─────────────────────────────────────────────
@@ -199,6 +216,26 @@ def export_docx_text(text: str, title: str, out_dir: str | Path | None = None) -
     out = output_dir / f"{_safe_title(title)}.docx"
     doc.save(str(out))
     return str(out)
+
+
+def export_txt_text(text: str, title: str, out_dir: str | Path | None = None) -> str:
+    """把任意文本导出为 .txt（保留纯文本内容，无需额外依赖）。"""
+    output_dir = _resolve_out_dir(out_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out = output_dir / f"{_safe_title(title)}.txt"
+    out.write_text(str(text or ""), encoding="utf-8")
+    return str(out)
+
+def export_md_text(text: str, title: str, out_dir: str | Path | None = None) -> str:
+    """把任意 Markdown 文本导出为 .md 文件。"""
+    output_dir = _resolve_out_dir(out_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out = output_dir / f"{_safe_title(title)}.md"
+    out.write_text(str(text or ""), encoding="utf-8")
+    return str(out)
+
+
+
 
 
 def export_pdf_text(text: str, title: str, out_dir: str | Path | None = None) -> str:
@@ -264,6 +301,17 @@ async def export_video_content(title: str, up_name: str, video_url: str, ctx: st
 
     fmt_set = {str(f).lower() for f in (formats or [])}
     # Word
+    # TXT / Markdown（纯文本导出，无额外依赖）
+    if 'txt' in fmt_set or 'text' in fmt_set:
+        try:
+            results['txt'] = {'path': export_txt_text(note, title)}
+        except Exception as _e:
+            results['txt'] = {'error': str(_e)}
+    if 'md' in fmt_set or 'markdown' in fmt_set:
+        try:
+            results['md'] = {'path': export_md_text(note, title)}
+        except Exception as _e:
+            results['md'] = {'error': str(_e)}
     if 'docx' in fmt_set or 'word' in fmt_set:
         try:
             results['docx'] = {'path': export_docx_text(note, title)}
@@ -321,6 +369,8 @@ async def export_video_content_interactive(title: str, up_name: str, video_url: 
         print(f"  {Fore.YELLOW}2.{Style.RESET_ALL} 📑 PDF 文档 (.pdf)")
         print(f"  {Fore.YELLOW}3.{Style.RESET_ALL} 🎞️ PPT 演示 (.html)")
         print(f"  {Fore.YELLOW}4.{Style.RESET_ALL} 🧠 思维导图 (.html)")
+        print(f"  {Fore.YELLOW}5.{Style.RESET_ALL} 📝 TXT 纯文本 (.txt)")
+        print(f"  {Fore.YELLOW}6.{Style.RESET_ALL} 📃 Markdown (.md)")
         print(f"  {Fore.CYAN}(可多选，如 1234 / 1 / 直接回车跳过){Style.RESET_ALL}")
         loop = asyncio.get_running_loop()
         fmt_choice = (await loop.run_in_executor(None, input, f"{Fore.GREEN}> {Style.RESET_ALL}")).strip()
@@ -335,6 +385,10 @@ async def export_video_content_interactive(title: str, up_name: str, video_url: 
             fm.append('ppt')
         if '4' in fmt_choice:
             fm.append('mindmap')
+        if '5' in fmt_choice:
+            fm.append('txt')
+        if '6' in fmt_choice:
+            fm.append('md')
         if not fm:
             return
         # PPT 风格选择

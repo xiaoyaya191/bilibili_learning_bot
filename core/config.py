@@ -9,7 +9,7 @@ import json
 import hashlib, base64, secrets
 from colorama import Fore, Style
 from utils.storage import get_backup_dir
-from utils.display import mask_secret
+from utils.display import _append_console_log, mask_secret, redact_sensitive_text
 from core.user_data import (
     DATA_DIR as _USER_DATA_DIR,
     HIGHLIGHTS_DIR as _USER_HIGHLIGHTS_DIR,
@@ -230,7 +230,10 @@ DEFAULT_CONFIG = {
         "prob_like_solo": 0.5, "prob_comment_others": 0.3,
         "comment_check_interval": 300, "max_replies_per_check": 3,
         "random_enabled": True, "comment_check_enabled": True,
-        "coin_cooldown_minutes": 0, "coin_max_per_hour": 0
+        "coin_cooldown_minutes": 0, "coin_max_per_hour": 0,
+        "comment_reply_three_actions": {
+            "enabled": True, "like": True, "coin": True, "favorite": True
+        }
     },
     "energy": {
         "energy_recovery_min": 5, "energy_recovery_max": 10,
@@ -821,3 +824,4 @@ def log(msg, level="INFO"):
     timestamp = datetime.now().strftime("%H:%M:%S")
     color = colors.get(level, Fore.WHITE)
     print(f"{color}[{timestamp}][{level}] {msg}{Style.RESET_ALL}")
+    _append_console_log(f"[{timestamp}][{level}] {redact_sensitive_text(msg)}")

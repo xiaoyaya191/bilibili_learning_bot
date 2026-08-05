@@ -1581,7 +1581,7 @@ select option{background-color:var(--bg-card);color:var(--text-primary)}
 
 <!-- VIDEO2WEB -->
 <div class="page" id="pg-video2web">
-<div class="ph"><h1>视频 → 网页 / 导出</h1><p>输入视频，AI 生成精美学习网页（幻灯片风格），可预览 / 下载 / 导出 Word·PDF</p></div>
+<div class="ph"><h1>视频 → 网页 / 导出</h1><p>输入视频，AI 生成精美学习网页（幻灯片风格），可预览 / 下载 / 导出 Word·PDF·TXT</p></div>
 <div class="divider"></div>
 <div class="pc"><h3>① 选择视频</h3>
 <div class="fg"><label>BV号 / 链接 / 标题 / UP主</label><input id="v2wInput" placeholder="BV1xx411c7mD 或 完整链接"></div>
@@ -1602,6 +1602,7 @@ select option{background-color:var(--bg-card);color:var(--text-primary)}
 <button class="btn btn-out btn-sm" onclick="v2wDownloadHtml()">⬇ 下载 HTML</button>
 <button class="btn btn-out btn-sm" onclick="v2wExport('docx')">📄 导出 Word</button>
 <button class="btn btn-out btn-sm" onclick="v2wExport('pdf')">📕 导出 PDF</button>
+<button class="btn btn-out btn-sm" onclick="v2wExport('txt')">📝 导出 TXT</button>
 </div>
 <div id="v2wTitle" style="margin-top:8px;font-size:13px"></div>
 <div id="v2wQuality" class="form-hint" style="margin-top:5px"></div>
@@ -2134,7 +2135,7 @@ monitorUserScrolledUp=!atBottom;
 
 // ── AI OBSERVATION ──
 var observePoll=null,observeCurrent=null;
-function observeCover(video){var image=video.cover?'<img src="'+esc(video.cover)+'" alt="" referrerpolicy="no-referrer" onerror="this.remove()">':'';return '<div class="observe-cover">'+image+'<div class="history-cover-fallback" '+(video.cover?'hidden':'')+'>'+esc(video.bvid||'VIDEO')+'</div><span class="history-duration">'+esc(video.duration||'--:--')+'</span></div>'}
+function observeCover(video){var image=video.cover?'<img src="'+esc(video.cover)+'" alt="" referrerpolicy="no-referrer" onerror="this.remove();this.parentNode.querySelector(\'.history-cover-fallback\').hidden=false">':'';return '<div class="observe-cover">'+image+'<div class="history-cover-fallback" '+(video.cover?'hidden':'')+'>'+esc(video.bvid||'VIDEO')+'</div><span class="history-duration">'+esc(video.duration||'--:--')+'</span></div>'}
 function renderObserve(video){var root=document.getElementById('observeVideo'),log=document.getElementById('observeLog'),judge=document.getElementById('observeJudge'),enrich=document.getElementById('observeEnrich');if(!root)return;observeCurrent=video||{};var active=!!observeCurrent.bvid;if(judge)judge.disabled=!active;if(enrich)enrich.disabled=!active;if(!active){root.innerHTML='<div class="observe-empty"><div><i data-lucide="scan-eye"></i><p>机器人暂时没有正在处理的视频</p><p>开始分析后，这里会出现真实的视频目标和阶段。</p></div></div>';if(log)log.textContent=(observeCurrent.logs||[]).join('\n')||'等待机器人输出...';lucide.createIcons({attrs:{'stroke-width':1.5}});return}var tags=(observeCurrent.tags||[]).slice(0,6).map(function(tag){return '<span class="tg tg-inf">'+esc(tag)+'</span>'}).join(''),score=Number(observeCurrent.score)||0,thought=observeCurrent.thought?'<div class="observe-thought"><b>AI 想法</b><br>'+esc(observeCurrent.thought)+'</div>':'';root.innerHTML='<div class="observe-video">'+observeCover(observeCurrent)+'<div><div class="observe-stage">'+esc(observeCurrent.stage||'准备中')+'</div><h2 class="observe-title">'+esc(observeCurrent.title||observeCurrent.bvid)+'</h2><div class="history-card-meta"><span class="up">@'+esc(observeCurrent.up||'未知 UP')+'</span><span>'+esc(observeCurrent.bvid)+'</span></div><div class="observe-meta"><span>'+esc(observeCurrent.category||'未分类')+'</span><span>播放 '+compactCount(observeCurrent.view_count)+'</span><span>点赞 '+compactCount(observeCurrent.like_count)+'</span><span>收藏 '+compactCount(observeCurrent.favorite_count)+'</span>'+(score?'<span class="score-badge '+scoreTone(score)+'">'+score.toFixed(1)+' 分</span>':'')+'</div><div class="history-card-tags" style="margin-top:9px">'+tags+'</div>'+(observeCurrent.description?'<p class="observe-desc">'+esc(observeCurrent.description)+'</p>':'')+thought+'<div class="btn-grp" style="margin-top:12px"><a class="btn btn-out btn-sm" href="'+esc(observeCurrent.url)+'" target="_blank" rel="noopener noreferrer"><i data-lucide="external-link"></i>打开 B 站视频</a></div></div></div>';if(log){log.textContent=(observeCurrent.logs||[]).join('\n')||'等待本次处理日志...';log.scrollTop=log.scrollHeight}lucide.createIcons({attrs:{'stroke-width':1.5}})}
 async function refreshObserve(){try{var data=await api('GET','/api/observe');var awareness=document.getElementById('observeAwareness');if(awareness)awareness.checked=!!data.user_awareness;renderObserve(data.observation||{})}catch(e){var root=document.getElementById('observeVideo');if(root)root.innerHTML='<div class="observe-empty">观察台暂时无法读取：'+esc(e.message||e)+'</div>'}}
 function rf_observe(){refreshObserve();if(!observePoll)observePoll=setInterval(refreshObserve,1800)}

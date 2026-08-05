@@ -88,6 +88,14 @@ def _is_fast_fail_error(error: Exception) -> bool:
     ))
 
 
+def _openai_available() -> bool:
+    """openai 包可选：缺失或版本过旧时自动使用 httpx 直连。"""
+    try:
+        from openai import OpenAI
+        return True
+    except Exception:
+        return False
+
 def _live_config() -> dict:
     """实时读取 API 配置（绕过 import * 导致的模块级变量缓存问题）。
     每次调用都从 config 字典重新读取，确保用户通过菜单修改后即时生效。"""
@@ -131,7 +139,10 @@ async def _call_ai_via_openai(
     tool_choice: str = "auto",
 ) -> Any:
     """通过 openai 库调用（主通道）。"""
-    from openai import OpenAI
+    try:
+        from openai import OpenAI
+    except Exception as exc:
+        raise RuntimeError("openai 库未安装或版本过低，已自动改用 httpx 直连") from exc
 
     live = _live_config()
     api_key = live.get("api_key", "")
@@ -276,10 +287,10 @@ async def call_ai_raw(
     if not _model:
         raise RuntimeError("未配置 model_brain，请在配置菜单中设置 AI 模型")
 
-    backends = [
-        ("openai", _call_ai_via_openai),
-        ("httpx", _call_ai_via_httpx),
-    ]
+    backends = []
+    if _openai_available():
+        backends.append(("openai", _call_ai_via_openai))
+    backends.append(("httpx", _call_ai_via_httpx))
 
     last_error = None
     max_attempts = 3
@@ -419,6 +430,13 @@ async def call_ai_with_tools(
     if not _model:
         raise RuntimeError("未配置 model_brain，请在配置菜单中设置 AI 模型")
 
+    if not _openai_available():
+        return await _call_ai_with_tools_via_httpx(
+            messages=messages, tools=tools, model=_model, temperature=temperature,
+            max_tokens=max_tokens, timeout=timeout, verbose=verbose,
+            max_tool_rounds=max_tool_rounds, tool_handler=tool_handler,
+        )
+
     # 直接用 openai 库执行 Function Calling 循环（httpx 通道不支持 tool_calls 复杂结构）
     from openai import OpenAI
     import httpx as _httpx
@@ -510,6 +528,85 @@ async def call_ai_with_tools(
     except Exception as e:
         if verbose:
             print(f"{Fore.YELLOW}[AI-tools] 最终回答生成失败: {e}{Style.RESET_ALL}")
+        return ""
+
+
+async def _call_ai_with_tools_via_httpx(
+    messages: list[dict],
+    tools: list[dict],
+    *, model: str, temperature: float, max_tokens: int, timeout: float,
+    verbose: bool, max_tool_rounds: int, tool_handler: Any,
+) -> str:
+    """openai 库不可用时的 httpx 直连工具循环。"""
+    allowed_tool_names = {str(tool.get("function", {}).get("name", "")) for tool in tools}
+
+    async def execute_tool(tool_name: str, tool_args: dict) -> str:
+        try:
+            tool_result = tool_handler(tool_name, tool_args)
+            if inspect.isawaitable(tool_result):
+                tool_result = await tool_result
+            if not isinstance(tool_result, str):
+                return json.dumps(tool_result, ensure_ascii=False)
+            return tool_result
+        except Exception as exc:
+            return f"工具执行错误: {exc}"
+
+    for _round in range(max_tool_rounds):
+        try:
+            resp = await call_ai_raw(
+                messages=messages, model=model, temperature=temperature,
+                max_tokens=max_tokens, timeout=timeout, verbose=False,
+                tools=tools, tool_choice="auto",
+            )
+        except Exception as exc:
+            if verbose:
+                print(f"{Fore.YELLOW}[AI-tools][httpx] 第{_round + 1}轮调用失败: {exc}{Style.RESET_ALL}")
+            break
+        msg = resp.choices[0].message
+        tool_calls = getattr(msg, "tool_calls", None) or []
+        if not tool_calls:
+            text_call = _extract_text_tool_call(msg.content or "", allowed_tool_names)
+            if not text_call:
+                return msg.content or ""
+            tool_name, tool_args = text_call
+            tool_result = await execute_tool(tool_name, tool_args)
+            messages.append({"role": "assistant", "content": msg.content or ""})
+            messages.append({"role": "user", "content": f"工具 {tool_name} 已执行，结果如下：\n{tool_result}\n\n请继续完成任务；完成时调用 finalize 工具。"})
+            continue
+
+        normalized = []
+        for index, tc in enumerate(tool_calls):
+            if isinstance(tc, dict):
+                fn = tc.get("function") or {}
+                tool_name = str(fn.get("name") or "")
+                raw_args = str(fn.get("arguments") or "{}")
+                call_id = str(tc.get("id") or f"call_{_round}_{index}")
+            else:
+                tool_name = tc.function.name
+                raw_args = tc.function.arguments
+                call_id = tc.id
+            normalized.append({"id": call_id, "type": "function", "function": {"name": tool_name, "arguments": raw_args}})
+        messages.append({"role": "assistant", "content": msg.content or "", "tool_calls": normalized})
+        for tc in normalized:
+            tool_name = tc["function"]["name"]
+            try:
+                tool_args = json.loads(tc["function"]["arguments"])
+            except (json.JSONDecodeError, TypeError):
+                tool_args = {}
+            tool_result = await execute_tool(tool_name, tool_args)
+            messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_result})
+            if verbose:
+                print(f"{Fore.CYAN}[AI-tools][httpx] 调用 {tool_name}({json.dumps(tool_args, ensure_ascii=False)[:120]}) → {tool_result[:80]}...{Style.RESET_ALL}")
+
+    try:
+        resp = await call_ai_raw(
+            messages=messages, model=model, temperature=temperature,
+            max_tokens=max_tokens, timeout=timeout, verbose=False,
+        )
+        return resp.choices[0].message.content or ""
+    except Exception as exc:
+        if verbose:
+            print(f"{Fore.YELLOW}[AI-tools][httpx] 最终回答生成失败: {exc}{Style.RESET_ALL}")
         return ""
 
 

@@ -365,7 +365,7 @@ async def _poll_qr_login_event(qr):
     return await Api(credential=Credential(), **event_api).update_params(qrcode_key=qr_key).result
 
 def log_line(msg: str):
-    ts = datetime.now().strftime("%H:%M:%S")
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     line = f"[{ts}] {redact_sensitive_text(msg)}"
     with bot_output_lock:
         bot_output_lines.append(line)
@@ -398,13 +398,13 @@ def _append_runtime_log(path: Path, line: str) -> None:
         pass
 
 
-_LOG_CLOCK_RE = re.compile(r"(\d{2}:\d{2}:\d{2})")
+_LOG_CLOCK_RE = re.compile(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}|\d{2}:\d{2}:\d{2})")
 
 
 def _normalize_platform_result_line(line: str) -> str:
     """Turn raw Bilibili result dictionaries into a useful, safe log record."""
     text = str(line or "").strip()
-    prefix_match = re.match(r"^(\[[0-9:]+\]\s*)", text)
+    prefix_match = re.match(r"^(\[[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9:]+\]\s*|\[[0-9:]+\]\s*)", text)
     prefix = prefix_match.group(1) if prefix_match else ""
     candidate = text[len(prefix):]
     if not (candidate.startswith("{") and candidate.endswith("}")):
@@ -432,13 +432,19 @@ def _timestamp_runtime_line(line: str) -> str:
         return ""
     if _LOG_CLOCK_RE.search(text):
         return text
-    return f"[{datetime.now().strftime('%H:%M:%S')}] {text}"
+    return f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {text}"
 
 
 def _runtime_log_sort_key(line: str, index: int) -> tuple[str, int]:
     """Keep the complete log chronological across bot, monitor and review sources."""
-    match = _LOG_CLOCK_RE.search(str(line or ""))
-    return (match.group(1) if match else "99:99:99", index)
+    text = str(line or "")
+    full = re.search(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", text)
+    if full:
+        return (full.group(1), index)
+    time_only = re.search(r"(\d{2}:\d{2}:\d{2})", text)
+    if time_only:
+        return (f"{datetime.now().date().isoformat()} {time_only.group(1)}", index)
+    return ("9999-12-31 99:99:99", index)
 
 
 def _read_runtime_log(path: Path, memory_lines, limit: int = 1200) -> list[str]:
@@ -505,6 +511,18 @@ def _safe_watch_bvid(value) -> str:
     text = str(value or "").strip()
     match = re.search(r"\bBV([0-9A-Za-z]{10})\b", text, flags=re.IGNORECASE)
     return f"BV{match.group(1)}" if match else ""
+
+
+def _normalize_cover_url(value) -> str:
+    """B站封面统一转 https，避免 http 封面在 https 面板被浏览器拦截（部分分区封面不显示）。"""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text.startswith("//"):
+        return "https:" + text
+    if text.lower().startswith("http://") and re.search(r"hdslb\.com", text, re.I):
+        return "https://" + text[len("http://"):]
+    return text
 
 
 def _watch_history_duration(value) -> int:
@@ -730,7 +748,7 @@ def _fetch_watch_history_metadata(bvid: str) -> dict:
     owner = data.get("owner") if isinstance(data.get("owner"), dict) else {}
     stat = data.get("stat") if isinstance(data.get("stat"), dict) else {}
     return {
-        "pic": str(data.get("pic") or "").strip(),
+        "pic": _normalize_cover_url(data.get("pic") or ""),
         "duration": _watch_history_duration(data.get("duration")),
         "category": str(data.get("tname") or "").strip(),
         "description": str(data.get("desc") or "").strip()[:500],
@@ -781,6 +799,44 @@ def _cache_watch_history_metadata(bvids: list[str], maximum: int = 8) -> tuple[i
     if fetched:
         write_json(_watch_history_metadata_path(), cache)
     return fetched, failed
+
+
+_observation_cover_backfill_queued: set = set()
+_observation_cover_backfill_lock = threading.Lock()
+_observation_cover_backfill_last_try: dict = {}
+_OBSERVATION_COVER_BACKFILL_COOLDOWN = 60.0
+
+
+def _run_observation_cover_backfill(bvids: list[str]) -> None:
+    with _observation_cover_backfill_lock:
+        now = time.time()
+        for value in bvids:
+            _observation_cover_backfill_last_try[value] = now
+    try:
+        _cache_watch_history_metadata(bvids, maximum=len(bvids))
+    except Exception:
+        pass
+    finally:
+        with _observation_cover_backfill_lock:
+            _observation_cover_backfill_queued.difference_update(bvids)
+
+
+def _ensure_observation_cover_backfill(bvid: str, recent_bvids: list[str]) -> None:
+    """学习实况缺封面的视频后台补全元数据，让封面与历史卡片同步出现。"""
+    candidates = ([bvid] if bvid else []) + [value for value in recent_bvids or [] if value and value != bvid]
+    wanted = []
+    with _observation_cover_backfill_lock:
+        for value in candidates:
+            safe = _safe_watch_bvid(value)
+            last_try = _observation_cover_backfill_last_try.get(safe, 0.0)
+            if safe and safe not in _observation_cover_backfill_queued and (time.time() - last_try) >= _OBSERVATION_COVER_BACKFILL_COOLDOWN and len(wanted) < 5:
+                wanted.append(safe)
+                _observation_cover_backfill_queued.add(safe)
+    if not wanted:
+        return
+    threading.Thread(
+        target=_run_observation_cover_backfill, args=(wanted,), name="observe-cover-backfill", daemon=True,
+    ).start()
 
 
 def _watch_history_is_archived(bvid: str) -> bool:
@@ -845,6 +901,7 @@ def _watch_history_cards() -> list[dict]:
             if not item.get(field) and detail.get(field):
                 item[field] = str(detail[field])
         item["duration"] = item["duration"] or _watch_history_duration(detail.get("duration"))
+        item["pic"] = _normalize_cover_url(item.get("pic"))
         actions = [action_labels[action] for action in ("view", "like", "fav", "coin") if action in item["actions"]]
         result = item["result"] or "已互动"
         archived = bvid in archive_index
@@ -5071,7 +5128,7 @@ def _video_observation_payload() -> dict:
         observation["bvid"] = bvid
     observation["title"] = str(observation.get("title") or card.get("title") or bvid or "")
     observation["up"] = str(observation.get("up") or card.get("up") or "")
-    observation["cover"] = str(observation.get("cover") or card.get("cover") or detail.get("pic") or "")
+    observation["cover"] = _normalize_cover_url(observation.get("cover") or card.get("cover") or detail.get("pic") or "")
     raw_duration = observation.get("duration") or detail.get("duration") or 0
     observation["duration"] = _watch_history_duration_label(raw_duration)
     observation["category"] = str(observation.get("category") or card.get("category") or detail.get("category") or "")
@@ -5082,6 +5139,9 @@ def _video_observation_payload() -> dict:
     observation["score"] = observation.get("score", card.get("score", 0))
     recent_cards = _watch_history_cards()
     observation["recent"] = [item for item in recent_cards if item.get("bvid") != bvid][:8]
+    _ensure_observation_cover_backfill(
+        bvid, [item.get("bvid") for item in recent_cards if not item.get("cover")]
+    )
     observation["running"] = _refresh_bot_state()
     logs = _read_runtime_log(BOT_RUNTIME_LOG_FILE, bot_output_lines, limit=140)
     observation["logs"] = logs[-32:]
@@ -5291,7 +5351,7 @@ def _favorite_payload() -> dict:
                 "bvid": bvid,
                 "title": str(detail.get("title") or item.get("title") or bvid),
                 "up": str(detail.get("up") or item.get("up") or "未知 UP"),
-                "cover": str(detail.get("pic") or item.get("cover") or ""),
+                "cover": _normalize_cover_url(detail.get("pic") or item.get("cover") or ""),
                 "duration": _watch_history_duration_label(detail.get("duration") or item.get("duration")),
                 "category": str(detail.get("category") or item.get("category") or ""),
                 "view_count": detail.get("view_count"),
@@ -5311,6 +5371,8 @@ def _favorite_payload() -> dict:
                                            ("coin_count", "coin_count"), ("favorite_count", "favorite_count")):
                 if detail.get(source_key) not in (None, ""):
                     card[target_key] = detail[source_key] if target_key != "duration" else _watch_history_duration_label(detail[source_key])
+            if detail.get("pic") not in (None, ""):
+                card["cover"] = _normalize_cover_url(detail["pic"])
             if detail.get("title"):
                 card["title"] = str(detail["title"])
             if detail.get("up"):
@@ -6995,6 +7057,23 @@ def api_action_export_pdf():
         from services.document_export import export_pdf_text
         fn = Path(export_pdf_text(_html_to_plain_text(html), title, out_dir=DATA_DIR / 'DocumentExports'))
         return send_file(str(fn), as_attachment=True, download_name=fn.name)
+    except RuntimeError as e:
+        return jsonify(dict(ok=False, message=str(e))), 500
+    except Exception as e:
+        return jsonify(dict(ok=False, message=str(e))), 400
+
+
+@app.route('/api/action/export-txt', methods=['POST'])
+def api_action_export_txt():
+    """把生成的网页 HTML 导出为 TXT（提取正文）。"""
+    try:
+        body = request.get_json(force=True)
+        html = body.get('html', '')
+        title = (body.get('title') or '视频学习页').strip() or '视频学习页'
+        from flask import send_file
+        from services.document_export import export_txt_text
+        fn = Path(export_txt_text(_html_to_plain_text(html), title, out_dir=DATA_DIR / 'DocumentExports'))
+        return send_file(str(fn), as_attachment=True, download_name=fn.name, mimetype='text/plain')
     except RuntimeError as e:
         return jsonify(dict(ok=False, message=str(e))), 500
     except Exception as e:

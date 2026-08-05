@@ -2,6 +2,7 @@
 from colorama import Fore, Style
 import re
 import sys
+import os
 
 _SENSITIVE = re.compile(r"(?i)(SESSDATA|bili_jct|DedeUserID|access_token|refresh_token|api[_ -]?key|authorization|password)(\s*:\s*Bearer\s+|\s*[=:]\s*[\"']?|\s+Bearer\s+)([^,\s\"'};]+)")
 
@@ -15,6 +16,23 @@ def mask_secret(value):
     if len(value) <= 12:
         return "*" * len(value)
     return f"{value[:6]}...{value[-4:]}"
+
+
+def _append_console_log(text: str) -> None:
+    """把控制台日志同时写入 DATA_DIR/bot_console.log，方便 Termux/后台排错。"""
+    try:
+        from core.user_data import DATA_DIR
+        path = os.path.join(DATA_DIR, "bot_console.log")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        if os.path.exists(path) and os.path.getsize(path) > 5 * 1024 * 1024:
+            with open(path, "r", encoding="utf-8", errors="replace") as source:
+                tail = source.read()[-1024 * 1024:]
+            with open(path, "w", encoding="utf-8") as target:
+                target.write(tail)
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(text + "\n")
+    except Exception:
+        pass
 
 
 def log(msg, level="INFO"):
@@ -45,6 +63,7 @@ def log(msg, level="INFO"):
 
     # [FIX] Windows GBK终端无法打印emoji，用ASCII标签替代
     text = f"{icon} [{level:<7}] {redact_sensitive_text(msg)}"
+    _append_console_log(text)
     try:
         print(f"{color}{text}{Style.RESET_ALL}")
     except UnicodeEncodeError:

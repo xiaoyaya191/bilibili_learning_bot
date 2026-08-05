@@ -10,7 +10,8 @@
 #    然后再执行 pip install -r requirements.txt
 
 bilibili-api-python==17.4.1
-openai==2.33.0
+# openai 包可选：未安装或版本过旧时，项目自动使用 httpx 直连 OpenAI 兼容端点
+# openai==2.33.0
 pydantic>=2.0.0
 httpx==0.28.1
 colorama==0.4.6

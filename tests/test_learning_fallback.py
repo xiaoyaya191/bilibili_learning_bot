@@ -40,6 +40,8 @@ def test_services_ai_gateway_failure_does_not_retry_other_backend(monkeypatch, e
 
     monkeypatch.setattr(services_ai, "_call_ai_via_openai", broken_backend)
     monkeypatch.setattr(services_ai, "_call_ai_via_httpx", forbidden_backend)
+    # openai 现在是可选依赖：显式启用它，确保降级顺序测试不依赖本机是否安装新版 openai。
+    monkeypatch.setattr(services_ai, "_openai_available", lambda: True)
 
     with pytest.raises(RuntimeError, match=error_text):
         asyncio.run(services_ai.call_ai_raw(messages=[{"role": "user", "content": "x"}]))
