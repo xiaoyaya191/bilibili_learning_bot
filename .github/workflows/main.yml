@@ -28,16 +28,17 @@ jobs:
           pip install --upgrade pip
           pip install buildozer cython
 
-      # 自动接受所有 Android SDK License 协议
-      - name: Accept Android SDK Licenses
+      # 提前为 Buildozer 预先预置同意所有 Android SDK Licenses 许可文件
+      - name: Pre-accept Android SDK Licenses
         run: |
-          mkdir -p ~/.android
-          touch ~/.android/repositories.cfg
-          yes | sdkmanager --licenses || true
+          mkdir -p ~/.buildozer/android/platform/android-sdk/licenses
+          echo -e "\n893337d74555b037048113700868669ee755c3d4\nd56f5187479451eabf01fb78af6dfcb131a6481e\n24333f8a63718c3e1a6c05d44474867a7dc6968d" > ~/.buildozer/android/platform/android-sdk/licenses/android-sdk-license
+          echo -e "\n84831b9409646a918e30573bab4c9c91346d8abd" > ~/.buildozer/android/platform/android-sdk/licenses/android-sdk-preview-license
 
+      # 使用 --accept-sdk-license 选项直接运行 Buildozer
       - name: Build with Buildozer
         run: |
-          buildozer -v android debug
+          buildozer --accept-sdk-license -v android debug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
