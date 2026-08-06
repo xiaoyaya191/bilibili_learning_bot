@@ -1,23 +1,47 @@
 [app]
+# (str) Title of your application
 title = BilibiliBot
-package.name = bilibilibot
-package.domain = org.bilibilibot
-source.dir = .
-source.include_exts = py,png,jpg,kv,atlas,json,txt
 
+# (str) Package name
+package.name = bililibot
+
+# (str) Package domain (needed for android/ios packaging)
+package.domain = org.bilibilibot
+
+# (str) Source code where the main.py live
+source.dir = .
+
+# (list) Source files to include (process empty to include all files)
+source.include_exts = py,png,jpg,kv,atlas,html,css,js,json,sh,txt,md
+
+# (str) Application versioning (method 1)
 version = 3.1.2
 
-requirements = python3,kivy,bilibili-api-python,pydantic,httpx,colorama,qrcode,Pillow,pystray,Flask,flask-cors,requests,imageio-ffmpeg,yt-dlp,python-docx,reportlab,funasr,torch,torchaudio,sentence-transformers,numpy
+# (list) Application requirements
+# 注意：只填纯 Python 基础库，复杂的第三方依赖让系统自带的 Python 环境自动处理
+requirements = python3,kivy,pyjnius,requests,urllib3,jinja2,colorama
 
+# (str) Supported orientation (one of landscape, sensorLandscape, portrait or all)
 orientation = portrait
+
+# (bool) Indicate if the application should be fullscreen or not
 fullscreen = 0
-android.permissions = INTERNET,ACCESS_NETWORK_STATE
+
+# (list) Permissions
+android.permissions = INTERNET,WRITE_EXTERNAL_STORAGE,READ_EXTERNAL_STORAGE
+
+# (int) Target Android API, should be as high as possible.
 android.api = 33
-android.ndk = 25b
-android.sdk = 24
-package.type = debug
-log_level = 2
+
+# (int) Minimum API your APK will support.
+android.minapi = 21
+
+# (str) Android architecture to build for
+android.archs = arm64-v8a
 
 [buildozer]
+# (int) Log level (0 = error only, 1 = info, 2 = debug (with command output))
 log_level = 2
+
+# (int) Display warning if buildozer is run as root (0 = false, 1 = true)
 warn_on_root = 1
