@@ -23,9 +23,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y git zip unzip openjdk-17-jdk ffmpeg libsdl2-dev \
             libsdl2-image-dev libsdl2-mixer-dev libsdl2-ttf-dev libportmidi-dev \
-            libswscale-dev libavformat-dev libavcodec-dev zlib1g-dev libsqlite3-dev
+            libswscale-dev libavformat-dev libavcodec-dev zlib1g-dev libsqlite3-dev \
+            libncurses5 libstdc++6 aidl
           pip install --upgrade pip
           pip install buildozer cython
+
+      # 自动接受所有 Android SDK License 协议
+      - name: Accept Android SDK Licenses
+        run: |
+          mkdir -p ~/.android
+          touch ~/.android/repositories.cfg
+          yes | sdkmanager --licenses || true
 
       - name: Build with Buildozer
         run: |
