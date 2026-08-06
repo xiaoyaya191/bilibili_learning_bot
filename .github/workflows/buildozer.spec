@@ -19,8 +19,7 @@ version = 3.1.2
 
 # (list) Application requirements
 # 注意：只填纯 Python 基础库，复杂的第三方依赖让系统自带的 Python 环境自动处理
-requirements = python3,kivy,pyjnius,requests,urllib3,jinja2,colorama
-
+requirements = python3,kivy,pyjnius,openssl,ffmpeg,pillow,requests,urllib3,jinja2,colorama,flask,flask-cors,httpx,pydantic,qrcode,imageio-ffmpeg,yt-dlp,python-docx,reportlab,bilibili-api-python
 # (str) Supported orientation (one of landscape, sensorLandscape, portrait or all)
 orientation = portrait
 
@@ -28,8 +27,7 @@ orientation = portrait
 fullscreen = 0
 
 # (list) Permissions
-android.permissions = INTERNET,WRITE_EXTERNAL_STORAGE,READ_EXTERNAL_STORAGE
-
+android.permissions = INTERNET,READ_EXTERNAL_STORAGE
 # (int) Target Android API, should be as high as possible.
 android.api = 33
 
