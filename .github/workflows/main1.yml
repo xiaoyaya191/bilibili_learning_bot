@@ -38,43 +38,35 @@ jobs:
           python -m pip install --upgrade pip
           pip install buildozer cython
       
-      - name: Download and setup Android SDK
+      - name: Setup Android SDK
         run: |
-          # 创建 Android SDK 目录
-          mkdir -p ~/.buildozer/android/platform/android-sdk
-          cd ~/.buildozer/android/platform/android-sdk
+          # 创建正确的目录结构
+          export ANDROID_HOME=$HOME/.buildozer/android/platform/android-sdk
+          mkdir -p $ANDROID_HOME
+          cd $ANDROID_HOME
           
           # 下载 command-line tools
           wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
           unzip -q commandlinetools-linux-11076708_latest.zip
+          
+          # 关键：移动到正确的目录
+          mkdir -p cmdline-tools
+          mv cmdline-tools cmdline-tools/latest || mv cmdline-tools/* cmdline-tools/latest/
+          # 更简单的做法：直接放在 tools 目录
           mv cmdline-tools tools
           
           # 设置环境变量
-          export ANDROID_HOME=~/.buildozer/android/platform/android-sdk
           export PATH=$PATH:$ANDROID_HOME/tools/bin
           
-          # 接受所有许可证（自动）
-          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          # 接受许可证
+          yes | sdkmanager --licenses || true
           
-          # 安装 Build-Tools 37
-          yes | sdkmanager "build-tools;37.0.0" > /dev/null 2>&1 || true
-          
-          # 安装其他必要的组件
-          yes | sdkmanager "platforms;android-33" > /dev/null 2>&1 || true
-          yes | sdkmanager "platform-tools" > /dev/null 2>&1 || true
+          # 安装 Build Tools
+          yes | sdkmanager "build-tools;37.0.0" || true
+          yes | sdkmanager "platforms;android-33" || true
+          yes | sdkmanager "platform-tools" || true
           
           echo "Android SDK setup completed"
-      
-      - name: Accept all Android licenses (backup method)
-        run: |
-          mkdir -p ~/.android
-          touch ~/.android/repositories.cfg
-          
-          export ANDROID_HOME=~/.buildozer/android/platform/android-sdk
-          export PATH=$PATH:$ANDROID_HOME/tools/bin
-          
-          # 再次确认许可证已接受
-          yes | sdkmanager --licenses
       
       - name: Set environment variables
         run: |
@@ -83,35 +75,27 @@ jobs:
       
       - name: Build APK
         run: |
-          export ANDROID_HOME=~/.buildozer/android/platform/android-sdk
+          export ANDROID_HOME=$HOME/.buildozer/android/platform/android-sdk
           export PATH=$PATH:$ANDROID_HOME/tools/bin
           
-          # 如果 buildozer.spec 不存在，创建它
           if [ ! -f buildozer.spec ]; then
-            echo "Creating buildozer.spec"
             buildozer init
           fi
           
-          # 构建 APK
           buildozer android debug deploy
       
       - name: Find and rename APK
         run: |
-          # 查找 APK
-          APK_PATH=$(find . -name "*.apk" -o -path "*bin/*.apk" | grep -v "debug" | head -1)
+          APK_PATH=$(find . -name "*.apk" | head -1)
           if [ -z "$APK_PATH" ]; then
-            # 在 buildozer 的默认输出目录查找
-            APK_PATH=$(find ~/.buildozer -name "*.apk" | head -1)
+            APK_PATH=$(find ~/.buildozer -name "*.apk" 2>/dev/null | head -1)
           fi
           
           if [ -n "$APK_PATH" ]; then
             cp "$APK_PATH" "LittleGooseOffice_${{ github.ref_name }}.apk"
-            echo "APK found and renamed: LittleGooseOffice_${{ github.ref_name }}.apk"
-            ls -la *.apk
+            echo "APK found and renamed"
           else
-            echo "No APK found. Checking directories..."
-            find . -name "*.apk"
-            find ~/.buildozer -name "*.apk" 2>/dev/null || true
+            echo "No APK found"
             exit 1
           fi
       
