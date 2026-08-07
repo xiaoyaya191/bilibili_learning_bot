@@ -10,19 +10,38 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
-      - name: Build APK with Buildozer Action
-        uses: yaminichauhan/buildozer-action@v1
-        with:
-          command: echo 'yes' | buildozer android debug deploy
+      - name: Build APK with Docker
+        run: |
+          docker run --rm \
+            -v $PWD:/app \
+            -v ~/.buildozer:/home/user/.buildozer \
+            -e FORCE_BUILD=1 \
+            -e BUILDOZER_NO_ROOT=0 \
+            --user root \
+            kivy/buildozer:latest \
+            bash -c "
+              cd /app
+              # 创建一个空的 buildozer.spec（如果不存在）
+              if [ ! -f buildozer.spec ]; then
+                buildozer init
+              fi
+              # 自动回答所有提示
+              echo 'yes' | buildozer android debug deploy
+            "
       
       - name: Find and rename APK
         run: |
           APK_PATH=$(find . -name "*.apk" | head -1)
+          if [ -z "$APK_PATH" ]; then
+            APK_PATH=$(find ~/.buildozer -name "*.apk" 2>/dev/null | head -1)
+          fi
+          
           if [ -n "$APK_PATH" ]; then
             cp "$APK_PATH" "LittleGooseOffice_${{ github.ref_name }}.apk"
-            echo "APK found and renamed"
+            echo "APK found and renamed: LittleGooseOffice_${{ github.ref_name }}.apk"
+            ls -la *.apk
           else
-            echo "APK not found"
+            echo "No APK found"
             exit 1
           fi
       
