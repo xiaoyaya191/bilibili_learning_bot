@@ -36,14 +36,15 @@ jobs:
             zlib1g-dev \
             libncurses5-dev \
             libncursesw5-dev \
-            libtinfo5 \
             cmake \
             libffi-dev \
-            libssl-dev
+            libssl-dev \
+            libltdl-dev \
+            ccache
+          # 移除 libtinfo5（在 Ubuntu 24.04 中不可用）
       
       - name: Build APK with Buildozer
         run: |
-          # 如果有 buildozer.spec 文件
           if [ -f buildozer.spec ]; then
             buildozer android debug deploy
           else
@@ -53,7 +54,6 @@ jobs:
       
       - name: Find and rename APK
         run: |
-          # 查找生成的 APK
           find . -name "*.apk" -exec cp {} ./LittleGooseOffice_${{ github.ref_name }}.apk \; || true
           if [ ! -f LittleGooseOffice_${{ github.ref_name }}.apk ]; then
             echo "APK not found. Check buildozer output."
