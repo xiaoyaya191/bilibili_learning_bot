@@ -10,41 +10,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
-      - name: Build APK with Docker
-        run: |
-          # 使用 Kivy 官方 Docker 镜像
-          docker run --rm \
-            -v $PWD:/app \
-            -v ~/.buildozer:/home/user/.buildozer \
-            kivy/buildozer:latest \
-            bash -c "
-              cd /app
-              # 如果 buildozer.spec 不存在则创建
-              if [ ! -f buildozer.spec ]; then
-                buildozer init
-              fi
-              # 自动接受所有许可证
-              yes | buildozer android debug deploy
-            "
+      - name: Build APK with Buildozer Action
+        uses: yaminichauhan/buildozer-action@v1
+        with:
+          command: echo 'yes' | buildozer android debug deploy
       
       - name: Find and rename APK
         run: |
-          # 查找 APK
           APK_PATH=$(find . -name "*.apk" | head -1)
-          if [ -z "$APK_PATH" ]; then
-            APK_PATH=$(find ~/.buildozer -name "*.apk" 2>/dev/null | head -1)
-          fi
-          
           if [ -n "$APK_PATH" ]; then
             cp "$APK_PATH" "LittleGooseOffice_${{ github.ref_name }}.apk"
-            echo "APK found and renamed: LittleGooseOffice_${{ github.ref_name }}.apk"
+            echo "APK found and renamed"
           else
             echo "APK not found"
-            # 检查容器内的输出
-            docker run --rm \
-              -v $PWD:/app \
-              kivy/buildozer:latest \
-              bash -c "find /app -name '*.apk' || find /home/user/.buildozer -name '*.apk'"
             exit 1
           fi
       
