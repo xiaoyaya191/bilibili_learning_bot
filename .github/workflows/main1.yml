@@ -1,6 +1,8 @@
 name: Release
 on:
   push:
+    tags:
+      - "v*"
 
 jobs:
   build:
@@ -40,7 +42,6 @@ jobs:
       
       - name: Setup Android SDK
         run: |
-          # 创建正确的目录结构
           export ANDROID_HOME=$HOME/.buildozer/android/platform/android-sdk
           mkdir -p $ANDROID_HOME
           cd $ANDROID_HOME
@@ -49,34 +50,28 @@ jobs:
           wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
           unzip -q commandlinetools-linux-11076708_latest.zip
           
-          # 关键：移动到正确的目录
-          mkdir -p cmdline-tools
-          mv cmdline-tools cmdline-tools/latest || mv cmdline-tools/* cmdline-tools/latest/
-          # 更简单的做法：直接放在 tools 目录
-          mv cmdline-tools tools
-          
-          # 设置环境变量
-          export PATH=$PATH:$ANDROID_HOME/tools/bin
+          # 直接使用 cmdline-tools 目录，不移动
+          export PATH=$PATH:$ANDROID_HOME/cmdline-tools/bin
           
           # 接受许可证
-          yes | sdkmanager --licenses || true
+          yes | sdkmanager --licenses --sdk_root=$ANDROID_HOME || true
           
           # 安装 Build Tools
-          yes | sdkmanager "build-tools;37.0.0" || true
-          yes | sdkmanager "platforms;android-33" || true
-          yes | sdkmanager "platform-tools" || true
+          yes | sdkmanager "build-tools;37.0.0" --sdk_root=$ANDROID_HOME || true
+          yes | sdkmanager "platforms;android-33" --sdk_root=$ANDROID_HOME || true
+          yes | sdkmanager "platform-tools" --sdk_root=$ANDROID_HOME || true
           
           echo "Android SDK setup completed"
       
       - name: Set environment variables
         run: |
           echo "ANDROID_HOME=$HOME/.buildozer/android/platform/android-sdk" >> $GITHUB_ENV
-          echo "PATH=$PATH:$HOME/.buildozer/android/platform/android-sdk/tools/bin" >> $GITHUB_ENV
+          echo "PATH=$PATH:$HOME/.buildozer/android/platform/android-sdk/cmdline-tools/bin" >> $GITHUB_ENV
       
       - name: Build APK
         run: |
           export ANDROID_HOME=$HOME/.buildozer/android/platform/android-sdk
-          export PATH=$PATH:$ANDROID_HOME/tools/bin
+          export PATH=$PATH:$ANDROID_HOME/cmdline-tools/bin
           
           if [ ! -f buildozer.spec ]; then
             buildozer init
@@ -94,6 +89,7 @@ jobs:
           if [ -n "$APK_PATH" ]; then
             cp "$APK_PATH" "LittleGooseOffice_${{ github.ref_name }}.apk"
             echo "APK found and renamed"
+            ls -la *.apk
           else
             echo "No APK found"
             exit 1
