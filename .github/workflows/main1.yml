@@ -1,0 +1,68 @@
+name: Release
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install buildozer cython
+      
+      - name: Install Android SDK dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git zip unzip \
+            openjdk-17-jdk \
+            python3-pip \
+            autoconf \
+            libtool \
+            pkg-config \
+            zlib1g-dev \
+            libncurses5-dev \
+            libncursesw5-dev \
+            libtinfo5 \
+            cmake \
+            libffi-dev \
+            libssl-dev
+      
+      - name: Build APK with Buildozer
+        run: |
+          # 如果有 buildozer.spec 文件
+          if [ -f buildozer.spec ]; then
+            buildozer android debug deploy
+          else
+            echo "No buildozer.spec found. Please create one first."
+            exit 1
+          fi
+      
+      - name: Find and rename APK
+        run: |
+          # 查找生成的 APK
+          find . -name "*.apk" -exec cp {} ./LittleGooseOffice_${{ github.ref_name }}.apk \; || true
+          if [ ! -f LittleGooseOffice_${{ github.ref_name }}.apk ]; then
+            echo "APK not found. Check buildozer output."
+            exit 1
+          fi
+      
+      - name: Create Release
+        uses: ncipollo/release-action@v1
+        with:
+          artifacts: "*.apk"
+          token: ${{ github.token }}
+          generateReleaseNotes: true
