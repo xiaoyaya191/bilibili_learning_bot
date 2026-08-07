@@ -38,7 +38,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install buildozer cython
       
-      - name: Setup Android SDK
+      - name: Setup Android SDK with correct structure
         run: |
           export ANDROID_HOME=$HOME/.buildozer/android/platform/android-sdk
           mkdir -p $ANDROID_HOME
@@ -48,28 +48,36 @@ jobs:
           wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
           unzip -q commandlinetools-linux-11076708_latest.zip
           
-          # 直接使用 cmdline-tools 目录，不移动
-          export PATH=$PATH:$ANDROID_HOME/cmdline-tools/bin
+          # 创建正确的目录结构：将 cmdline-tools 移到 tools 目录
+          mkdir -p tools
+          mv cmdline-tools/* tools/
+          rm -rf cmdline-tools
+          
+          # 确保 sdkmanager 在正确的位置
+          chmod +x tools/bin/sdkmanager
+          
+          export PATH=$PATH:$ANDROID_HOME/tools/bin
           
           # 接受许可证
-          yes | sdkmanager --licenses --sdk_root=$ANDROID_HOME || true
+          yes | sdkmanager --licenses || true
           
-          # 安装 Build Tools
-          yes | sdkmanager "build-tools;37.0.0" --sdk_root=$ANDROID_HOME || true
-          yes | sdkmanager "platforms;android-33" --sdk_root=$ANDROID_HOME || true
-          yes | sdkmanager "platform-tools" --sdk_root=$ANDROID_HOME || true
+          # 安装必要的组件
+          yes | sdkmanager "build-tools;37.0.0" || true
+          yes | sdkmanager "platforms;android-33" || true
+          yes | sdkmanager "platform-tools" || true
           
           echo "Android SDK setup completed"
+          ls -la $ANDROID_HOME/tools/bin/
       
       - name: Set environment variables
         run: |
           echo "ANDROID_HOME=$HOME/.buildozer/android/platform/android-sdk" >> $GITHUB_ENV
-          echo "PATH=$PATH:$HOME/.buildozer/android/platform/android-sdk/cmdline-tools/bin" >> $GITHUB_ENV
+          echo "PATH=$PATH:$HOME/.buildozer/android/platform/android-sdk/tools/bin" >> $GITHUB_ENV
       
       - name: Build APK
         run: |
           export ANDROID_HOME=$HOME/.buildozer/android/platform/android-sdk
-          export PATH=$PATH:$ANDROID_HOME/cmdline-tools/bin
+          export PATH=$PATH:$ANDROID_HOME/tools/bin
           
           if [ ! -f buildozer.spec ]; then
             buildozer init
@@ -90,6 +98,8 @@ jobs:
             ls -la *.apk
           else
             echo "No APK found"
+            find . -name "*.apk" || true
+            find ~/.buildozer -name "*.apk" 2>/dev/null || true
             exit 1
           fi
       
