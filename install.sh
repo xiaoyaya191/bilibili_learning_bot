@@ -114,7 +114,7 @@ while :; do
   printf "> "
   read -r consent
   case "$consent" in
-    我同意|I agree|i agree|IAGREE|согласен|Согласен)
+    我同意|"I agree"|"i agree"|IAGREE|"согласен"|"Согласен")
       ok "已确认，继续安装..."
       break
       ;;
