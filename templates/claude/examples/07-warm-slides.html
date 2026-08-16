@@ -1,0 +1,793 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Claude-Style Presentation</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@100;200;300;400;500;600;700;800&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+<style>
+:root {
+  /* Light mode - Claude 暖橙: white background + warm orange accent */
+  --bg-primary: #FFFFFF;
+  --bg-secondary: #F5F5F5;
+  --bg-card: #FAFAFA;
+  --text-primary: #0D0D0D;
+  --text-secondary: #666666;
+  --text-tertiary: #999999;
+  --accent: #D97757;
+  --accent-hover: #C56545;
+  --accent-bg: rgba(217,119,87,0.08);
+  --border: #E5E5E5;
+  --border-light: #F0F0F0;
+  --shadow: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+  --shadow-lg: 0 20px 60px rgba(0,0,0,0.1), 0 0 0 1px rgba(0,0,0,0.04);
+  --nav-bg: rgba(13,13,13,0.92);
+  --nav-text: #FFFFFF;
+  --divider-color: #E5E5E5;
+}
+
+[data-theme="dark"] {
+  /* Dark mode */
+  --bg-primary: #0D0D0D;
+  --bg-secondary: #1A1A1A;
+  --bg-card: #141414;
+  --text-primary: #F5F5F5;
+  --text-secondary: #999999;
+  --text-tertiary: #666666;
+  --accent: #E8916A;
+  --accent-hover: #F0A585;
+  --accent-bg: rgba(232,145,106,0.1);
+  --border: #2A2A2A;
+  --border-light: #1F1F1F;
+  --shadow: 0 1px 3px rgba(0,0,0,0.2), 0 1px 2px rgba(0,0,0,0.15);
+  --shadow-lg: 0 20px 60px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.04);
+  --nav-bg: rgba(245,245,245,0.08);
+  --nav-text: #CCCCCC;
+  --divider-color: #2A2A2A;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-weight: 400;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  overflow: hidden;
+  height: 100vh;
+  transition: background 0.4s ease, color 0.4s ease;
+}
+
+.slide-container {
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+
+.slide {
+  width: 88vw;
+  max-width: 1200px;
+  height: 88vh;
+  max-height: 780px;
+  background: var(--bg-primary);
+  border-radius: 20px;
+  box-shadow: var(--shadow-lg);
+  padding: 72px 88px;
+  display: flex;
+  flex-direction: column;
+  position: absolute;
+  opacity: 0;
+  transform: translateY(16px);
+  transition: all 0.55s cubic-bezier(0.22, 0.61, 0.36, 1);
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+
+.slide.active {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* Progress bar */
+.progress-bar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  height: 2px;
+  background: var(--accent);
+  z-index: 1000;
+  transition: width 0.55s cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+/* Theme toggle */
+.theme-toggle {
+  position: fixed;
+  top: 20px;
+  right: 24px;
+  z-index: 1001;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+  color: var(--text-primary);
+  padding: 0;
+}
+.theme-toggle svg {
+  width: 18px;
+  height: 18px;
+}
+.theme-toggle:hover {
+  background: var(--border);
+}
+
+/* Nav controls */
+.nav {
+  position: fixed;
+  bottom: 28px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 6px;
+  z-index: 100;
+  background: var(--nav-bg);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-radius: 40px;
+  padding: 5px 6px;
+  border: 1px solid var(--border);
+}
+.nav button {
+  background: none;
+  border: none;
+  color: var(--nav-text);
+  cursor: pointer;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+  opacity: 0.7;
+  padding: 0;
+}
+.nav button svg {
+  width: 16px;
+  height: 16px;
+}
+.nav button:hover { opacity: 1; background: rgba(128,128,128,0.15); }
+.nav .page-indicator {
+  display: flex;
+  align-items: center;
+  color: var(--nav-text);
+  font-size: 13px;
+  padding: 0 14px;
+  letter-spacing: 1.5px;
+  opacity: 0.8;
+  font-variant-numeric: tabular-nums;
+}
+
+.slide-number {
+  position: absolute;
+  top: 36px;
+  right: 48px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  letter-spacing: 1.5px;
+  font-weight: 400;
+  text-transform: uppercase;
+}
+
+/* Typography */
+.slide-title {
+  font-size: 56px;
+  font-weight: 200;
+  line-height: 1.12;
+  margin-bottom: 28px;
+  letter-spacing: -1.5px;
+  color: var(--text-primary);
+}
+.slide-title.light { font-weight: 100; }
+.slide-subtitle {
+  font-size: 20px;
+  font-weight: 300;
+  color: var(--text-secondary);
+  margin-bottom: 40px;
+  line-height: 1.55;
+  max-width: 75%;
+  letter-spacing: -0.2px;
+}
+.accent-text {
+  color: var(--accent);
+}
+
+.divider {
+  width: 40px;
+  height: 2px;
+  background: var(--accent);
+  margin: 28px 0 40px;
+  border-radius: 1px;
+}
+.divider.center { margin: 28px auto 40px; }
+
+/* Content styles */
+.content-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 32px;
+  flex: 1;
+}
+.content-grid.three { grid-template-columns: 1fr 1fr 1fr; }
+
+.card {
+  background: var(--bg-card);
+  border-radius: 14px;
+  padding: 36px;
+  border: 1px solid var(--border);
+  transition: all 0.25s ease;
+}
+.card:hover {
+  border-color: var(--accent);
+  box-shadow: var(--shadow);
+}
+.card-icon {
+  width: 28px;
+  height: 28px;
+  margin-bottom: 18px;
+  display: block;
+  color: var(--accent);
+  stroke-width: 1.5;
+}
+.card-icon svg {
+  width: 28px;
+  height: 28px;
+}
+.card h3 {
+  font-size: 20px;
+  font-weight: 500;
+  margin-bottom: 10px;
+  color: var(--text-primary);
+  letter-spacing: -0.3px;
+}
+.card p {
+  font-size: 14px;
+  line-height: 1.65;
+  color: var(--text-secondary);
+  font-weight: 400;
+}
+
+.feature-list {
+  list-style: none;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  margin-top: 4px;
+}
+.feature-list li {
+  display: flex;
+  align-items: flex-start;
+  gap: 18px;
+  font-size: 16px;
+  line-height: 1.6;
+  color: var(--text-primary);
+  font-weight: 400;
+  padding: 18px 0;
+  border-bottom: 1px solid var(--border-light);
+}
+.feature-list li:last-child { border-bottom: none; }
+.feature-list .num {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--accent);
+  min-width: 28px;
+  height: 28px;
+  background: var(--accent-bg);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.feature-list li strong {
+  font-weight: 500;
+  letter-spacing: -0.2px;
+}
+
+.quote-block {
+  font-size: 26px;
+  font-weight: 300;
+  line-height: 1.5;
+  color: var(--text-primary);
+  font-style: italic;
+  padding-left: 24px;
+  border-left: 2px solid var(--accent);
+  margin-top: 24px;
+  letter-spacing: -0.3px;
+}
+.quote-author {
+  font-size: 14px;
+  color: var(--text-secondary);
+  margin-top: 14px;
+  font-style: normal;
+  font-weight: 400;
+}
+
+.big-stat {
+  font-size: 88px;
+  font-weight: 200;
+  color: var(--accent);
+  line-height: 1;
+  letter-spacing: -3px;
+}
+.stat-label {
+  font-size: 16px;
+  color: var(--text-secondary);
+  margin-top: 10px;
+  font-weight: 400;
+}
+
+.centered {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+
+.logo-mark {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text-tertiary);
+  position: absolute;
+  bottom: 28px;
+  left: 48px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+}
+
+.end-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  text-align: center;
+}
+.end-card .slide-title {
+  font-size: 52px;
+  font-weight: 200;
+  letter-spacing: -1.5px;
+}
+.end-card p {
+  font-size: 17px;
+  color: var(--text-secondary);
+  font-weight: 400;
+  margin-top: 16px;
+}
+
+.tag {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 5px 14px;
+  border-radius: 20px;
+  background: var(--accent-bg);
+  color: var(--accent);
+  margin-bottom: 18px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.comparison-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  margin-top: 8px;
+}
+.comparison-table th {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  text-align: left;
+  padding: 12px 24px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  border-bottom: 1px solid var(--border);
+}
+.comparison-table td {
+  padding: 16px 24px;
+  font-size: 15px;
+  border-bottom: 1px solid var(--border-light);
+  line-height: 1.5;
+  color: var(--text-primary);
+}
+.comparison-table tr:last-child td { border-bottom: none; }
+.comparison-table .highlight {
+  color: var(--accent);
+  font-weight: 500;
+}
+
+/* Number counter animation */
+.counter {
+  display: inline-block;
+  font-variant-numeric: tabular-nums;
+}
+@keyframes countPop {
+  0%   { transform: scale(1); }
+  40%  { transform: scale(1.05); }
+  100% { transform: scale(1); }
+}
+.counter.popping {
+  animation: countPop 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+@media (max-width: 768px) {
+  .slide { padding: 40px 28px; border-radius: 14px; width: 94vw; height: 92vh; }
+  .slide-title { font-size: 36px; letter-spacing: -1px; }
+  .slide-subtitle { font-size: 16px; max-width: 100%; }
+  .content-grid, .content-grid.three { grid-template-columns: 1fr; gap: 16px; }
+  .big-stat { font-size: 56px; }
+  .comparison-table td, .comparison-table th { padding: 10px 14px; font-size: 13px; }
+  .slide-number { top: 24px; right: 28px; }
+  .logo-mark { left: 28px; bottom: 20px; }
+}
+</style>
+</head>
+<body>
+
+<div class="progress-bar" id="progressBar"></div>
+
+<button class="theme-toggle" id="themeToggle" onclick="toggleTheme()" title="切换暗色模式">
+  <i data-lucide="moon" id="themeIcon"></i>
+</button>
+
+<div class="slide-container" id="slideContainer">
+
+  <!-- Slide 1: Title -->
+  <div class="slide active" data-index="0">
+    <div class="slide-number">01 / 07</div>
+    <div style="display:flex; flex-direction:column; justify-content:center; height:100%;">
+      <span class="tag">Introducing</span>
+      <h1 class="slide-title" style="font-size:72px; font-weight:200;">Think fast,<br>build <span class="accent-text">faster</span></h1>
+      <p class="slide-subtitle" style="margin-top:20px;">
+        新一代人工智能助手，为团队提供安全、可靠、高性能的智能协作体验。
+      </p>
+      <div class="divider"></div>
+      <p style="font-size:13px; color:var(--text-tertiary); font-weight:400; letter-spacing:0.5px;">
+        Anthropic · 2026
+      </p>
+    </div>
+    <div class="logo-mark">Claude</div>
+  </div>
+
+  <!-- Slide 2: Core Values -->
+  <div class="slide" data-index="1">
+    <div class="slide-number">02 / 07</div>
+    <div style="display:flex; flex-direction:column; height:100%;">
+      <span class="tag">核心原则</span>
+      <h1 class="slide-title" style="font-size:48px; font-weight:200;">理解、创造、<br><span class="accent-text">协作</span>与信赖</h1>
+      <div class="divider"></div>
+      <ul class="feature-list">
+        <li>
+          <span class="num">1</span>
+          <span><strong>深度理解</strong> — 准确解析复杂文档、代码和自然语言，提供精准上下文感知。</span>
+        </li>
+        <li>
+          <span class="num">2</span>
+          <span><strong>创造输出</strong> — 从写作到编程，产出高质量、可立即使用的内容与解决方案。</span>
+        </li>
+        <li>
+          <span class="num">3</span>
+          <span><strong>无缝协作</strong> — 融入现有工作流，支持团队知识共享与迭代优化。</span>
+        </li>
+        <li>
+          <span class="num">4</span>
+          <span><strong>安全信赖</strong> — 企业级数据保护，Constitutional AI 确保负责任的使用。</span>
+        </li>
+      </ul>
+    </div>
+    <div class="logo-mark">Claude</div>
+  </div>
+
+  <!-- Slide 3: Capabilities Grid -->
+  <div class="slide" data-index="2">
+    <div class="slide-number">03 / 07</div>
+    <span class="tag">能力矩阵</span>
+    <h1 class="slide-title" style="font-size:44px; font-weight:200;">全能型<br><span class="accent-text">AI 工作伙伴</span></h1>
+    <div class="content-grid three" style="margin-top:16px;">
+      <div class="card">
+        <i data-lucide="pen-line" class="card-icon"></i>
+        <h3>写作与编辑</h3>
+        <p>文案撰写、邮件起草、技术文档生成，风格自然流畅，符合品牌调性。</p>
+      </div>
+      <div class="card">
+        <i data-lucide="code-2" class="card-icon"></i>
+        <h3>编程与调试</h3>
+        <p>全栈代码生成、Bug修复、架构设计，支持 200K 超长上下文窗口。</p>
+      </div>
+      <div class="card">
+        <i data-lucide="bar-chart-3" class="card-icon"></i>
+        <h3>数据分析</h3>
+        <p>复杂数据可视化、统计建模、自动化报表，洞察驱动决策。</p>
+      </div>
+      <div class="card">
+        <i data-lucide="globe" class="card-icon"></i>
+        <h3>多语言翻译</h3>
+        <p>专业级多语种互译，保留原文语境与专业术语的准确性。</p>
+      </div>
+      <div class="card">
+        <i data-lucide="scan-search" class="card-icon"></i>
+        <h3>研究与总结</h3>
+        <p>长篇报告摘要、论文分析、市场调研，提炼核心要点与关键洞察。</p>
+      </div>
+      <div class="card">
+        <i data-lucide="message-circle" class="card-icon"></i>
+        <h3>客户服务</h3>
+        <p>智能客服对话、工单分类、情感分析，提升服务效率与满意度。</p>
+      </div>
+    </div>
+    <div class="logo-mark">Claude</div>
+  </div>
+
+  <!-- Slide 4: Comparison -->
+  <div class="slide" data-index="3">
+    <div class="slide-number">04 / 07</div>
+    <span class="tag">对比分析</span>
+    <h1 class="slide-title" style="font-size:46px; font-weight:200;">为什么选择<br><span class="accent-text">Claude？</span></h1>
+    <div class="divider"></div>
+    <table class="comparison-table">
+      <thead>
+        <tr><th>维度</th><th>Claude</th><th>竞争对手</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>上下文窗口</td>
+          <td class="highlight">200K tokens</td>
+          <td>32K - 128K</td>
+        </tr>
+        <tr>
+          <td>安全对齐</td>
+          <td class="highlight">Constitutional AI</td>
+          <td>RLHF 为主</td>
+        </tr>
+        <tr>
+          <td>多模态</td>
+          <td class="highlight">文本 + 图像 + 文档</td>
+          <td>部分支持</td>
+        </tr>
+        <tr>
+          <td>企业部署</td>
+          <td class="highlight">私有化 + API + 控制台</td>
+          <td>公有云为主</td>
+        </tr>
+        <tr>
+          <td>代码能力</td>
+          <td class="highlight">SWE-bench SOTA</td>
+          <td>各有所长</td>
+        </tr>
+        <tr>
+          <td>价格</td>
+          <td class="highlight">按需弹性定价</td>
+          <td>固定套餐制</td>
+        </tr>
+      </tbody>
+    </table>
+    <div class="logo-mark">Claude</div>
+  </div>
+
+  <!-- Slide 5: Quote -->
+  <div class="slide" data-index="4">
+    <div class="slide-number">05 / 07</div>
+    <div style="display:flex; flex-direction:column; justify-content:center; height:100%;">
+      <span class="tag">客户之声</span>
+      <div class="quote-block">
+        "Claude 不仅仅是一个工具，它已经成为我们团队不可或缺的一员。从前需要数小时的文档处理工作，现在只需几分钟即可完成。"
+      </div>
+      <div class="quote-author">— 张明远，某科技公司 CTO</div>
+
+      <div class="quote-block" style="margin-top:36px;">
+        "在代码审查和安全测试领域，Claude 展现出了远超预期的深度理解能力。这是我们用过最令人印象深刻的 AI 助手。"
+      </div>
+      <div class="quote-author">— Sarah Chen，某金融科技公司 VP of Engineering</div>
+    </div>
+    <div class="logo-mark">Claude</div>
+  </div>
+
+  <!-- Slide 6: Stats -->
+  <div class="slide" data-index="5">
+    <div class="slide-number">06 / 07</div>
+    <div style="display:flex; flex-direction:column; justify-content:center; height:100%;">
+      <span class="tag">数据表现</span>
+      <div style="display:grid; grid-template-columns: 1fr 1fr; gap:52px; margin-top:24px;" id="statsGrid">
+        <div>
+          <div class="big-stat"><span class="counter" data-target="4.8" data-decimals="1">0</span><span style="font-size:44px; font-weight:300;">/5</span></div>
+          <div class="stat-label">用户满意度评分</div>
+        </div>
+        <div>
+          <div class="big-stat"><span class="counter" data-target="94" data-decimals="0">0</span><span style="font-size:44px; font-weight:300;">%</span></div>
+          <div class="stat-label">问题一次解决率</div>
+        </div>
+        <div>
+          <div class="big-stat"><span class="counter" data-target="3" data-decimals="0">0</span><span style="font-size:44px; font-weight:300;">分钟</span></div>
+          <div class="stat-label">平均响应时间</div>
+        </div>
+        <div>
+          <div class="big-stat"><span class="counter" data-target="500" data-decimals="0">0</span><span style="font-size:44px; font-weight:300;">+</span></div>
+          <div class="stat-label">全球企业客户</div>
+        </div>
+      </div>
+      <div class="divider" style="margin-top:48px;"></div>
+      <p style="font-size:14px; color:var(--text-secondary); font-weight:400; line-height:1.6;">
+        覆盖金融、医疗、教育、科技等 <span class="accent-text">20+ 行业</span>，服务全球 <span class="accent-text">50+ 国家与地区</span>。
+      </p>
+    </div>
+    <div class="logo-mark">Claude</div>
+  </div>
+
+  <!-- Slide 7: End -->
+  <div class="slide" data-index="6">
+    <div class="slide-number">07 / 07</div>
+    <div class="end-card">
+      <span class="tag">Summary</span>
+      <h1 class="slide-title">更强大的智能<br>从这里开始</h1>
+      <p style="margin-top:24px; max-width:500px;">
+        安全、可靠、高性能的企业级 AI 解决方案。
+      </p>
+      <div class="divider center"></div>
+      <p style="font-size:15px; color:var(--text-secondary); font-weight:400;">
+        anthropic.com &nbsp;·&nbsp; enterprise@anthropic.com
+      </p>
+      <p style="font-size:13px; color:var(--text-tertiary); font-weight:400; margin-top:8px;">
+        体验 Claude 的全新可能
+      </p>
+    </div>
+    <div class="logo-mark">Claude</div>
+  </div>
+
+</div>
+
+<nav class="nav">
+  <button class="prev" onclick="prevSlide()" title="上一页"><i data-lucide="chevron-left"></i></button>
+  <span class="page-indicator"><span id="currentPage">1</span> / <span id="totalPages">7</span></span>
+  <button class="next" onclick="nextSlide()" title="下一页"><i data-lucide="chevron-right"></i></button>
+</nav>
+
+<script>
+let currentSlide = 0;
+const totalSlides = 7;
+let isDark = false;
+
+// Number counter animation for Stats slide
+let statsAnimated = false;
+
+function animateOneCounter(counter, staggerMs, resolve) {
+  const target = parseFloat(counter.dataset.target);
+  const decimals = parseInt(counter.dataset.decimals) || 0;
+  const duration = 2000; // ms
+  const startTime = performance.now();
+
+  // Pop in effect at the very end
+  let popped = false;
+
+  function update(currentTime) {
+    const elapsed = currentTime - startTime;
+    const raw = Math.min(elapsed / duration, 1);
+    // easeOutQuart: smooth deceleration
+    const eased = 1 - Math.pow(1 - raw, 5);
+    const currentValue = target * eased;
+    counter.textContent = currentValue.toFixed(decimals);
+
+    if (raw >= 0.85 && !popped) {
+      popped = true;
+      counter.classList.add('popping');
+    }
+
+    if (raw < 1) {
+      requestAnimationFrame(update);
+    } else {
+      counter.textContent = target.toFixed(decimals);
+      setTimeout(() => {
+        counter.classList.remove('popping');
+        resolve();
+      }, 350);
+    }
+  }
+
+  setTimeout(() => requestAnimationFrame(update), staggerMs);
+}
+
+function animateCounters() {
+  const counters = document.querySelectorAll('.counter');
+  const promises = [];
+  counters.forEach((counter, i) => {
+    promises.push(new Promise(resolve => {
+      animateOneCounter(counter, i * 100, resolve);
+    }));
+  });
+  return Promise.all(promises);
+}
+
+function updateSlide() {
+  document.querySelectorAll('.slide').forEach((s, i) => {
+    s.classList.toggle('active', i === currentSlide);
+  });
+
+  document.getElementById('currentPage').textContent = currentSlide + 1;
+  document.getElementById('progressBar').style.width = ((currentSlide + 1) / totalSlides * 100) + '%';
+
+  // Trigger counter animation when entering stats slide (index 5)
+  if (currentSlide === 5 && !statsAnimated) {
+    statsAnimated = true;
+    animateCounters();
+  }
+}
+
+function nextSlide() {
+  currentSlide = (currentSlide + 1) % totalSlides;
+  updateSlide();
+}
+
+function prevSlide() {
+  currentSlide = (currentSlide - 1 + totalSlides) % totalSlides;
+  updateSlide();
+}
+
+function toggleTheme() {
+  isDark = !isDark;
+  document.documentElement.setAttribute('data-theme', isDark ? 'dark' : '');
+  const icon = document.getElementById('themeIcon');
+  icon.setAttribute('data-lucide', isDark ? 'sun' : 'moon');
+  lucide.createIcons({ icons: { sun: lucide.icons.Sun, moon: lucide.icons.Moon }, attrs: { 'stroke-width': 1.5 } });
+  try { localStorage.setItem('claude-slides-theme', isDark ? 'dark' : 'light'); } catch(e) {}
+}
+
+// Load saved theme
+(function() {
+  try {
+    const saved = localStorage.getItem('claude-slides-theme');
+    if (saved === 'dark') {
+      isDark = true;
+      document.documentElement.setAttribute('data-theme', 'dark');
+      document.getElementById('themeIcon').setAttribute('data-lucide', 'sun');
+    }
+  } catch(e) {}
+  // Init all Lucide icons
+  lucide.createIcons({ attrs: { 'stroke-width': 1.5 } });
+})();
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'ArrowRight' || e.key === 'ArrowDown' || e.key === ' ') {
+    e.preventDefault();
+    nextSlide();
+  } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    prevSlide();
+  } else if (e.key === 'd' || e.key === 'D') {
+    toggleTheme();
+  }
+});
+
+// Touch swipe
+let touchStartX = 0;
+document.addEventListener('touchstart', e => { touchStartX = e.touches[0].clientX; });
+document.addEventListener('touchend', e => {
+  const diff = touchStartX - e.changedTouches[0].clientX;
+  if (Math.abs(diff) > 50) { diff > 0 ? nextSlide() : prevSlide(); }
+});
+</script>
+</body>
+</html>

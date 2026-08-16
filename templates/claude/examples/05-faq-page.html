@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FAQ — Claude Design System</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@100;200;300;400;500;600;700;800&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+<style>
+:root {
+  --bg-primary: #FFFFFF;
+  --bg-secondary: #F5F5F5;
+  --bg-card: #FAFAFA;
+  --text-primary: #0D0D0D;
+  --text-secondary: #666666;
+  --text-tertiary: #999999;
+  --accent: #D97757;
+  --accent-hover: #C56545;
+  --accent-bg: rgba(217,119,87,0.08);
+  --border: #E5E5E5;
+  --border-light: #F0F0F0;
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.06);
+}
+
+[data-theme="dark"] {
+  --bg-primary: #0D0D0D;
+  --bg-secondary: #1A1A1A;
+  --bg-card: #141414;
+  --text-primary: #F5F5F5;
+  --text-secondary: #999999;
+  --text-tertiary: #666666;
+  --accent: #E8916A;
+  --accent-hover: #F0A585;
+  --accent-bg: rgba(232,145,106,0.1);
+  --border: #2A2A2A;
+  --border-light: #1F1F1F;
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.3);
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-weight: 400;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  transition: background 0.4s ease, color 0.4s ease;
+  -webkit-font-smoothing: antialiased;
+}
+
+.container { max-width: 1200px; margin: 0 auto; padding: 0 48px; }
+
+/* ---- Theme Toggle ---- */
+.theme-toggle {
+  position: fixed;
+  top: 20px; right: 24px;
+  z-index: 1001;
+  width: 40px; height: 40px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--text-primary);
+  padding: 0;
+  transition: all 0.2s;
+}
+.theme-toggle svg { width: 18px; height: 18px; }
+.theme-toggle:hover { background: var(--border); }
+
+/* ---- Nav ---- */
+.nav {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  z-index: 999;
+  background: var(--bg-primary);
+  border-bottom: 1px solid var(--border);
+  padding: 14px 0;
+  transition: background 0.4s ease;
+}
+.nav .container {
+  display: flex; align-items: center; justify-content: space-between;
+}
+.nav-logo { font-size: 15px; font-weight: 500; letter-spacing: 1px; }
+.nav-links { display: flex; gap: 32px; list-style: none; }
+.nav-links a {
+  font-size: 14px; font-weight: 400; color: var(--text-secondary);
+  text-decoration: none; transition: color 0.2s;
+}
+.nav-links a:hover { color: var(--text-primary); }
+
+/* ---- Hero ---- */
+.faq-hero { padding: 140px 0 60px; text-align: center; }
+.tag {
+  display: inline-block;
+  font-size: 11px; font-weight: 500; padding: 5px 14px;
+  border-radius: 20px; background: var(--accent-bg);
+  color: var(--accent); letter-spacing: 1px; text-transform: uppercase;
+  margin-bottom: 16px;
+}
+.faq-hero h1 {
+  font-size: 52px; font-weight: 200; letter-spacing: -1.5px; margin-bottom: 16px;
+}
+.faq-hero p {
+  font-size: 18px; font-weight: 300; color: var(--text-secondary);
+  max-width: 500px; margin: 0 auto 36px;
+}
+
+/* ---- Search ---- */
+.search-wrap {
+  max-width: 520px;
+  margin: 0 auto 64px;
+  position: relative;
+}
+.search-input {
+  width: 100%;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 48px 14px 20px;
+  font-size: 15px;
+  font-family: 'Inter', sans-serif;
+  color: var(--text-primary);
+  outline: none;
+  transition: border-color 0.2s;
+}
+.search-input::placeholder { color: var(--text-tertiary); }
+.search-input:focus { border-color: var(--accent); }
+.search-icon {
+  position: absolute;
+  right: 16px; top: 50%; transform: translateY(-50%);
+  color: var(--text-tertiary);
+  pointer-events: none;
+}
+.search-icon svg { width: 18px; height: 18px; }
+
+/* ---- Category Tabs ---- */
+.categories {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 48px;
+  flex-wrap: wrap;
+}
+.cat-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 20px;
+  font-size: 14px;
+  font-weight: 400;
+  font-family: inherit;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.cat-btn:hover { color: var(--text-primary); border-color: var(--text-primary); }
+.cat-btn.active {
+  background: var(--text-primary);
+  color: var(--bg-primary);
+  border-color: var(--text-primary);
+}
+[data-theme="dark"] .cat-btn.active {
+  background: var(--text-primary);
+  color: var(--bg-primary);
+}
+
+/* ---- FAQ List ---- */
+.faq-list { max-width: 740px; margin: 0 auto 80px; }
+
+.faq-item {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  margin-bottom: 12px;
+  overflow: hidden;
+  transition: border-color 0.2s;
+}
+.faq-item:hover { border-color: var(--accent); }
+
+.faq-question {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 22px 28px;
+  background: none;
+  border: none;
+  font-size: 16px;
+  font-weight: 400;
+  font-family: inherit;
+  color: var(--text-primary);
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s;
+}
+.faq-question:hover { background: var(--bg-secondary); }
+.faq-question svg { width: 18px; height: 18px; color: var(--text-tertiary); flex-shrink: 0; transition: transform 0.25s; }
+.faq-item.open .faq-question svg { transform: rotate(45deg); }
+
+.faq-answer {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.35s cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+.faq-item.open .faq-answer { max-height: 500px; }
+.faq-answer-inner {
+  padding: 0 28px 28px;
+  font-size: 15px;
+  font-weight: 400;
+  line-height: 1.7;
+  color: var(--text-secondary);
+}
+.faq-answer-inner a { color: var(--accent); text-decoration: none; }
+.faq-answer-inner a:hover { text-decoration: underline; }
+.faq-answer-inner code {
+  background: var(--bg-secondary);
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 13px;
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+}
+
+/* ---- Footer CTA ---- */
+.faq-cta {
+  text-align: center;
+  padding: 60px 0 80px;
+  border-top: 1px solid var(--border);
+  max-width: 740px;
+  margin: 0 auto;
+}
+.faq-cta h3 {
+  font-size: 24px; font-weight: 300; margin-bottom: 12px; letter-spacing: -0.5px;
+}
+.faq-cta p {
+  font-size: 15px; color: var(--text-secondary); margin-bottom: 24px;
+}
+.btn-primary {
+  background: var(--text-primary);
+  color: var(--bg-primary);
+  border: none;
+  border-radius: 8px;
+  padding: 12px 28px;
+  font-size: 14px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  transition: opacity 0.2s;
+}
+.btn-primary:hover { opacity: 0.85; }
+.btn-primary svg { width: 16px; height: 16px; }
+
+@media (max-width: 768px) {
+  .container { padding: 0 24px; }
+  .faq-hero h1 { font-size: 32px; }
+  .faq-question { font-size: 14px; padding: 18px 20px; }
+  .faq-answer-inner { padding: 0 20px 20px; font-size: 14px; }
+}
+</style>
+</head>
+<body>
+
+<button class="theme-toggle" id="themeToggle" onclick="toggleTheme()" title="切换暗色模式">
+  <i data-lucide="moon" id="themeIcon"></i>
+</button>
+
+<nav class="nav">
+  <div class="container">
+    <div class="nav-logo">NOVA</div>
+    <ul class="nav-links">
+      <li><a href="#">产品</a></li>
+      <li><a href="#">定价</a></li>
+      <li><a href="#">文档</a></li>
+      <li><a href="#">支持</a></li>
+    </ul>
+  </div>
+</nav>
+
+<main>
+  <div class="container">
+    <header class="faq-hero">
+      <span class="tag">Help Center</span>
+      <h1>常见问题</h1>
+      <p>快速找到你需要的答案。如果没有找到，请随时联系我们。</p>
+    </header>
+
+    <div class="search-wrap">
+      <input type="text" class="search-input" placeholder="搜索问题..." oninput="filterFAQ(this.value)">
+      <span class="search-icon"><i data-lucide="search"></i></span>
+    </div>
+
+    <div class="categories">
+      <button class="cat-btn active" onclick="filterCategory('all', this)">全部</button>
+      <button class="cat-btn" onclick="filterCategory('account', this)">账号</button>
+      <button class="cat-btn" onclick="filterCategory('billing', this)">计费</button>
+      <button class="cat-btn" onclick="filterCategory('tech', this)">技术</button>
+      <button class="cat-btn" onclick="filterCategory('security', this)">安全</button>
+    </div>
+
+    <div class="faq-list" id="faqList">
+      <!-- Category: account -->
+      <div class="faq-item" data-category="account">
+        <button class="faq-question" onclick="toggleFAQ(this)">
+          如何创建团队账号？
+          <i data-lucide="plus"></i>
+        </button>
+        <div class="faq-answer">
+          <div class="faq-answer-inner">
+            登录后在左侧导航栏点击「团队」页面，然后选择「创建团队」按钮。输入团队名称和成员邮箱即可完成创建。每个团队初始支持最多 20 名成员。
+          </div>
+        </div>
+      </div>
+      <div class="faq-item" data-category="account">
+        <button class="faq-question" onclick="toggleFAQ(this)">
+          如何修改邮箱地址？
+          <i data-lucide="plus"></i>
+        </button>
+        <div class="faq-answer">
+          <div class="faq-answer-inner">
+            进入「设置 &rarr; 账号安全」，点击邮箱旁边的「修改」按钮。系统会向新邮箱发送验证码，验证通过后即完成修改。
+          </div>
+        </div>
+      </div>
+      <div class="faq-item" data-category="account">
+        <button class="faq-question" onclick="toggleFAQ(this)">
+          忘记密码怎么办？
+          <i data-lucide="plus"></i>
+        </button>
+        <div class="faq-answer">
+          <div class="faq-answer-inner">
+            在登录页面点击「忘记密码」，输入注册邮箱后我们会发送重置链接。如果没有收到邮件，请检查垃圾邮件文件夹或联系客服。
+          </div>
+        </div>
+      </div>
+
+      <!-- Category: billing -->
+      <div class="faq-item" data-category="billing">
+        <button class="faq-question" onclick="toggleFAQ(this)">
+          支持哪些支付方式？
+          <i data-lucide="plus"></i>
+        </button>
+        <div class="faq-answer">
+          <div class="faq-answer-inner">
+            我们支持信用卡（Visa、MasterCard、American Express）、PayPal 以及企业银行转账（仅限 Enterprise 方案）。中国用户可使用微信支付和支付宝。
+          </div>
+        </div>
+      </div>
+      <div class="faq-item" data-category="billing">
+        <button class="faq-question" onclick="toggleFAQ(this)">
+          如何升级或降级方案？
+          <i data-lucide="plus"></i>
+        </button>
+        <div class="faq-answer">
+          <div class="faq-answer-inner">
+            进入「设置 &rarr; 计费与方案」，选择你想切换的方案。升级即时生效（按剩余天数折算费用），降级在下一个计费周期生效。所有历史数据在降级后仍可查看，不会丢失。
+          </div>
+        </div>
+      </div>
+      <div class="faq-item" data-category="billing">
+        <button class="faq-question" onclick="toggleFAQ(this)">
+          是否支持退款？
+          <i data-lucide="plus"></i>
+        </button>
+        <div class="faq-answer">
+          <div class="faq-answer-inner">
+            年度方案提供 30 天无理由退款保证。月度方案在首次付款后 7 天内可申请退款。退款金额将原路返回至支付账户，通常 5-10 个工作日到账。
+          </div>
+        </div>
+      </div>
+
+      <!-- Category: tech -->
+      <div class="faq-item" data-category="tech">
+        <button class="faq-question" onclick="toggleFAQ(this)">
+          API 速率限制是多少？
+          <i data-lucide="plus"></i>
+        </button>
+        <div class="faq-answer">
+          <div class="faq-answer-inner">
+            Starter 方案：<code>100 req/min</code>；Pro 方案：<code>1,000 req/min</code>；Enterprise 方案可自定义。超过速率限制后 API 会返回 <code>429 Too Many Requests</code>，建议实现指数退避重试策略。
+          </div>
+        </div>
+      </div>
+      <div class="faq-item" data-category="tech">
+        <button class="faq-question" onclick="toggleFAQ(this)">
+          支持哪些编程语言的 SDK？
+          <i data-lucide="plus"></i>
+        </button>
+        <div class="faq-answer">
+          <div class="faq-answer-inner">
+            官方支持 JavaScript/TypeScript、Python、Go、Java 和 Ruby。社区维护的 SDK 还包括 Rust、PHP 和 .NET。详见<a href="#">开发者文档</a>。
+          </div>
+        </div>
+      </div>
+
+      <!-- Category: security -->
+      <div class="faq-item" data-category="security">
+        <button class="faq-question" onclick="toggleFAQ(this)">
+          数据存储在哪里？
+          <i data-lucide="plus"></i>
+        </button>
+        <div class="faq-answer">
+          <div class="faq-answer-inner">
+            默认数据存储在 AWS 美东和新加坡区域。Enterprise 客户可选择数据驻留区域（北美、欧洲、亚太），确保符合当地数据合规要求（GDPR、CCPA 等）。
+          </div>
+        </div>
+      </div>
+      <div class="faq-item" data-category="security">
+        <button class="faq-question" onclick="toggleFAQ(this)">
+          是否支持 SSO 单点登录？
+          <i data-lucide="plus"></i>
+        </button>
+        <div class="faq-answer">
+          <div class="faq-answer-inner">
+            是的，Enterprise 方案支持 SAML 2.0 和 OpenID Connect 的 SSO 集成，兼容 Okta、Azure AD、Google Workspace 等主流身份提供商。
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="faq-cta">
+    <h3>还没有找到答案？</h3>
+    <p>我们的支持团队随时为你提供帮助。</p>
+    <a href="#" class="btn-primary">联系我们 <i data-lucide="arrow-right"></i></a>
+  </div>
+</main>
+
+<script>
+function toggleFAQ(btn) {
+  const item = btn.parentElement;
+  item.classList.toggle('open');
+}
+
+function filterCategory(cat, btn) {
+  document.querySelectorAll('.cat-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  document.querySelectorAll('.faq-item').forEach(item => {
+    if (cat === 'all' || item.dataset.category === cat) {
+      item.style.display = 'block';
+    } else {
+      item.style.display = 'none';
+    }
+  });
+}
+
+function filterFAQ(query) {
+  const q = query.toLowerCase();
+  document.querySelectorAll('.faq-item').forEach(item => {
+    const text = item.textContent.toLowerCase();
+    item.style.display = q === '' || text.includes(q) ? 'block' : 'none';
+  });
+}
+
+let isDark = false;
+function toggleTheme() {
+  isDark = !isDark;
+  document.documentElement.setAttribute('data-theme', isDark ? 'dark' : '');
+  document.getElementById('themeIcon').setAttribute('data-lucide', isDark ? 'sun' : 'moon');
+  lucide.createIcons({ icons: { sun: lucide.icons.Sun, moon: lucide.icons.Moon }, attrs: { 'stroke-width': 1.5 } });
+  try { localStorage.setItem('theme-faq', isDark ? 'dark' : 'light'); } catch(e) {}
+}
+(function() {
+  try {
+    if (localStorage.getItem('theme-faq') === 'dark') {
+      isDark = true;
+      document.documentElement.setAttribute('data-theme', 'dark');
+      document.getElementById('themeIcon').setAttribute('data-lucide', 'sun');
+    }
+  } catch(e) {}
+  lucide.createIcons({ attrs: { 'stroke-width': 1.5 } });
+})();
+</script>
+</body>
+</html>

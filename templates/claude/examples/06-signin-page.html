@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sign In — Claude Design System</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@100;200;300;400;500;600;700;800&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+<style>
+:root {
+  --bg-primary: #FFFFFF;
+  --bg-secondary: #F5F5F5;
+  --bg-card: #FAFAFA;
+  --text-primary: #0D0D0D;
+  --text-secondary: #666666;
+  --text-tertiary: #999999;
+  --accent: #D97757;
+  --accent-hover: #C56545;
+  --accent-bg: rgba(217,119,87,0.08);
+  --border: #E5E5E5;
+  --border-light: #F0F0F0;
+  --error: #DC3545;
+  --error-bg: rgba(220,53,69,0.06);
+}
+
+[data-theme="dark"] {
+  --bg-primary: #0D0D0D;
+  --bg-secondary: #1A1A1A;
+  --bg-card: #141414;
+  --text-primary: #F5F5F5;
+  --text-secondary: #999999;
+  --text-tertiary: #666666;
+  --accent: #E8916A;
+  --accent-hover: #F0A585;
+  --accent-bg: rgba(232,145,106,0.1);
+  --border: #2A2A2A;
+  --border-light: #1F1F1F;
+  --error: #E05565;
+  --error-bg: rgba(220,53,69,0.1);
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-weight: 400;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  transition: background 0.4s ease, color 0.4s ease;
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---- Theme Toggle ---- */
+.theme-toggle {
+  position: fixed;
+  top: 20px; right: 24px;
+  z-index: 1001;
+  width: 40px; height: 40px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--text-primary);
+  padding: 0;
+  transition: all 0.2s;
+}
+.theme-toggle svg { width: 18px; height: 18px; }
+.theme-toggle:hover { background: var(--border); }
+
+/* ---- Auth Card ---- */
+.auth-container {
+  width: 100%;
+  max-width: 420px;
+  padding: 24px;
+}
+
+.auth-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 48px 40px;
+}
+
+.auth-logo {
+  font-size: 15px;
+  font-weight: 500;
+  letter-spacing: 1.5px;
+  text-align: center;
+  margin-bottom: 36px;
+  color: var(--text-primary);
+}
+
+.auth-title {
+  font-size: 28px;
+  font-weight: 200;
+  letter-spacing: -0.8px;
+  text-align: center;
+  margin-bottom: 8px;
+}
+
+.auth-subtitle {
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--text-secondary);
+  text-align: center;
+  margin-bottom: 36px;
+  line-height: 1.5;
+}
+.auth-subtitle a {
+  color: var(--accent); text-decoration: none; font-weight: 500;
+}
+.auth-subtitle a:hover { text-decoration: underline; }
+
+/* ---- Inputs ---- */
+.form-group { margin-bottom: 20px; }
+
+.form-label {
+  display: block;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+  letter-spacing: 0.2px;
+}
+
+.form-input {
+  width: 100%;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 16px;
+  font-size: 15px;
+  font-family: 'Inter', sans-serif;
+  font-weight: 400;
+  color: var(--text-primary);
+  outline: none;
+  transition: border-color 0.2s;
+}
+.form-input::placeholder { color: var(--text-tertiary); font-weight: 400; }
+.form-input:focus { border-color: var(--accent); }
+.form-input.error {
+  border-color: var(--error);
+  background: var(--error-bg);
+}
+
+.form-error {
+  font-size: 12px;
+  color: var(--error);
+  margin-top: 6px;
+  font-weight: 400;
+  display: none;
+}
+.form-error.show { display: block; }
+
+.form-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 24px;
+}
+
+.forgot-link {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--accent);
+  text-decoration: none;
+}
+.forgot-link:hover { text-decoration: underline; }
+
+.checkbox-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.checkbox-wrap input[type="checkbox"] {
+  accent-color: var(--accent);
+  width: 16px; height: 16px;
+  cursor: pointer;
+}
+
+/* ---- Button ---- */
+.btn-primary {
+  width: 100%;
+  background: var(--text-primary);
+  color: var(--bg-primary);
+  border: none;
+  border-radius: 8px;
+  padding: 13px 28px;
+  font-size: 15px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  transition: opacity 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+.btn-primary:hover { opacity: 0.85; }
+.btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-primary svg { width: 16px; height: 16px; }
+
+/* ---- Divider ---- */
+.divider-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin: 28px 0;
+}
+.divider-row::before,
+.divider-row::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+.divider-row span {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+/* ---- Social Buttons ---- */
+.social-buttons {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.btn-social {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 11px 16px;
+  font-size: 13px;
+  font-weight: 400;
+  font-family: inherit;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.btn-social:hover { border-color: var(--text-primary); }
+.btn-social svg { width: 18px; height: 18px; }
+
+/* ---- Footer ---- */
+.auth-footer {
+  text-align: center;
+  margin-top: 24px;
+  font-size: 13px;
+  color: var(--text-tertiary);
+}
+.auth-footer a {
+  color: var(--text-secondary);
+  text-decoration: none;
+  font-weight: 400;
+}
+.auth-footer a:hover { color: var(--text-primary); }
+
+@media (max-width: 480px) {
+  .auth-card { padding: 32px 24px; }
+  .auth-title { font-size: 24px; }
+  .social-buttons { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+
+<button class="theme-toggle" id="themeToggle" onclick="toggleTheme()" title="切换暗色模式">
+  <i data-lucide="moon" id="themeIcon"></i>
+</button>
+
+<div class="auth-container">
+  <div class="auth-card">
+    <div class="auth-logo">NOVA</div>
+
+    <h1 class="auth-title">欢迎回来</h1>
+    <p class="auth-subtitle">还没有账号？<a href="#">免费注册</a></p>
+
+    <form id="loginForm" onsubmit="handleLogin(event)">
+      <div class="form-group">
+        <label class="form-label" for="email">邮箱地址</label>
+        <input type="email" id="email" class="form-input" placeholder="you@example.com" required>
+        <span class="form-error" id="emailError">请输入有效的邮箱地址</span>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="password">密码</label>
+        <input type="password" id="password" class="form-input" placeholder="输入密码" required>
+        <span class="form-error" id="passwordError">密码不能为空</span>
+      </div>
+
+      <div class="form-row">
+        <label class="checkbox-wrap">
+          <input type="checkbox" checked>
+          记住我
+        </label>
+        <a href="#" class="forgot-link">忘记密码？</a>
+      </div>
+
+      <button type="submit" class="btn-primary" id="submitBtn">
+        登录 <i data-lucide="arrow-right"></i>
+      </button>
+    </form>
+
+    <div class="divider-row"><span>或</span></div>
+
+    <div class="social-buttons">
+      <button class="btn-social" onclick="socialLogin('google')">
+        <i data-lucide="chrome"></i> Google
+      </button>
+      <button class="btn-social" onclick="socialLogin('github')">
+        <i data-lucide="github"></i> GitHub
+      </button>
+    </div>
+  </div>
+
+  <div class="auth-footer">
+    <a href="#">隐私政策</a> &middot; <a href="#">服务条款</a>
+  </div>
+</div>
+
+<script>
+function handleLogin(e) {
+  e.preventDefault();
+  const email = document.getElementById('email');
+  const password = document.getElementById('password');
+  const submitBtn = document.getElementById('submitBtn');
+  let valid = true;
+
+  // Reset
+  [email, password].forEach(el => el.classList.remove('error'));
+  document.querySelectorAll('.form-error').forEach(e => e.classList.remove('show'));
+
+  // Validate
+  if (!email.value || !email.value.includes('@')) {
+    email.classList.add('error');
+    document.getElementById('emailError').classList.add('show');
+    valid = false;
+  }
+  if (!password.value) {
+    password.classList.add('error');
+    document.getElementById('passwordError').classList.add('show');
+    valid = false;
+  }
+
+  if (valid) {
+    submitBtn.disabled = true;
+    submitBtn.innerHTML = '登录中...';
+    setTimeout(() => {
+      submitBtn.innerHTML = '登录 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>';
+      submitBtn.disabled = false;
+      alert('登录成功！（演示页面）');
+    }, 1200);
+  }
+}
+
+function socialLogin(provider) {
+  alert('跳转到 ' + provider + ' 授权...（演示页面）');
+}
+
+let isDark = false;
+function toggleTheme() {
+  isDark = !isDark;
+  document.documentElement.setAttribute('data-theme', isDark ? 'dark' : '');
+  document.getElementById('themeIcon').setAttribute('data-lucide', isDark ? 'sun' : 'moon');
+  lucide.createIcons({ icons: { sun: lucide.icons.Sun, moon: lucide.icons.Moon }, attrs: { 'stroke-width': 1.5 } });
+  try { localStorage.setItem('theme-auth', isDark ? 'dark' : 'light'); } catch(e) {}
+}
+(function() {
+  try {
+    if (localStorage.getItem('theme-auth') === 'dark') {
+      isDark = true;
+      document.documentElement.setAttribute('data-theme', 'dark');
+      document.getElementById('themeIcon').setAttribute('data-lucide', 'sun');
+    }
+  } catch(e) {}
+  lucide.createIcons({ attrs: { 'stroke-width': 1.5 } });
+})();
+</script>
+</body>
+</html>

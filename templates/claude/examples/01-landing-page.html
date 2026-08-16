@@ -1,0 +1,631 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Landing Page — Claude Design System</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@100;200;300;400;500;600;700;800&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+<style>
+:root {
+  --bg-primary: #FFFFFF;
+  --bg-secondary: #F5F5F5;
+  --bg-card: #FAFAFA;
+  --text-primary: #0D0D0D;
+  --text-secondary: #666666;
+  --text-tertiary: #999999;
+  --accent: #D97757;
+  --accent-hover: #C56545;
+  --accent-bg: rgba(217,119,87,0.08);
+  --border: #E5E5E5;
+  --border-light: #F0F0F0;
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.06);
+  --shadow-lg: 0 20px 60px rgba(0,0,0,0.08);
+  --nav-bg: rgba(245,245,245,0.92);
+  --nav-text: #0D0D0D;
+}
+
+[data-theme="dark"] {
+  --bg-primary: #0D0D0D;
+  --bg-secondary: #1A1A1A;
+  --bg-card: #141414;
+  --text-primary: #F5F5F5;
+  --text-secondary: #999999;
+  --text-tertiary: #666666;
+  --accent: #E8916A;
+  --accent-hover: #F0A585;
+  --accent-bg: rgba(232,145,106,0.1);
+  --border: #2A2A2A;
+  --border-light: #1F1F1F;
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.3);
+  --shadow-lg: 0 20px 60px rgba(0,0,0,0.5);
+  --nav-bg: rgba(10,10,10,0.92);
+  --nav-text: #CCCCCC;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-weight: 400;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  transition: background 0.4s ease, color 0.4s ease;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 0 48px;
+}
+
+/* ---- Theme Toggle ---- */
+.theme-toggle {
+  position: fixed;
+  top: 20px;
+  right: 24px;
+  z-index: 1001;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-primary);
+  padding: 0;
+  transition: all 0.2s;
+}
+.theme-toggle svg { width: 18px; height: 18px; }
+.theme-toggle:hover { background: var(--border); }
+
+/* ---- Nav ---- */
+.nav {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 1000;
+  background: var(--nav-bg);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-bottom: 1px solid var(--border);
+  padding: 14px 0;
+  transition: background 0.4s ease;
+}
+.nav .container {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.nav-logo {
+  font-size: 15px;
+  font-weight: 500;
+  letter-spacing: 1px;
+  color: var(--text-primary);
+}
+.nav-links {
+  display: flex;
+  gap: 32px;
+  list-style: none;
+}
+.nav-links a {
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--text-secondary);
+  text-decoration: none;
+  transition: color 0.2s;
+}
+.nav-links a:hover { color: var(--text-primary); }
+.nav-actions { display: flex; gap: 12px; }
+
+/* ---- Buttons ---- */
+.btn-primary {
+  background: var(--text-primary);
+  color: var(--bg-primary);
+  border: none;
+  border-radius: 8px;
+  padding: 12px 28px;
+  font-size: 14px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  transition: opacity 0.2s;
+}
+.btn-primary:hover { opacity: 0.85; }
+.btn-primary svg { width: 16px; height: 16px; }
+
+.btn-ghost {
+  background: transparent;
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 28px;
+  font-size: 14px;
+  font-weight: 400;
+  font-family: inherit;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  transition: all 0.2s;
+}
+.btn-ghost:hover { border-color: var(--text-primary); }
+.btn-ghost svg { width: 16px; height: 16px; }
+
+/* ---- Tag ---- */
+.tag {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 5px 14px;
+  border-radius: 20px;
+  background: var(--accent-bg);
+  color: var(--accent);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+/* ---- Sections ---- */
+.section { padding: 120px 0; }
+.section-sm { padding: 80px 0; }
+
+.section-label {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--accent);
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  margin-bottom: 16px;
+}
+
+.section-title {
+  font-size: 48px;
+  font-weight: 200;
+  line-height: 1.15;
+  letter-spacing: -1.5px;
+  margin-bottom: 20px;
+}
+
+.section-subtitle {
+  font-size: 18px;
+  font-weight: 300;
+  color: var(--text-secondary);
+  max-width: 600px;
+  line-height: 1.6;
+}
+
+.divider {
+  width: 40px;
+  height: 2px;
+  background: var(--accent);
+  border-radius: 1px;
+  margin: 28px 0;
+}
+
+/* ---- Hero ---- */
+.hero {
+  padding: 160px 0 100px;
+  min-height: 85vh;
+  display: flex;
+  align-items: center;
+}
+.hero-content { max-width: 700px; }
+.hero h1 {
+  font-size: 72px;
+  font-weight: 200;
+  line-height: 1.08;
+  letter-spacing: -2px;
+  margin-bottom: 24px;
+}
+.hero p {
+  font-size: 20px;
+  font-weight: 300;
+  color: var(--text-secondary);
+  line-height: 1.55;
+  margin-bottom: 40px;
+  max-width: 560px;
+}
+.hero-actions { display: flex; gap: 16px; }
+
+/* ---- Features Grid ---- */
+.features-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 24px;
+  margin-top: 48px;
+}
+
+.card {
+  background: var(--bg-card);
+  border-radius: 14px;
+  padding: 36px;
+  border: 1px solid var(--border);
+  transition: all 0.25s;
+}
+.card:hover { border-color: var(--accent); box-shadow: var(--shadow-sm); }
+.card-icon { color: var(--accent); width: 28px; height: 28px; margin-bottom: 18px; }
+.card-icon svg { width: 28px; height: 28px; }
+.card h3 {
+  font-size: 20px;
+  font-weight: 500;
+  margin-bottom: 10px;
+  letter-spacing: -0.3px;
+}
+.card p {
+  font-size: 14px;
+  line-height: 1.65;
+  color: var(--text-secondary);
+  font-weight: 400;
+}
+
+/* ---- Stats ---- */
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 48px;
+  margin-top: 48px;
+}
+.stat-value {
+  font-size: 64px;
+  font-weight: 200;
+  color: var(--accent);
+  line-height: 1;
+  letter-spacing: -2px;
+}
+/* 数字滚动入场 */
+.stats-grid [data-count] {
+  opacity: 0;
+  transform: translateY(20px) scale(0.95);
+  transition: opacity .8s cubic-bezier(.16,1,.3,1), transform .8s cubic-bezier(.16,1,.3,1);
+}
+.stats-grid [data-count].counted {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+.stat-label {
+  font-size: 14px;
+  color: var(--text-secondary);
+  margin-top: 8px;
+  font-weight: 400;
+}
+
+/* ---- Testimonials ---- */
+.testimonial-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 24px;
+  margin-top: 48px;
+}
+
+.quote-block {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 36px;
+}
+.quote-text {
+  font-size: 17px;
+  font-weight: 300;
+  line-height: 1.6;
+  font-style: italic;
+  color: var(--text-primary);
+}
+.quote-author {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text-secondary);
+  margin-top: 16px;
+  font-style: normal;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.quote-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-tertiary);
+  font-size: 14px;
+}
+
+/* ---- CTA ---- */
+.cta-section {
+  padding: 120px 0;
+  text-align: center;
+  border-top: 1px solid var(--border);
+}
+.cta-section h2 {
+  font-size: 52px;
+  font-weight: 200;
+  letter-spacing: -1.5px;
+  margin-bottom: 20px;
+}
+.cta-section p {
+  font-size: 18px;
+  font-weight: 300;
+  color: var(--text-secondary);
+  margin-bottom: 36px;
+  max-width: 500px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* ---- Footer ---- */
+.footer {
+  padding: 48px 0;
+  border-top: 1px solid var(--border);
+}
+.footer .container {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.footer-text {
+  font-size: 13px;
+  color: var(--text-tertiary);
+}
+.footer-links {
+  display: flex;
+  gap: 24px;
+  list-style: none;
+}
+.footer-links a {
+  font-size: 13px;
+  color: var(--text-tertiary);
+  text-decoration: none;
+  font-weight: 400;
+}
+.footer-links a:hover { color: var(--text-secondary); }
+
+/* ---- Background accent ---- */
+.bg-alt { background: var(--bg-secondary); }
+
+@media (max-width: 768px) {
+  .container { padding: 0 24px; }
+  .hero { padding: 120px 0 60px; }
+  .hero h1 { font-size: 40px; letter-spacing: -1px; }
+  .hero p { font-size: 16px; }
+  .section-title { font-size: 32px; }
+  .features-grid { grid-template-columns: 1fr; }
+  .stats-grid { grid-template-columns: repeat(2, 1fr); gap: 32px; }
+  .testimonial-grid { grid-template-columns: 1fr; }
+  .nav-links { display: none; }
+  .cta-section h2 { font-size: 32px; }
+  .section { padding: 80px 0; }
+}
+</style>
+</head>
+<body>
+
+<button class="theme-toggle" id="themeToggle" onclick="toggleTheme()" title="切换暗色模式">
+  <i data-lucide="moon" id="themeIcon"></i>
+</button>
+
+<nav class="nav">
+  <div class="container">
+    <div class="nav-logo">NOVA</div>
+    <ul class="nav-links">
+      <li><a href="#">产品</a></li>
+      <li><a href="#">特性</a></li>
+      <li><a href="#">定价</a></li>
+      <li><a href="#">关于</a></li>
+      <li><a href="#">文档</a></li>
+    </ul>
+    <div class="nav-actions">
+      <a href="#" class="btn-ghost">登录</a>
+      <a href="#" class="btn-primary">免费试用 <i data-lucide="arrow-right"></i></a>
+    </div>
+  </div>
+</nav>
+
+<main>
+  <!-- Hero -->
+  <section class="hero">
+    <div class="container">
+      <div class="hero-content">
+        <span class="tag">New Release v3.0</span>
+        <h1>Intelligent design<br>for the <span style="color:var(--accent);">modern web</span></h1>
+        <p>构建下一代用户体验的完整工具链。从原型到部署，一体化解决方案让你的创意更快实现。</p>
+        <div class="divider"></div>
+        <div class="hero-actions">
+          <a href="#" class="btn-primary">开始使用 <i data-lucide="chevron-right"></i></a>
+          <a href="#" class="btn-ghost">观看演示 <i data-lucide="play"></i></a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Features -->
+  <section class="section bg-alt">
+    <div class="container">
+      <span class="section-label">核心特性</span>
+      <h2 class="section-title">为效率而生的<br>全栈开发平台</h2>
+      <p class="section-subtitle">从设计到部署，无需切换工具。聚焦创造，其余交给我们。</p>
+      <div class="features-grid">
+        <div class="card">
+          <i data-lucide="layout-dashboard" class="card-icon"></i>
+          <h3>可视化编辑器</h3>
+          <p>拖拽式布局设计，实时预览，所见即所得的编辑体验。</p>
+        </div>
+        <div class="card">
+          <i data-lucide="code-2" class="card-icon"></i>
+          <h3>智能代码生成</h3>
+          <p>设计稿一键转代码，支持 React、Vue、HTML 等主流框架输出。</p>
+        </div>
+        <div class="card">
+          <i data-lucide="cloud" class="card-icon"></i>
+          <h3>云端协作</h3>
+          <p>团队成员实时同步编辑，版本历史完整可追溯。</p>
+        </div>
+        <div class="card">
+          <i data-lucide="zap" class="card-icon"></i>
+          <h3>毫秒级部署</h3>
+          <p>全球 CDN 加速，SSL 自动配置，一键发布上线。</p>
+        </div>
+        <div class="card">
+          <i data-lucide="bar-chart-3" class="card-icon"></i>
+          <h3>性能分析</h3>
+          <p>Core Web Vitals 实时监控，自动优化建议。</p>
+        </div>
+        <div class="card">
+          <i data-lucide="shield-check" class="card-icon"></i>
+          <h3>企业级安全</h3>
+          <p>SOC 2 认证，端到端加密，符合 GDPR & CCPA 规范。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Stats -->
+  <section class="section">
+    <div class="container">
+      <span class="section-label">数据表现</span>
+      <h2 class="section-title">数字会说话</h2>
+      <p class="section-subtitle">全球超过 10,000 团队信赖的选择。</p>
+      <div class="stats-grid">
+        <div data-count>
+          <div class="stat-value" data-target="10000" data-suffix="K+" data-decimals="0">0<span style="font-size:28px;font-weight:300;">+</span></div>
+          <div class="stat-label">活跃团队</div>
+        </div>
+        <div data-count>
+          <div class="stat-value" data-target="99.9" data-suffix="%" data-decimals="1">0<span style="font-size:28px;font-weight:300;">%</span></div>
+          <div class="stat-label">服务可用性</div>
+        </div>
+        <div data-count>
+          <div class="stat-value" data-target="50" data-suffix="ms" data-decimals="0">0<span style="font-size:28px;font-weight:300;">ms</span></div>
+          <div class="stat-label">平均响应延迟</div>
+        </div>
+        <div data-count>
+          <div class="stat-value" data-target="4.9" data-suffix="/5" data-decimals="1">0<span style="font-size:28px;font-weight:300;">/5</span></div>
+          <div class="stat-label">用户满意度</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Testimonials -->
+  <section class="section bg-alt">
+    <div class="container">
+      <span class="section-label">客户之声</span>
+      <h2 class="section-title">来自一线<br>开发者的评价</h2>
+      <div class="testimonial-grid">
+        <div class="quote-block">
+          <p class="quote-text">"从前端设计到部署上线只用了两天时间，这在以前是不可想象的。整个团队的效率提升了至少 300%。"</p>
+          <div class="quote-author">
+            <span class="quote-avatar"><i data-lucide="user" style="width:16px;height:16px;"></i></span>
+            李明远 — 技术总监 · PixelByte
+          </div>
+        </div>
+        <div class="quote-block">
+          <p class="quote-text">"代码生成的准确率令人震惊，尤其是复杂布局的处理。已经推荐给我们整个产品团队使用。"</p>
+          <div class="quote-author">
+            <span class="quote-avatar"><i data-lucide="user" style="width:16px;height:16px;"></i></span>
+            Sarah Kim — Lead Engineer · ForgeStack
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section class="cta-section">
+    <div class="container">
+      <h2>准备好<br>开始构建了吗？</h2>
+      <p>免费试用 14 天，无需信用卡。随时取消。</p>
+      <a href="#" class="btn-primary" style="font-size:15px;padding:14px 36px;">开始免费试用 <i data-lucide="arrow-right"></i></a>
+      <p style="font-size:12px;color:var(--text-tertiary);margin-top:18px;">已有账号？<a href="#" style="color:var(--accent);text-decoration:none;font-weight:500;">立即登录</a></p>
+    </div>
+  </section>
+</main>
+
+<footer class="footer">
+  <div class="container">
+    <span class="footer-text">&copy; 2026 Nova Inc. All rights reserved.</span>
+    <ul class="footer-links">
+      <li><a href="#">隐私政策</a></li>
+      <li><a href="#">服务条款</a></li>
+      <li><a href="#">联系我们</a></li>
+    </ul>
+  </div>
+</footer>
+
+<script>
+let isDark = false;
+function toggleTheme() {
+  isDark = !isDark;
+  document.documentElement.setAttribute('data-theme', isDark ? 'dark' : '');
+  document.getElementById('themeIcon').setAttribute('data-lucide', isDark ? 'sun' : 'moon');
+  lucide.createIcons({ icons: { sun: lucide.icons.Sun, moon: lucide.icons.Moon }, attrs: { 'stroke-width': 1.5 } });
+  try { localStorage.setItem('theme', isDark ? 'dark' : 'light'); } catch(e) {}
+}
+(function() {
+  try {
+    if (localStorage.getItem('theme') === 'dark') {
+      isDark = true;
+      document.documentElement.setAttribute('data-theme', 'dark');
+      document.getElementById('themeIcon').setAttribute('data-lucide', 'sun');
+    }
+  } catch(e) {}
+  lucide.createIcons({ attrs: { 'stroke-width': 1.5 } });
+
+  /* ---- 数字滚动动画 (IntersectionObserver) ---- */
+  const statEls = document.querySelectorAll('[data-count] .stat-value[data-target]');
+  const countObs = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (!entry.isIntersecting) return;
+      const el = entry.target;
+      const parent = el.closest('[data-count]');
+      if (!parent || parent.classList.contains('counted')) return;
+
+      // 触发容器入场
+      parent.classList.add('counted');
+
+      const target = parseFloat(el.dataset.target);
+      const decimals = parseInt(el.dataset.decimals || '0', 10);
+      const suffix = el.dataset.suffix || '';
+      const duration = 1800; // ms
+      const start = performance.now();
+
+      function tick(now) {
+        const elapsed = now - start;
+        const progress = Math.min(elapsed / duration, 1);
+        // easeOutExpo 缓动 — 快起慢停，数字感好
+        const eased = progress === 1 ? 1 : 1 - Math.pow(2, -10 * progress);
+        const current = (target * eased).toFixed(decimals);
+        // 保留内联 suffix span
+        const innerSpan = el.querySelector('span');
+        if (innerSpan) {
+          el.textContent = current;
+          el.appendChild(innerSpan);
+        } else {
+          el.textContent = current + suffix;
+        }
+        if (progress < 1) requestAnimationFrame(tick);
+      }
+
+      requestAnimationFrame(tick);
+      countObs.unobserve(el);
+    });
+  }, { threshold: .35 });
+
+  statEls.forEach(el => countObs.observe(el));
+})();
+</script>
+</body>
+</html>
