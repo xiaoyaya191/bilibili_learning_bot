@@ -97,3 +97,11 @@ credentials
 password
 *.env
 _panel_stdout.log
+
+# Legacy Android build artifacts
+/arm/
+/cxx-native/
+/Untitled0.ipynb
+/_upgrade_v2.py
+/buildozer.spec
+/.build APK.yml
