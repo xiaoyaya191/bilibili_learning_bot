@@ -1,0 +1,14 @@
+prefix=/mnt/c/Users/12063/Documents/Codex/2026-08-04/https-github-com-xiaoyaya191-bilibili-learning/repo/cxx/third_party/ffmpeg-win64
+exec_prefix=${prefix}
+libdir=/mnt/c/Users/12063/Documents/Codex/2026-08-04/https-github-com-xiaoyaya191-bilibili-learning/repo/cxx/third_party/ffmpeg-win64/lib
+includedir=/mnt/c/Users/12063/Documents/Codex/2026-08-04/https-github-com-xiaoyaya191-bilibili-learning/repo/cxx/third_party/ffmpeg-win64/include
+
+Name: libavutil
+Description: FFmpeg utility library
+Version: 61.5.100
+Requires: 
+Requires.private: 
+Conflicts:
+Libs: -L${libdir}  -lavutil -lm -luser32 -lbcrypt -latomic
+Libs.private: 
+Cflags: -I${includedir}

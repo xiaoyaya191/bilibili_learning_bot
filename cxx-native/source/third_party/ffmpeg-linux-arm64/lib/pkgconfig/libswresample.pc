@@ -1,0 +1,14 @@
+prefix=/mnt/c/Users/12063/Documents/Codex/2026-08-04/https-github-com-xiaoyaya191-bilibili-learning/repo/cxx/third_party/ffmpeg-linux-arm64
+exec_prefix=${prefix}
+libdir=/mnt/c/Users/12063/Documents/Codex/2026-08-04/https-github-com-xiaoyaya191-bilibili-learning/repo/cxx/third_party/ffmpeg-linux-arm64/lib
+includedir=/mnt/c/Users/12063/Documents/Codex/2026-08-04/https-github-com-xiaoyaya191-bilibili-learning/repo/cxx/third_party/ffmpeg-linux-arm64/include
+
+Name: libswresample
+Description: FFmpeg audio resampling library
+Version: 7.2.100
+Requires: libavutil >= 61.5.100
+Requires.private: 
+Conflicts:
+Libs: -L${libdir}  -lswresample -lm -latomic
+Libs.private: 
+Cflags: -I${includedir}

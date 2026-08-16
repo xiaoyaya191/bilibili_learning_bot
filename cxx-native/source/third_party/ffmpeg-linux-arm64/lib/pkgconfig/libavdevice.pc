@@ -1,0 +1,14 @@
+prefix=/mnt/c/Users/12063/Documents/Codex/2026-08-04/https-github-com-xiaoyaya191-bilibili-learning/repo/cxx/third_party/ffmpeg-linux-arm64
+exec_prefix=${prefix}
+libdir=/mnt/c/Users/12063/Documents/Codex/2026-08-04/https-github-com-xiaoyaya191-bilibili-learning/repo/cxx/third_party/ffmpeg-linux-arm64/lib
+includedir=/mnt/c/Users/12063/Documents/Codex/2026-08-04/https-github-com-xiaoyaya191-bilibili-learning/repo/cxx/third_party/ffmpeg-linux-arm64/include
+
+Name: libavdevice
+Description: FFmpeg device handling library
+Version: 63.2.100
+Requires: libavformat >= 63.5.101, libavcodec >= 63.6.101, libavutil >= 61.5.100
+Requires.private: 
+Conflicts:
+Libs: -L${libdir}  -lavdevice -lm -latomic
+Libs.private: 
+Cflags: -I${includedir}
