@@ -4,6 +4,8 @@
 >
 > 版本: **3.1.2** | License: MIT | 项目文档: https://bxya.app/
 
+> 📘 英文版（English）：[README_EN.md](README_EN.md)
+
 ---
 
 ## ✨ 功能特性
