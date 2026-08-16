@@ -130,8 +130,16 @@ done
 # ---------- ④ 安装系统依赖 + 测速镜像并拉取 ----------
 say "步骤 1/4: 安装系统依赖..."
 pkg update -y || warn "pkg update 失败，继续尝试..."
-pkg install -y python git ffmpeg libjpeg-turbo libyaml libyaml-dev clang make binutils \
-  || fail "系统依赖安装失败，请检查网络后重试。"
+# Termux 的 libyaml 已自带开发头文件，没有独立的 libyaml-dev 包，故不再单独安装。
+# 改为逐个安装：单个可选依赖失败不阻断整体流程，仅对关键依赖做最终校验。
+for _pkg in python git ffmpeg libjpeg-turbo libyaml clang make binutils; do
+  pkg install -y "$_pkg" >/dev/null 2>&1 \
+    && printf "${c_g}[✓]${c_0} 系统依赖 %s 已安装\n" "$_pkg" \
+    || warn "系统依赖 $_pkg 安装失败（可选，可继续）"
+done
+# 关键依赖校验：python 与 git 必须可用，否则终止
+command -v python >/dev/null 2>&1 || fail "未检测到 python，请检查网络后重试。"
+command -v git >/dev/null 2>&1 || fail "未检测到 git，请检查网络后重试。"
 
 say "步骤 2/4: 测试 GitHub 镜像连通性..."
 BEST=""
