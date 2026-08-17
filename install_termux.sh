@@ -38,7 +38,7 @@ echo "使用即视为同意免责声明。"
 printf "输入 我同意 / I agree / согласен 以继续: "
 read -r consent
 case "$consent" in
-  我同意|i agree|I agree|IAGREE|согласен|Согласен|yes|y|Y|ok|OK|是) ;;
+  我同意|"i agree"|"I agree"|IAGREE|согласен|Согласен|yes|y|Y|ok|OK|是) ;;
   *) fail "未通过同意确认。安装已取消。" ;;
 esac
 
@@ -51,7 +51,7 @@ pkg upgrade -y
 # ---------- Step 2: 安装系统依赖 ----------
 echo ""
 echo "[2/4] 安装系统编译依赖 (libyaml 解决 PyYAML 编译问题)..."
-pkg install -y python python-pip libyaml libyaml-dev clang make binutils
+pkg install -y python coreutils libyaml clang make binutils
 
 # ---------- Step 3: 升级 pip ----------
 echo ""

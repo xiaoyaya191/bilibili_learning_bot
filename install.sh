@@ -15,7 +15,7 @@
 #       （装完在 Termux 输入任一命令即可直接启动网页端）
 #  ============================================================
 
-set -u
+set -Eeuo pipefail
 
 REPO_URL="${BILILEARN_REPO_URL:-https://github.com/xiaoyaya191/bilibili_learning_bot.git}"
 BRANCH="${BILILEARN_BRANCH:-main}"
@@ -37,6 +37,27 @@ ok()    { printf "${c_g}[✓]${c_0} %s\n" "$*"; }
 warn()  { printf "${c_y}[!]${c_0} %s\n" "$*"; }
 fail()  { printf "\n${c_r}[✗] 错误: %s${c_0}\n" "$*" >&2; exit 1; }
 
+run_with_timeout() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$@"
+  else
+    "$@"
+  fi
+}
+
+check_python_imports() {
+  local missing=""
+  local module
+  for module in flask flask_cors httpx qrcode PIL colorama bilibili_api requests psutil; do
+    if ! python -c "import ${module}" >/dev/null 2>&1; then
+      missing="${missing} ${module}"
+    fi
+  done
+  if [ -n "$missing" ]; then
+    fail "核心 Python 依赖缺失:${missing}。请查看上方 pip 错误后重试。"
+  fi
+}
+
 printf "\n"
 echo   "=============================================="
 echo   "        BiliLearn v3.1.3 · 手机端安装器"
@@ -50,11 +71,9 @@ echo   "   ⑤ 安装依赖        ⑥ 生成启动脚本"
 echo   ""
 
 # ---------- 环境 ----------
-case "$(uname -o 2>/dev/null || true)" in
-  Android*) ;;
-  *) fail "本脚本仅适用于 Android Termux 环境。" ;;
-esac
-command -v pkg >/dev/null 2>&1 || fail "未检测到 Termux pkg，请先安装官方 Termux 应用。"
+if [ -z "${PREFIX:-}" ] || [ ! -x "${PREFIX}/bin/pkg" ]; then
+  fail "未检测到 Termux 环境。请使用官方 Termux，并在 Termux 中运行 bash install.sh。"
+fi
 ok "Termux 环境检查通过"
 
 if [ ! -d "$HOME/storage" ]; then
@@ -130,12 +149,17 @@ done
 # ---------- ④ 安装系统依赖 + 测速镜像并拉取 ----------
 say "步骤 1/4: 安装系统依赖..."
 pkg update -y || warn "pkg update 失败，继续尝试..."
-# Termux 的 libyaml 已自带开发头文件，没有独立的 libyaml-dev 包，故不再单独安装。
-# 改为逐个安装：单个可选依赖失败不阻断整体流程，仅对关键依赖做最终校验。
-for _pkg in python git ffmpeg libjpeg-turbo libyaml clang make binutils; do
-  pkg install -y "$_pkg" >/dev/null 2>&1 \
-    && printf "${c_g}[✓]${c_0} 系统依赖 %s 已安装\n" "$_pkg" \
-    || warn "系统依赖 $_pkg 安装失败（可选，可继续）"
+# coreutils provides timeout, which is used for mirror checks below.
+if ! pkg install -y python git coreutils; then
+  fail "关键 Termux 依赖安装失败（python/git/coreutils）。请检查网络和软件源后重试。"
+fi
+# Optional packages improve video analysis and native Python package builds.
+for _pkg in ffmpeg libjpeg-turbo libyaml clang make binutils; do
+  if pkg install -y "$_pkg"; then
+    printf "${c_g}[✓]${c_0} 系统依赖 %s 已安装\n" "$_pkg"
+  else
+    warn "系统依赖 $_pkg 安装失败，继续安装核心功能。"
+  fi
 done
 # 关键依赖校验：python 与 git 必须可用，否则终止
 command -v python >/dev/null 2>&1 || fail "未检测到 python，请检查网络后重试。"
@@ -145,7 +169,7 @@ say "步骤 2/4: 测试 GitHub 镜像连通性..."
 BEST=""
 for m in "${MIRRORS[@]}"; do
   printf "  测试 %-28s " "$m ..."
-  if timeout 8 git ls-remote --heads "$m/$REPO_URL" "$BRANCH" >/dev/null 2>&1; then
+  if run_with_timeout 8 git ls-remote --heads "$m/$REPO_URL" "$BRANCH" >/dev/null 2>&1; then
     printf "${c_g}可用${c_0}\n"
     BEST="$m"
     break
@@ -162,16 +186,45 @@ else
 fi
 
 say "步骤 3/4: 拉取源码到: $INSTALL_DIR"
-mkdir -p "$INSTALL_DIR"
+
+clone_to_staging() {
+  local url="$1"
+  local staging_dir="${INSTALL_DIR}.download.$$"
+
+  rm -rf "$staging_dir"
+  if git clone --branch "$BRANCH" --depth 1 "$url" "$staging_dir"; then
+    if mv "$staging_dir" "$INSTALL_DIR"; then
+      return 0
+    fi
+  fi
+  rm -rf "$staging_dir"
+  return 1
+}
+
 if [ -d "$INSTALL_DIR/.git" ]; then
+  if ! git -C "$INSTALL_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    fail "安装目录包含损坏的 Git 仓库: $INSTALL_DIR。请换一个目录或先备份后修复。"
+  fi
   say "检测到已有仓库，执行更新..."
-  git -C "$INSTALL_DIR" fetch origin "$BRANCH" \
-    || git -C "$INSTALL_DIR" remote set-url origin "$CLONE_URL"
-  git -C "$INSTALL_DIR" checkout "$BRANCH" || true
-  git -C "$INSTALL_DIR" pull --ff-only origin "$BRANCH" \
-    || warn "更新失败，保留当前版本继续。"
+  if git -C "$INSTALL_DIR" remote get-url origin >/dev/null 2>&1; then
+    git -C "$INSTALL_DIR" remote set-url origin "$REPO_URL"
+  else
+    git -C "$INSTALL_DIR" remote add origin "$REPO_URL"
+  fi
+  if git -C "$INSTALL_DIR" fetch --depth 1 origin "$BRANCH"; then
+    if git -C "$INSTALL_DIR" show-ref --verify --quiet "refs/heads/$BRANCH"; then
+      git -C "$INSTALL_DIR" checkout "$BRANCH"
+    else
+      git -C "$INSTALL_DIR" checkout -b "$BRANCH" --track "origin/$BRANCH"
+    fi
+    git -C "$INSTALL_DIR" pull --ff-only origin "$BRANCH" \
+      || warn "已有目录存在本地改动，未强制覆盖，保留当前版本。"
+  else
+    warn "仓库更新失败，保留已有版本继续；如版本不完整请换一个安装目录重试。"
+  fi
 else
-  if git clone --branch "$BRANCH" --depth 1 "$CLONE_URL" "$INSTALL_DIR"; then
+  mkdir -p "$(dirname "$INSTALL_DIR")"
+  if clone_to_staging "$CLONE_URL"; then
     ok "源码拉取完成"
   else
     warn "首选下载源失败，尝试其余镜像..."
@@ -180,8 +233,7 @@ else
       [ "$m" = "$BEST" ] && continue
       TRY_URL="${m:+$m/}$REPO_URL"
       printf "  重试 %s ...\n" "${m:-GitHub 直连}"
-      rm -rf "$INSTALL_DIR"
-      if git clone --branch "$BRANCH" --depth 1 "$TRY_URL" "$INSTALL_DIR"; then
+      if clone_to_staging "$TRY_URL"; then
         ok "源码拉取完成（${m:-直连}）"; CLONED=0; break
       fi
     done
@@ -191,12 +243,16 @@ fi
 cd "$INSTALL_DIR" || fail "无法进入安装目录: $INSTALL_DIR"
 
 say "步骤 4/4: 安装 Python 依赖..."
+python -m pip --version >/dev/null 2>&1 \
+  || fail "当前 Python 没有可用 pip，请先执行: pkg install python"
 python -m pip install --upgrade pip wheel setuptools \
   || warn "pip 升级失败，继续安装。"
 python -m pip install PyYAML --no-build-isolation \
   || warn "PyYAML 安装跳过；若后续导入报错请运行: pkg install libyaml"
-python -m pip install -r requirements.txt \
-  || warn "部分可选依赖在 Termux 上跳过，不影响网页面板与基本流程。"
+if ! python -m pip install -r requirements.txt; then
+  warn "部分 Python 依赖在 Termux 上安装失败，开始检查网页面板所需的核心依赖。"
+fi
+check_python_imports
 
 # ---------- 生成启动脚本 ----------
 cat > "$INSTALL_DIR/start_termux.sh" <<'LAUNCHER'
