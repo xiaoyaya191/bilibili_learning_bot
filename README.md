@@ -142,8 +142,8 @@ cp config.example.json Data/config.json   # 源码运行
 **一键安装**（自动测速 GitHub 镜像拉取源码）：
 
 ```bash
-pkg install curl -y
-curl -O https://raw.githubusercontent.com/xiaoyaya191/bilibili_learning_bot/main/install.sh
+pkg install bash curl -y
+curl -fL --retry 3 --connect-timeout 15 -o install.sh https://raw.githubusercontent.com/xiaoyaya191/bilibili_learning_bot/main/install.sh
 bash install.sh
 ```
 

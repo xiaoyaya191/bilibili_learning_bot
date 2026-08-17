@@ -123,7 +123,7 @@ cp config.example.json Data/config.json   # Source run
 | **Web Admin Panel** | `python web_panel.py` → http://localhost:18083 |
 | **Windows EXE** | Run `BiliLearn Web.exe` (auto-opens browser + tray) |
 | **Docker** | `docker-compose up -d` |
-| **Termux** | `bash start.sh` |
+| **Termux** | `bash install.sh` |
 
 ### 4️⃣ First Use
 

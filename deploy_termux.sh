@@ -43,7 +43,7 @@ NOTICE
 printf 'Type 我同意 / I agree / согласен to continue: '
 read -r consent
 case "$consent" in
-  我同意|i agree|I agree|IAGREE|согласен|Согласен|yes|y|Y|ok|OK|是) ;;
+  我同意|"i agree"|"I agree"|IAGREE|согласен|Согласен|yes|y|Y|ok|OK|是) ;;
   *) fail "Consent did not match. Installation was not started." ;;
 esac
 
@@ -51,7 +51,7 @@ say "Step 2/6: installing required Termux packages"
 pkg update -y
 pkg upgrade -y
 # libyaml 解决 PyYAML 编译问题；clang/make/binutils 供部分原生扩展编译。
-pkg install -y python git ffmpeg libjpeg-turbo libyaml libyaml-dev clang make binutils
+pkg install -y python git coreutils ffmpeg libjpeg-turbo libyaml clang make binutils
 
 say "Step 3/6: pulling source from GitHub"
 if [ -d "$INSTALL_DIR/.git" ]; then

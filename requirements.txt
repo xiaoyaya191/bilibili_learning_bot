@@ -6,7 +6,7 @@
 # Termux (Android) 用户：
 #    PyYAML 是 bilibili-api-python 的间接依赖，会由 pip 自动安装。
 #    如果遇到编译错误，请先运行：
-#      pkg install libyaml libyaml-dev python python-pip
+#      pkg install libyaml python
 #    然后再执行 pip install -r requirements.txt
 
 bilibili-api-python==17.4.1
