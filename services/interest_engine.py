@@ -134,7 +134,7 @@ class InterestEngine:
         """加载配置，如不存在则尝试从旧格式迁移"""
         if os.path.exists(self.config_file):
             try:
-                with open(self.config_file, 'r', encoding='utf-8') as f:
+                with open(self.config_file, 'r', encoding='utf-8-sig') as f:
                     cfg = json.load(f)
                 # 确保所有字段存在
                 return self._merge_defaults(cfg)
@@ -168,7 +168,7 @@ class InterestEngine:
         if not os.path.exists(legacy_path):
             return None
         try:
-            with open(legacy_path, 'r', encoding='utf-8') as f:
+            with open(legacy_path, 'r', encoding='utf-8-sig') as f:
                 old = json.load(f)
             old_interests = old.get("interests", [])
             if not old_interests:

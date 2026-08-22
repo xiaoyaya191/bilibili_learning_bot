@@ -584,7 +584,7 @@ def load_config():
     """加载配置文件，合并默认值，解密敏感词"""
     if os.path.exists(CONFIG_FILE):
         try:
-            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+            with open(CONFIG_FILE, 'r', encoding='utf-8-sig') as f:
                 cfg = json.load(f)
             cfg = normalize_config(cfg)
             # 清洗脱敏占位符：'[已隐藏]' 视为未配置（避免被当真实 key 使用）
@@ -670,7 +670,7 @@ def get_config_or_env(section, key, env_name):
 def load_json_file(path, default):
     if os.path.exists(path):
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, "r", encoding="utf-8-sig") as f:
                 return json.load(f)
         except Exception as e:
             print(f"[WARN] 加载 JSON 文件失败: {path} - {e}", flush=True)

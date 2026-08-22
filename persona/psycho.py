@@ -47,7 +47,7 @@ def _load_json(path, default=None):
         default = {}
     if os.path.exists(path):
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, "r", encoding="utf-8-sig") as f:
                 return json.load(f)
         except Exception as e:
             print(f"[psycho] JSON加载失败 {path}: {e}")

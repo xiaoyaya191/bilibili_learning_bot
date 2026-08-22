@@ -33,7 +33,7 @@ def _init_custom_knowledge_dir():
     meta_path = KB_METADATA_FILE
     if os.path.exists(meta_path):
         try:
-            with open(meta_path, "r", encoding="utf-8") as f:
+            with open(meta_path, "r", encoding="utf-8-sig") as f:
                 meta = json.load(f)
         except Exception:
             meta = {"categories": {}, "file_index": {}, "last_updated": ""}
@@ -266,7 +266,7 @@ async def _ai_search_bilibili_and_add():
             
             # 更新metadata
             meta_path = KB_METADATA_FILE
-            with open(meta_path, "r", encoding="utf-8") as f:
+            with open(meta_path, "r", encoding="utf-8-sig") as f:
                 meta = json.load(f)
             meta.setdefault("file_index", {}).setdefault("自定义知识", [])
             # 去重
@@ -341,7 +341,7 @@ async def _ai_search_bilibili_and_add():
         
         # 更新metadata
         meta_path = KB_METADATA_FILE
-        with open(meta_path, "r", encoding="utf-8") as f:
+        with open(meta_path, "r", encoding="utf-8-sig") as f:
             meta = json.load(f)
         meta.setdefault("file_index", {}).setdefault("自定义知识", [])
         meta["file_index"]["自定义知识"] = [
@@ -433,7 +433,7 @@ async def _add_custom_knowledge():
     
     # 更新 metadata
     meta_path = KB_METADATA_FILE
-    with open(meta_path, "r", encoding="utf-8") as f:
+    with open(meta_path, "r", encoding="utf-8-sig") as f:
         meta = json.load(f)
     meta.setdefault("file_index", {}).setdefault("自定义知识", [])
     # 检查是否已存在
@@ -500,7 +500,7 @@ async def _view_custom_knowledge(entries):
         print(f"{Fore.RED}[ERROR] 文件不存在: {fpath}{Style.RESET_ALL}")
         return
     
-    with open(fpath, "r", encoding="utf-8") as f:
+    with open(fpath, "r", encoding="utf-8-sig") as f:
         content = f.read()
     
     print(f"\n{Fore.CYAN}{'=' * 60}{Style.RESET_ALL}")
@@ -532,7 +532,7 @@ async def _edit_custom_knowledge(entries):
         print(f"{Fore.RED}[ERROR] 文件不存在{Style.RESET_ALL}")
         return
     
-    with open(fpath, "r", encoding="utf-8") as f:
+    with open(fpath, "r", encoding="utf-8-sig") as f:
         old_content = f.read()
     
     print(f"\n{Fore.CYAN}编辑条目: {title}{Style.RESET_ALL}")
@@ -636,7 +636,7 @@ async def _edit_custom_knowledge(entries):
     
     # 更新 metadata
     meta_path = KB_METADATA_FILE
-    with open(meta_path, "r", encoding="utf-8") as f:
+    with open(meta_path, "r", encoding="utf-8-sig") as f:
         meta = json.load(f)
     for e in meta.setdefault("file_index", {}).setdefault("自定义知识", []):
         if e.get("bvid") == eid:
@@ -687,7 +687,7 @@ async def _delete_custom_knowledge(entries):
     
     # 更新 metadata
     meta_path = KB_METADATA_FILE
-    with open(meta_path, "r", encoding="utf-8") as f:
+    with open(meta_path, "r", encoding="utf-8-sig") as f:
         meta = json.load(f)
     meta.setdefault("file_index", {}).setdefault("自定义知识", [])
     meta["file_index"]["自定义知识"] = [
@@ -716,7 +716,7 @@ async def _search_custom_knowledge():
             continue
         fpath = os.path.join(CUSTOM_KNOWLEDGE_DIR, fname)
         try:
-            with open(fpath, "r", encoding="utf-8") as f:
+            with open(fpath, "r", encoding="utf-8-sig") as f:
                 content = f.read()
             if query.lower() in content.lower():
                 # 提取标题
@@ -746,7 +746,7 @@ async def _search_custom_knowledge():
             n = int(n)
             if 1 <= n <= len(results):
                 title, fpath = results[n - 1]
-                with open(fpath, "r", encoding="utf-8") as f:
+                with open(fpath, "r", encoding="utf-8-sig") as f:
                     print(f"\n{Fore.CYAN}{'=' * 60}{Style.RESET_ALL}")
                     print(f"{Fore.LIGHTGREEN_EX}{title}{Style.RESET_ALL}")
                     print(f"{Fore.CYAN}{'=' * 60}{Style.RESET_ALL}")

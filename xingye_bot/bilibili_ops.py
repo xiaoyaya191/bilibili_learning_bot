@@ -199,7 +199,7 @@ class BilibiliAccount:
         if review_type:
             from services.like_review import ActionReviewInbox, requires_review
             try:
-                review_config = json.loads((DATA_DIR / "config.json").read_text(encoding="utf-8"))
+                review_config = json.loads((DATA_DIR / "config.json").read_text(encoding="utf-8-sig"))
             except Exception:
                 review_config = {}
             if requires_review(review_config, review_type):

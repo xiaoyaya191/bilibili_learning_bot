@@ -55,7 +55,7 @@ class BiliClient:
             return None
 
         try:
-            with open(COOKIE_FILE, 'r', encoding='utf-8') as f:
+            with open(COOKIE_FILE, 'r', encoding='utf-8-sig') as f:
                 cookies = json.load(f)
             self.raw_cookies = cookies
 

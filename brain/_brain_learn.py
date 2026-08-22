@@ -293,7 +293,7 @@ class BrainLearnMixin:
         log(f"开始验证知识文件: {os.path.basename(file_path)}", "KB")
         
         try:
-            with open(file_path, 'r', encoding='utf-8') as f:
+            with open(file_path, 'r', encoding='utf-8-sig') as f:
                 knowledge_content = f.read()
             
             # 联网搜索（如果启用）

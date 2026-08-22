@@ -3,11 +3,16 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>BiliLearn v3.1.3 — 项目介绍</title>
+<title>BiliLearn v3.1.4 — 项目介绍</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@100;200;300;400;500;600;700;800&display=swap" rel="stylesheet">
-<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@100;200;300;400;500;600;700;800&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+<script src="/assets/js/lucide.js"></script>
+<script>
+// [FIX] 图标库改为本地加载（随包分发），彻底消除 CDN 依赖；本地文件异常
+// 缺失时注入 noop 兜底，保证页面脚本（主题切换等）不因 lucide 未定义而中断。
+if(typeof lucide==='undefined'){window.lucide={createIcons:function(){},icons:{}}}
+</script>
 <style>
 :root {
   --bg-primary: #FFFFFF;
@@ -1008,7 +1013,7 @@ body {
     <span class="tag">Open Source Project</span>
     <h1 class="slide-title" style="font-size:66px; font-weight:200;">B站 AI 学习<br>互动机器人</h1>
     <p class="slide-subtitle" style="margin-top:20px; font-size:20px;">
-      v3.1.3 — AI 驱动的本地视频学习与互动工作台<br>
+      v3.1.4 — AI 驱动的本地视频学习与互动工作台<br>
       自动刷视频、学知识、互动评论、自我进化
     </p>
     <div class="divider"></div>
@@ -1017,7 +1022,7 @@ body {
     </p>
     <div class="release-note">
       <i data-lucide="sparkles" style="width:17px;height:17px;color:var(--accent);flex-shrink:0;margin-top:1px;"></i>
-      <div><strong>v3.1.3 更新：</strong>观看历史卡片、完整日志与审核记录、实时监听上下文、多模态网格帧、兴趣偏好与系统托盘入口。重点是让 AI 的过程、判断和实际结果都能看见。</div>
+      <div><strong>v3.1.4 更新：</strong>全新 Agent 工作台（17 个内置工具的自主循环）、MCP 服务接入、技能库与插件标准接口、备份支持分组勾选与脱敏导出、恢复出厂设置分组清理、知识库封面自动补全与一键整理体检。稳定性：Linux 启动崩溃（#25）、扫码登录凭据不完整、BOM 配置文件解析、失效凭据僵尸运行等全面修复。AI 从“被代码指挥”升级为“自己思考自己干”。</div>
     </div>
     <div class="release-links">
       <a class="release-link primary" href="https://bot.bxya.top/" target="_blank" rel="noopener noreferrer"><i data-lucide="globe-2"></i>访问官方网站</a>
@@ -1025,15 +1030,15 @@ body {
     </div>
     <div class="cover-stats" style="margin-top:36px; display:flex; gap:20px;">
       <div class="cover-stat">
-        <div class="big-num" style="font-size:36px;"><span class="counter" data-target="24" data-decimals="0">0</span>+</div>
+        <div class="big-num" style="font-size:36px;"><span class="counter" data-target="30" data-decimals="0">0</span>+</div>
         <div class="num-label">模块文件</div>
       </div>
       <div class="cover-stat">
-        <div class="big-num" style="font-size:36px;"><span class="counter" data-target="20" data-decimals="0">0</span>+</div>
+        <div class="big-num" style="font-size:36px;"><span class="counter" data-target="26" data-decimals="0">0</span>+</div>
         <div class="num-label">核心功能</div>
       </div>
       <div class="cover-stat">
-        <div class="big-num" style="font-size:36px;">约<span class="counter" data-target="18872" data-decimals="0" data-format="comma">0</span>行</div>
+        <div class="big-num" style="font-size:36px;">约<span class="counter" data-target="20500" data-decimals="0" data-format="comma">0</span>行</div>
         <div class="num-label">代码量</div>
       </div>
     </div>
@@ -1782,11 +1787,11 @@ pip install -r requirements.txt</pre>
     <div class="divider center"></div>
     <div style="display:grid; grid-template-columns:1fr 1fr 1fr 1fr; gap:24px; margin-top:12px;" id="statsGrid">
       <div style="text-align:center;">
-        <div class="big-num" style="font-size:42px;"><span class="counter" data-target="24" data-decimals="0">0</span></div>
+        <div class="big-num" style="font-size:42px;"><span class="counter" data-target="30" data-decimals="0">0</span></div>
         <div class="num-label">Python模块</div>
       </div>
       <div style="text-align:center;">
-        <div class="big-num" style="font-size:42px;"><span class="counter" data-target="49" data-decimals="0">0</span>+</div>
+        <div class="big-num" style="font-size:42px;"><span class="counter" data-target="80" data-decimals="0">0</span>+</div>
         <div class="num-label">测试模块</div>
       </div>
       <div style="text-align:center;">
@@ -1883,7 +1888,7 @@ function animateCounters(root = document) {
 
 // Version rolling animation for end slide
 let versionAnimated = false;
-const versionHistory = ['v1.0.1', 'v1.0.2', 'v2.0.0', 'v2.0.3', 'v2.1.0', 'v2.2.0', 'v2.2.1', 'v3.0.0', 'v3.0.1', 'v3.1.3'];
+const versionHistory = ['v1.0.1', 'v1.0.2', 'v2.0.0', 'v2.0.3', 'v2.1.0', 'v2.2.0', 'v2.2.1', 'v3.0.0', 'v3.0.1', 'v3.1.3', 'v3.1.4'];
 
 // === MC-style Particle System ===
 const MC_COLORS = ['#a855f7','#c084fc','#facc15','#fde047','#22d3ee','#67e8f9','#34d399','#6ee7b7','#f9f9f9','#fbbf24'];

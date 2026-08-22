@@ -61,7 +61,7 @@ def load_monitor_config():
     """加载监听配置，不存在则返回默认值"""
     if os.path.exists(MONITOR_CONFIG_FILE):
         try:
-            with open(MONITOR_CONFIG_FILE, 'r', encoding='utf-8') as f:
+            with open(MONITOR_CONFIG_FILE, 'r', encoding='utf-8-sig') as f:
                 data = json.load(f)
                 if not isinstance(data, dict):
                     data = {}
@@ -129,7 +129,7 @@ class MonitorBot:
     @staticmethod
     def _load_processed_at_ids():
         try:
-            with open(MONITOR_AT_STATE_FILE, "r", encoding="utf-8") as source:
+            with open(MONITOR_AT_STATE_FILE, "r", encoding="utf-8-sig") as source:
                 data = json.load(source)
             return {str(value) for value in data.get("processed_ids", [])}
         except (OSError, ValueError, AttributeError):
@@ -138,7 +138,7 @@ class MonitorBot:
     @staticmethod
     def _load_at_attempts():
         try:
-            with open(MONITOR_AT_STATE_FILE, "r", encoding="utf-8") as source:
+            with open(MONITOR_AT_STATE_FILE, "r", encoding="utf-8-sig") as source:
                 data = json.load(source)
             attempts = data.get("attempts", {})
             return {str(key): int(value) for key, value in attempts.items() if int(value) > 0}
@@ -148,7 +148,7 @@ class MonitorBot:
     @staticmethod
     def _load_source_routing_migrated_ids():
         try:
-            with open(MONITOR_AT_STATE_FILE, "r", encoding="utf-8") as source:
+            with open(MONITOR_AT_STATE_FILE, "r", encoding="utf-8-sig") as source:
                 data = json.load(source)
             return {str(value) for value in data.get("source_routing_migrated_ids", [])}
         except (OSError, ValueError, AttributeError):
@@ -188,7 +188,7 @@ class MonitorBot:
             return False
 
         try:
-            with open(COOKIE_FILE, 'r', encoding='utf-8') as f:
+            with open(COOKIE_FILE, 'r', encoding='utf-8-sig') as f:
                 cookies = json.load(f)
             self.uid = int(cookies.get("DedeUserID", 0))
             self.bili.uid = self.uid

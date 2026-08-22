@@ -31,7 +31,7 @@ async def revisit_knowledge_video(bvid, title, up_name, category_path, file_path
     brain.bili._load_credential()
     # [FIX] 同时加载 cookies，否则 fetch_bilibili_subtitles 无 cookie 无法获取AI字幕
     if os.path.exists(COOKIE_FILE):
-        with open(COOKIE_FILE, 'r', encoding='utf-8') as f:
+        with open(COOKIE_FILE, 'r', encoding='utf-8-sig') as f:
             brain.cookies = json.load(f)
 
     # ── 获取视频元信息 ──
@@ -99,7 +99,7 @@ async def revisit_knowledge_video(bvid, title, up_name, category_path, file_path
         # 仅优化模式：读取现有 md 文件中的内容
         subtitle_text = ""
         try:
-            with open(file_path, 'r', encoding='utf-8') as f:
+            with open(file_path, 'r', encoding='utf-8-sig') as f:
                 existing = f.read()
             # 提取 AI 总结部分
             summary_match = re.search(r'##\s*\[BRAIN\]\s*AI内容总结\s*\n(.*)', existing, re.DOTALL)

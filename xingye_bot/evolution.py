@@ -25,7 +25,7 @@ class EvolutionEngine:
     def _load_state(self):
         try:
             if self.state_file.exists():
-                return json.loads(self.state_file.read_text(encoding="utf-8"))
+                return json.loads(self.state_file.read_text(encoding="utf-8-sig"))
         except Exception:
             pass
         return {
@@ -45,7 +45,7 @@ class EvolutionEngine:
     def _load_logs(self):
         try:
             if self.log_file.exists():
-                data = json.loads(self.log_file.read_text(encoding="utf-8"))
+                data = json.loads(self.log_file.read_text(encoding="utf-8-sig"))
                 return data.get("logs", [])
         except Exception:
             pass

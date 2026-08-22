@@ -1121,7 +1121,7 @@ def _load_claude_design_system() -> str:
     prompt_text = ""
     try:
         if _os.path.exists(prompt_path):
-            with open(prompt_path, 'r', encoding='utf-8') as f:
+            with open(prompt_path, 'r', encoding='utf-8-sig') as f:
                 prompt_text = f.read()
     except Exception:
         pass
@@ -2103,7 +2103,7 @@ if __name__ == "__main__":
     base_url = ""
     model = "qwen/qwen3.5-122b-a10b"
     if os.path.exists(config_path):
-        with open(config_path, 'r', encoding='utf-8') as f:
+        with open(config_path, 'r', encoding='utf-8-sig') as f:
             cfg = json.load(f)
             api_cfg = cfg.get('api', {})
             api_key = api_cfg.get('unified_api_key', '')
@@ -2118,7 +2118,7 @@ if __name__ == "__main__":
     cookie_file = COOKIE_FILE
     cookies = None
     if os.path.exists(cookie_file):
-        with open(cookie_file, 'r', encoding='utf-8') as f:
+        with open(cookie_file, 'r', encoding='utf-8-sig') as f:
             cookies = json.load(f)
 
     async def run():

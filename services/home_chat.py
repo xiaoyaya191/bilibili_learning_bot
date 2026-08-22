@@ -58,7 +58,7 @@ def list_conversations() -> list[dict]:
     out = []
     for f in CONV_DIR.glob("*.json"):
         try:
-            d = json.loads(f.read_text(encoding="utf-8"))
+            d = json.loads(f.read_text(encoding="utf-8-sig"))
             out.append({
                 "id": d.get("id", f.stem),
                 "title": d.get("title", "新对话"),
@@ -98,7 +98,7 @@ def get_conversation(conv_id: str) -> dict | None:
     if not p.exists():
         return None
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
+        return json.loads(p.read_text(encoding="utf-8-sig"))
     except Exception:
         return None
 

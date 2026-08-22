@@ -995,7 +995,7 @@ class BrainVideoMixin:
         for file_path in samples:
             try:
                 rel = os.path.relpath(file_path, KNOWLEDGE_BASE_DIR)
-                with open(file_path, 'r', encoding='utf-8') as f:
+                with open(file_path, 'r', encoding='utf-8-sig') as f:
                     content = f.read()
                 # 提取标题（第一行 # 或 **标题** 字段）
                 title_match = re.search(r'(?:^#\s*|-\s*\*\*标题\*\*:\s*)(.+)', content, re.MULTILINE)

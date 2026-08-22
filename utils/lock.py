@@ -19,7 +19,7 @@ def _lock_path() -> str:
 
 def _read_lock_pid(path: str) -> int | None:
     try:
-        with open(path, "r", encoding="utf-8") as file:
+        with open(path, "r", encoding="utf-8-sig") as file:
             pid = int(file.read().strip())
         return pid if pid > 0 else None
     except (OSError, ValueError):

@@ -36,7 +36,7 @@ class PrivateContextDB:
         with _PRIVATE_CONTEXT_LOCK:
             if os.path.exists(self.file_path):
                 try:
-                    with open(self.file_path, "r", encoding="utf-8") as f:
+                    with open(self.file_path, "r", encoding="utf-8-sig") as f:
                         data = json.load(f)
                 except Exception:
                     pass

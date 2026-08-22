@@ -19,7 +19,7 @@ def count_knowledge_categories():
     try:
         # [FIX] 使用正确路径（metadata 在 BASE_DIR 下，不在 KnowledgeBase 内）
         if os.path.exists(KB_METADATA_FILE):
-            with open(KB_METADATA_FILE, 'r', encoding='utf-8') as f:
+            with open(KB_METADATA_FILE, 'r', encoding='utf-8-sig') as f:
                 meta = json.load(f)
             file_index = meta.get("file_index", {})
             
@@ -121,7 +121,7 @@ def search_knowledge_content():
             if file.endswith(('.txt', '.md')):
                 file_path = os.path.join(root, file)
                 try:
-                    with open(file_path, 'r', encoding='utf-8') as f:
+                    with open(file_path, 'r', encoding='utf-8-sig') as f:
                         content = f.read()
                         if keyword.lower() in content.lower():
                             count = content.lower().count(keyword.lower())
@@ -168,7 +168,7 @@ def cleanup_duplicates():
             if file.endswith(('.txt', '.md')):
                 file_path = os.path.join(root, file)
                 try:
-                    with open(file_path, 'r', encoding='utf-8') as f:
+                    with open(file_path, 'r', encoding='utf-8-sig') as f:
                         content = f.read()
                         content_hash = hash(content[:1000])
                         

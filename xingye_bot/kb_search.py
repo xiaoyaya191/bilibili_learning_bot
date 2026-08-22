@@ -85,7 +85,7 @@ def _load_index() -> dict[str, Any]:
     """加载向量索引"""
     if INDEX_FILE.exists():
         try:
-            return json.loads(INDEX_FILE.read_text(encoding="utf-8"))
+            return json.loads(INDEX_FILE.read_text(encoding="utf-8-sig"))
         except (json.JSONDecodeError, KeyError):
             pass
     return {"version": 2, "entries": [], "documents": {}}

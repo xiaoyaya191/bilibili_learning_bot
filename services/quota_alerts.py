@@ -41,7 +41,7 @@ def _settings() -> dict:
 
 def _state() -> dict:
     try:
-        value = json.loads(_STATE_FILE.read_text(encoding="utf-8"))
+        value = json.loads(_STATE_FILE.read_text(encoding="utf-8-sig"))
         return value if isinstance(value, dict) else {}
     except (OSError, json.JSONDecodeError):
         return {}

@@ -132,7 +132,7 @@ async def analyze_bilibili_video_input(user_input: str, force_mode: str | None =
         pass
     if os.path.exists(COOKIE_FILE):
         try:
-            with open(COOKIE_FILE, 'r', encoding='utf-8') as f:
+            with open(COOKIE_FILE, 'r', encoding='utf-8-sig') as f:
                 brain.cookies = json.load(f)
         except Exception:
             pass
@@ -278,7 +278,7 @@ async def manual_video_analysis(force_platform: str | None = "bilibili"):
     cookie_loaded = False
     # 1) 检查项目自己的 cookie
     if os.path.exists(COOKIE_FILE):
-        with open(COOKIE_FILE, 'r', encoding='utf-8') as f:
+        with open(COOKIE_FILE, 'r', encoding='utf-8-sig') as f:
             brain.cookies = json.load(f)
         cookie_loaded = True
         log(f"[AUTO] 从本地项目加载到登录Cookie (UID: {brain.cookies.get('DedeUserID','?')})", "LOGIN")
@@ -296,7 +296,7 @@ async def manual_video_analysis(force_platform: str | None = "bilibili"):
             sibling_cookie = os.path.join(os.path.dirname(BASE_DIR), sib_dir, sib_file)
             if os.path.exists(sibling_cookie):
                 try:
-                    with open(sibling_cookie, 'r', encoding='utf-8') as f:
+                    with open(sibling_cookie, 'r', encoding='utf-8-sig') as f:
                         brain.cookies = json.load(f)
                     uid = brain.cookies.get('DedeUserID', '?')
                     log(f"[AUTO] 从 {sib_dir} 项目加载到登录Cookie (UID: {uid})", "LOGIN")
@@ -840,7 +840,7 @@ def _scan_knowledge_base_md_files():
             # 尝试从文件头部读取 UP主 信息
             up_name = ""
             try:
-                with open(fpath, 'r', encoding='utf-8') as f:
+                with open(fpath, 'r', encoding='utf-8-sig') as f:
                     head = f.read(800)
                     up_m = re.search(r'\*\*UP主\*\*:\s*(.+)', head)
                     if up_m:
@@ -1414,7 +1414,7 @@ async def _agent_video_analysis(brain, bvid, title, up_name, video_url, aid=0):
             if score > 0:
                 preview = ""
                 try:
-                    with open(f, 'r', encoding='utf-8') as fh:
+                    with open(f, 'r', encoding='utf-8-sig') as fh:
                         preview = fh.read(200).replace('\n', ' ')
                 except Exception as e:
                     log(f'非预期异常: {e}', 'WARN')
@@ -1447,7 +1447,7 @@ async def _agent_video_analysis(brain, bvid, title, up_name, video_url, aid=0):
             else:
                 return f"文件不存在: {rel_path}\n可用 /files 命令查看所有文件"
         try:
-            with open(full_path, 'r', encoding='utf-8') as f:
+            with open(full_path, 'r', encoding='utf-8-sig') as f:
                 content = f.read()
             if len(content) > 5000:
                 content = content[:5000] + "\n\n... (文件过长，已截断至5000字)"
@@ -1463,7 +1463,7 @@ async def _agent_video_analysis(brain, bvid, title, up_name, video_url, aid=0):
         # 先预览文件内容
         preview = ""
         try:
-            with open(full_path, 'r', encoding='utf-8') as fh:
+            with open(full_path, 'r', encoding='utf-8-sig') as fh:
                 preview = fh.read(300).replace('\n', ' ')
         except Exception as e:
             log(f'非预期异常: {e}', 'WARN')
@@ -1952,7 +1952,7 @@ async def up_homepage_learn():
     cookie_loaded = False
     if os.path.exists(COOKIE_FILE):
         try:
-            with open(COOKIE_FILE, 'r', encoding='utf-8') as f:
+            with open(COOKIE_FILE, 'r', encoding='utf-8-sig') as f:
                 brain.cookies = json.load(f)
             cookie_loaded = True
         except (json.JSONDecodeError, OSError) as e:

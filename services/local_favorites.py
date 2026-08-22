@@ -21,7 +21,7 @@ def read_library(data_dir=None) -> dict:
     path = _path(data_dir)
     with _LOCK:
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
         except (OSError, json.JSONDecodeError):
             data = {}
     folders = data.get("folders") if isinstance(data, dict) else []

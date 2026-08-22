@@ -231,7 +231,7 @@ class BrainSessionMixin:
                     standby_file = os.path.join(DATA_DIR, "standby_config.json")
                     if os.path.exists(standby_file):
                         try:
-                            with open(standby_file, 'r', encoding='utf-8') as f:
+                            with open(standby_file, 'r', encoding='utf-8-sig') as f:
                                 standby_cfg = json.load(f)
                         except Exception:
                             pass
@@ -767,7 +767,7 @@ class BrainSessionMixin:
     async def initialize_login(self):
         self.bili.credential = self.bili._load_credential()
         if self.bili.credential and os.path.exists(COOKIE_FILE):
-            with open(COOKIE_FILE, 'r', encoding='utf-8') as f:
+            with open(COOKIE_FILE, 'r', encoding='utf-8-sig') as f:
                 self.cookies = json.load(f)
             self.credential = self.bili.credential
             try:
@@ -784,6 +784,11 @@ class BrainSessionMixin:
             )
             return True
         log("需要登录B站账号", "LOGIN")
+        # [FIX] Web 面板（BILI_AUTO_START）启动的子进程没有终端交互，
+        # 进入扫码向导会永远卡在"等待扫码"，改为直接报错退出并提示去面板扫码。
+        if os.getenv("BILI_AUTO_START"):
+            log("B站登录已失效：请在网页面板「B站登录」重新扫码后再启动机器人", "ERROR")
+            return False
         print("\n" + "="*50)
         print("           B站登录向导")
         print("="*50)
@@ -799,7 +804,7 @@ class BrainSessionMixin:
         if not login_success:
             log("登录验证失败", "ERROR")
             return False
-        with open(COOKIE_FILE, 'r', encoding='utf-8') as f:
+        with open(COOKIE_FILE, 'r', encoding='utf-8-sig') as f:
             self.cookies = json.load(f)
         self.credential = Credential(
             sessdata=self.cookies.get("SESSDATA"),

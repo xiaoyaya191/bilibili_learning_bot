@@ -117,7 +117,7 @@ class CommentInteractionManager:
         """加载评论日志"""
         if os.path.exists(COMMENT_LOG_FILE):
             try:
-                with open(COMMENT_LOG_FILE, 'r', encoding='utf-8') as f:
+                with open(COMMENT_LOG_FILE, 'r', encoding='utf-8-sig') as f:
                     data = json.load(f)
                     data.setdefault("processed_comments", [])
                     data.setdefault("replied_comments", [])

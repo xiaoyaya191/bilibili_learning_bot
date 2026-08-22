@@ -199,3 +199,52 @@ def test_account_email_backup_change_without_code(monkeypatch, tmp_path):
     assert r.get_json()["ok"] is True
     cfg2 = core_config.load_config()
     assert cfg2["web"]["email_backup"] == "backup@qq.com"
+def test_email_status_accepts_recovery_email_as_identifier(monkeypatch, tmp_path):
+    """忘记密码页“邮箱验证”页签：直接填邮箱也能识别账号。"""
+    web_panel, client, _ = _setup_panel(monkeypatch, tmp_path)
+    monkeypatch.setattr(web_panel, "_email_verify_code", lambda e, c: (True, "验证通过"))
+    client.post("/api/auth/setup", json={
+        "username": "researcher", "password": "normal-password",
+        "email": "791433443@qq.com", "email_code": "668873",
+    })
+    client.post("/api/auth/logout")
+    r = client.post("/api/auth/email-status", json={"username": "791433443@qq.com"})
+    data = r.get_json()
+    assert data["ok"] is True
+    assert data["primary_masked"] == "79****43@qq.com"
+    r2 = client.post("/api/auth/email-status", json={"username": "wrong@qq.com"})
+    assert r2.get_json()["ok"] is False
+
+
+def test_send_code_accepts_recovery_email_as_identifier(monkeypatch, tmp_path):
+    web_panel, client, _ = _setup_panel(monkeypatch, tmp_path)
+    monkeypatch.setattr(web_panel, "_email_verify_code", lambda e, c: (True, "验证通过"))
+    client.post("/api/auth/setup", json={
+        "username": "researcher", "password": "normal-password",
+        "email": "primary@qq.com", "email_code": "111111",
+    })
+    client.post("/api/auth/logout")
+
+    sent = []
+    monkeypatch.setattr(web_panel, "_email_send_code", lambda e: sent.append(e) or (True, "ok"))
+    r = client.post("/api/auth/email/send-code", json={"username": "primary@qq.com", "target": "primary"})
+    assert r.get_json()["ok"] is True
+    assert sent == ["primary@qq.com"]
+
+
+def test_reset_password_via_email_identifier(monkeypatch, tmp_path):
+    """邮箱验证页签填邮箱完成整个重置流程，登录仍用真实用户名。"""
+    web_panel, client, _ = _setup_panel(monkeypatch, tmp_path)
+    monkeypatch.setattr(web_panel, "_email_verify_code", lambda e, c: (c == "668873", "验证通过" if c == "668873" else "验证码错误或已过期"))
+    client.post("/api/auth/setup", json={
+        "username": "researcher", "password": "old-password",
+        "email": "791433443@qq.com", "email_code": "668873",
+    })
+    client.post("/api/auth/logout")
+    r = client.post("/api/auth/reset-password-email", json={
+        "username": "791433443@qq.com", "code": "668873", "password": "new-password",
+    })
+    assert r.get_json()["ok"] is True
+    client.post("/api/auth/logout")
+    login = client.post("/api/auth/login", json={"username": "researcher", "password": "new-password"})
+    assert login.get_json()["ok"] is True

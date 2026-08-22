@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # pyright: reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnknownArgumentType=false, reportUnknownParameterType=false, reportMissingParameterType=false, reportPrivateUsage=false, reportPrivateLocalImportUsage=false, reportUnusedCallResult=false, reportDeprecated=false, reportMissingTypeStubs=false, reportMissingImports=false, reportAny=false
 """
@@ -582,7 +582,7 @@ def _load_timeline_for_web(bvid: str, refresh: bool = False) -> dict:
     cookies = None
     if COOKIE_FILE.exists():
         try:
-            cookies = json.loads(COOKIE_FILE.read_text(encoding="utf-8"))
+            cookies = json.loads(COOKIE_FILE.read_text(encoding="utf-8-sig"))
         except (OSError, ValueError, TypeError):
             cookies = None
     _run_coro(fetch_bilibili_subtitles(bvid, cookies_obj=cookies))
@@ -1083,15 +1083,28 @@ def do_qr_login(session_id=None):
                         source = "callback"
                         if not _has_complete_qr_cookies(cookies):
                             callback_url = str(_qr_callback_payload(event).get("url") or "")
-                            try:
-                                redirected = await asyncio.to_thread(_cookies_from_qr_callback_redirect, callback_url)
-                                for key, value in redirected.items():
-                                    if value:
-                                        cookies[key] = value
-                                source = "callback-redirect"
-                            except Exception as e:
-                                source = "callback-redirect-error"
-                                log_line(f"[LOGIN] 登录回调换取 Cookie 失败: {type(e).__name__}")
+                            # [FIX] B站回调偶发抖动导致 Cookie 不完整：自动重试 3 次（间隔 2s），
+                            # 修复用户反馈的"扫码后报登录凭据不完整，几分钟后重试才成功"。
+                            last_exc = None
+                            for attempt in range(1, 4):
+                                try:
+                                    redirected = await asyncio.to_thread(_cookies_from_qr_callback_redirect, callback_url)
+                                    for key, value in redirected.items():
+                                        if value:
+                                            cookies[key] = value
+                                    source = f"callback-redirect(x{attempt})"
+                                    if _has_complete_qr_cookies(cookies):
+                                        break
+                                    log_line(f"[LOGIN] 回调返回 Cookie 仍不完整（第 {attempt}/3 次），继续重试")
+                                except Exception as e:
+                                    last_exc = e
+                                    source = f"callback-redirect-error(x{attempt})"
+                                    log_line(f"[LOGIN] 登录回调换取 Cookie 失败（第 {attempt}/3 次）: {type(e).__name__}")
+                                if attempt < 3:
+                                    await asyncio.sleep(2)
+                            else:
+                                if last_exc is not None:
+                                    log_line("[LOGIN] 回调重试 3 次均失败")
                         log_line(f"[LOGIN] 二维码完成事件结构 ({_qr_event_shape(event)})")
                         log_line(f"[LOGIN] 二维码凭据已提取 ({source}; {_qr_cookie_lengths(cookies)})")
                         if not _has_complete_qr_cookies(cookies):
@@ -1119,6 +1132,14 @@ def do_qr_login(session_id=None):
                             log_line("[LOGIN] New account is ready. Automation remains stopped until manually started.")
                         write_json(COOKIE_FILE, cookies)
                         _clear_bili_profile_cache()
+                        # [FIX] 登录后立即后台预热账号资料，避免前端先显示
+                        # "账号资料暂时无法同步"再过一会儿才变正常。
+                        def _warm_profile():
+                            try:
+                                _bili_account_profile()
+                            except Exception:
+                                pass
+                        threading.Thread(target=_warm_profile, daemon=True).start()
                         _update_qr_state(
                             session_id,
                             uid=cookies.get("DedeUserID", ""),
@@ -1359,6 +1380,15 @@ def start_bot_process(mode=None):
 
     if not _has_valid_bili_cookies():
         message = "B站尚未完成登录。请在“B站登录”扫码并在手机确认后，再启动机器人。"
+        bot_last_error = message
+        log_line(f"启动已取消：{message}")
+        return False, message
+
+    # [FIX] 结构校验通过后做一次真实校验（nav 接口，20 分钟缓存）：
+    # 过期 Cookie 若放行会导致"僵尸运行"——AI 分析照跑但点赞/评论/私信
+    # 全部 -101 失败，白白消耗 token。校验失败直接拦截并提示重新扫码。
+    if _bili_account_profile() is None:
+        message = "B站登录凭据已过期（服务器校验未通过）。请到“B站登录”重新扫码后再启动机器人。"
         bot_last_error = message
         log_line(f"启动已取消：{message}")
         return False, message
@@ -3415,6 +3445,12 @@ def api_guide_status():
     """新手教程各步骤的真实完成状态（跳转不算完成，需真实配置生效）。"""
     steps: dict[str, bool] = {}
     try:
+        web_cfg = read_json(CONFIG_FILE, {}).get('web')
+        # 教程第一步「查看项目介绍」：直接查看或主动跳过均记为完成（web.intro_viewed）
+        steps['intro'] = isinstance(web_cfg, dict) and bool(web_cfg.get('intro_viewed'))
+    except Exception:
+        steps['intro'] = False
+    try:
         config = read_json(CONFIG_FILE, {})
         api_cfg = config.get('api', {}) if isinstance(config.get('api'), dict) else {}
         # 与 /api/info 的 api_configured 判定保持一致（含环境变量兜底）
@@ -3449,6 +3485,17 @@ def api_guide_status():
         steps['observe'] = False
     done = sum(1 for v in steps.values() if v)
     return jsonify(ok=True, steps=steps, done=done, total=len(steps))
+
+
+@app.route('/api/guide/intro', methods=['POST'])
+def api_guide_intro():
+    """新手教程第一步「查看项目介绍」：直接查看或主动跳过均记为已完成。"""
+    config = read_json(CONFIG_FILE, {})
+    web_cfg = config.setdefault('web', {})
+    web_cfg['intro_viewed'] = True
+    if not write_json(CONFIG_FILE, config):
+        return jsonify(ok=False, message='Failed to save intro state'), 500
+    return jsonify(ok=True)
 
 
 # 项目图标（网页左上角 logo / favicon）—— 从仓库根目录的 image.png 提供
@@ -3508,7 +3555,7 @@ def _bili_account_profile() -> dict | None:
     if not _has_valid_bili_cookies():
         _clear_bili_profile_cache()
         return None
-    try:
+    def _fetch_nav_payload() -> dict:
         cookies = read_json(COOKIE_FILE, {}) or {}
         cookie_header = "; ".join(
             f"{name}={value}" for name, value in cookies.items()
@@ -3523,10 +3570,27 @@ def _bili_account_profile() -> dict | None:
             },
         )
         with urlopen(req, timeout=8) as response:
-            payload = json.loads(response.read().decode("utf-8", errors="replace"))
+            return json.loads(response.read().decode("utf-8", errors="replace"))
+
+    # [FIX] nav 接口偶发抖动导致"账号资料暂时无法同步"：拉取失败立即重试 1 次，
+    # 失败缓存 60s→20s，用户点"检查状态"能更快重试成功。
+    payload = None
+    last_error = None
+    for attempt in (1, 2):
+        try:
+            payload = _fetch_nav_payload()
+            break
+        except Exception as exc:
+            last_error = exc
+            if attempt == 1:
+                time.sleep(1.5)
+    try:
+        if payload is None:
+            raise last_error or ValueError("Bilibili profile request failed")
         data = payload.get("data", {}) if isinstance(payload, dict) else {}
         if int(payload.get("code", -1)) != 0 or not isinstance(data, dict):
             raise ValueError("Bilibili profile response is invalid")
+        cookies = read_json(COOKIE_FILE, {}) or {}
         profile = {
             "uid": str(data.get("mid") or cookies.get("DedeUserID") or "")[:32],
             "name": str(data.get("uname") or "")[:80],
@@ -3535,7 +3599,7 @@ def _bili_account_profile() -> dict | None:
         _bili_profile_cache.update(expires_at=now + 600, profile=profile)
         return profile
     except Exception:
-        _bili_profile_cache.update(expires_at=now + 60, profile=None)
+        _bili_profile_cache.update(expires_at=now + 20, profile=None)
         return None
 
 # ── 信息 ──
@@ -5104,7 +5168,7 @@ def api_monitor_status():
     stats_file = DATA_DIR / "monitor_stats.json"
     if stats_file.exists():
         try:
-            with open(stats_file, 'r', encoding='utf-8') as f:
+            with open(stats_file, 'r', encoding='utf-8-sig') as f:
                 data = json.load(f)
                 stats = data.get("stats", stats)
         except Exception:
@@ -5351,7 +5415,7 @@ def api_ppt_generate():
         model = "qwen/qwen3.5-122b-a10b"
         if CONFIG_FILE.exists():
             try:
-                with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                with open(CONFIG_FILE, 'r', encoding='utf-8-sig') as f:
                     cfg = json.load(f)
                 api_cfg = cfg.get('api', {})
                 api_key = api_cfg.get('unified_api_key', '') or os.getenv('BILI_AI_API_KEY', '')
@@ -5367,7 +5431,7 @@ def api_ppt_generate():
         cookies = None
         if COOKIE_FILE.exists():
             try:
-                with open(COOKIE_FILE, 'r', encoding='utf-8') as f:
+                with open(COOKIE_FILE, 'r', encoding='utf-8-sig') as f:
                     cookies = json.load(f)
             except Exception:
                 pass
@@ -5956,6 +6020,87 @@ def api_favorability():
     return jsonify(favorability.get_payload(request.args.get('q') or ''))
 
 
+
+
+# ── Agent 模式（G4：LLM 决策的自主循环，与原 Pipeline 并存）──
+@app.route('/api/agent/state')
+def api_agent_state():
+    """当前会话状态 + 统计。"""
+    try:
+        import agent.core as ag
+        s = ag.get_active()
+        return jsonify(ok=True, session=s.to_dict() if s else None)
+    except Exception as exc:
+        return jsonify(ok=False, message=str(exc)[:200]), 500
+
+
+@app.route('/api/agent/events')
+def api_agent_events():
+    """增量事件流：?after=seq 返回其后的新事件。"""
+    try:
+        import agent.core as ag
+        after = request.args.get('after', 0, type=int) or 0
+        s = ag.get_active()
+        if s is None:
+            return jsonify(ok=True, events=[], last_seq=0, status='none')
+        return jsonify(ok=True, events=s.events_after(after),
+                       last_seq=s._seq, status=s.status)
+    except Exception as exc:
+        return jsonify(ok=False, message=str(exc)[:200]), 500
+
+
+@app.route('/api/agent/start', methods=['POST'])
+def api_agent_start():
+    try:
+        import agent.core as ag
+        body = request.get_json(silent=True) or {}
+        goal = str(body.get('goal', '')).strip()
+        if not goal:
+            return jsonify(ok=False, message='请填写任务目标'), 400
+        cur = ag.get_active()
+        if cur is not None and cur.status == 'running':
+            return jsonify(ok=False, message='已有会话在运行，请先停止'), 409
+        s = ag.start_session(
+            goal,
+            max_steps=int(body.get('max_steps', 25)),
+            allow_write=bool(body.get('allow_write', False)),
+            model=str(body.get('model', '')).strip(),
+        )
+        return jsonify(ok=True, session=s.to_dict())
+    except Exception as exc:
+        return jsonify(ok=False, message=str(exc)[:200]), 500
+
+
+@app.route('/api/agent/stop', methods=['POST'])
+def api_agent_stop():
+    try:
+        import agent.core as ag
+        return jsonify(ok=ag.stop_session())
+    except Exception as exc:
+        return jsonify(ok=False, message=str(exc)[:200]), 500
+
+
+@app.route('/api/agent/tools')
+def api_agent_tools():
+    """工具注册表清单（未来插件市场的入口视图）。"""
+    try:
+        import agent.tools  # noqa: F401  触发内置工具注册
+        from agent.registry import GLOBAL_REGISTRY
+        return jsonify(ok=True, tools=[{
+            'name': t.name, 'description': t.description,
+            'risk': t.risk, 'category': t.category,
+        } for t in GLOBAL_REGISTRY.all()])
+    except Exception as exc:
+        return jsonify(ok=False, message=str(exc)[:200]), 500
+
+
+@app.route('/api/agent/history')
+def api_agent_history():
+    try:
+        import agent.core as ag
+        return jsonify(ok=True, sessions=ag.list_history(30))
+    except Exception as exc:
+        return jsonify(ok=False, message=str(exc)[:200]), 500
 @app.route('/api/favorability/settings', methods=['POST'])
 def api_favorability_settings():
     from services import favorability
@@ -6431,7 +6576,26 @@ def api_watch_history_enrich():
         write_json(_watch_history_metadata_path(), cache)
     log_line(f"[HISTORY] 补全观看历史资料: 成功 {fetched} 条，失败 {failed} 条" +
              (f"（其中 {risky} 条为B站风控限流）" if risky else ""))
-    return jsonify(ok=True, fetched=fetched, failed=failed, risky=risky, items=_watch_history_cards())
+    items = _watch_history_cards()
+    # [FIX] 知识库笔记的视频不一定在观看历史里：_watch_history_cards() 不含它们，
+    # 前端按 bvid 匹配 items 就地补写封面会全部落空（表现为"一堆没有封面"）。
+    # 这里用刚缓存的公共元数据，为请求中不在观看历史的 bvid 追加轻量卡片。
+    known = {card.get("bvid") for card in items if card.get("bvid")}
+    for bvid in bvids:
+        if bvid in known:
+            continue
+        detail = cache.get(bvid) if isinstance(cache.get(bvid), dict) else {}
+        if not detail:
+            continue
+        items.append({
+            "bvid": bvid,
+            "title": str(detail.get("title") or bvid),
+            "up": str(detail.get("up") or ""),
+            "cover": str(detail.get("pic") or ""),
+            "duration": _watch_history_duration_label(detail.get("duration")) if detail.get("duration") else "--:--",
+            "category": str(detail.get("category") or ""),
+        })
+    return jsonify(ok=True, fetched=fetched, failed=failed, risky=risky, items=items)
 
 
 def _activity_from_runtime_logs(lines: list[str]) -> dict:
@@ -6440,7 +6604,7 @@ def _activity_from_runtime_logs(lines: list[str]) -> dict:
         state_file = DATA_DIR / "bot_activity_state.json"
         if state_file.exists():
             import json as _json
-            state_data = _json.loads(state_file.read_text(encoding="utf-8"))
+            state_data = _json.loads(state_file.read_text(encoding="utf-8-sig"))
             from datetime import datetime, timedelta
             ts = state_data.get("timestamp", "")
             if ts:
@@ -7201,16 +7365,53 @@ def api_export():
     except Exception as e:
         return jsonify(dict(ok=False, message=str(e))), 500
 
+def _backup_file_info(f: Path) -> dict:
+    """备份文件元信息：zip 读 manifest 取分组，json 按文件名判断类型。"""
+    info = dict(name=f.name, mtime=datetime.fromtimestamp(f.stat().st_mtime).strftime('%Y-%m-%d %H:%M:%S'),
+                size=f"{f.stat().st_size/1024:.1f}K", kind='json', groups=[])
+    if f.suffix == '.zip':
+        info['kind'] = 'zip'
+        try:
+            with zipfile.ZipFile(f) as zf:
+                if 'manifest.json' in zf.namelist():
+                    manifest = json.loads(zf.read('manifest.json').decode('utf-8'))
+                    info['groups'] = manifest.get('groups') or []
+        except Exception:  # noqa: BLE001 - 损坏的 zip 仍显示为可删除条目
+            info['groups'] = []
+    elif f.name.endswith('_full.json'):
+        info['kind'] = 'json-full'
+    return info
+
+
 @app.route('/api/import', methods=['GET'])
 def api_import():
     try:
         files = []
         if BACKUP_DIR_EXPORT.exists():
             files = sorted([f for f in BACKUP_DIR_EXPORT.iterdir() if f.suffix in ('.json', '.zip')], key=lambda x: x.stat().st_mtime, reverse=True)
-        # 返回可用备份列表
-        flist = [dict(name=f.name, mtime=datetime.fromtimestamp(f.stat().st_mtime).strftime('%Y-%m-%d %H:%M:%S'),
-                      size=f"{f.stat().st_size/1024:.1f}K") for f in files[:20]]
+        # 返回可用备份列表（含分组信息，供前端展示）
+        flist = [_backup_file_info(f) for f in files[:20]]
         return jsonify(dict(files=flist))
+    except Exception as e:
+        return jsonify(dict(ok=False, message=str(e))), 500
+
+
+@app.route('/api/import/delete', methods=['POST'])
+def api_import_delete():
+    """删除一个备份文件（仅允许删除备份目录内的文件）。"""
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        fname = str(body.get('filename', '') or '')
+        if not fname:
+            return jsonify(dict(ok=False, message='未指定文件名')), 400
+        if not is_safe_path(fname, BACKUP_DIR_EXPORT):
+            return jsonify(dict(ok=False, message='文件名包含非法路径')), 403
+        fpath = BACKUP_DIR_EXPORT / fname
+        if not fpath.exists():
+            return jsonify(dict(ok=False, message='备份文件不存在')), 404
+        fpath.unlink()
+        log_line(f"已删除备份文件: {fname}")
+        return jsonify(dict(ok=True, message=f'已删除 {fname}'))
     except Exception as e:
         return jsonify(dict(ok=False, message=str(e))), 500
 
@@ -7275,7 +7476,7 @@ def api_import_apply():
                 return jsonify(dict(ok=False, message=f'恢复失败：{e}')), 500
             log_line(f"zip 备份已恢复: {fname} ({len(applied)} 个文件)")
             return jsonify(dict(ok=True, message=f'已恢复 {len(applied)} 个文件'))
-        data = json.loads(fpath.read_text(encoding='utf-8'))
+        data = json.loads(fpath.read_text(encoding='utf-8-sig'))
         count = 0
         for key, val in data.items():
             if key == 'bot_memory.json':
@@ -7367,67 +7568,6 @@ def api_factory_reset():
         return jsonify(dict(ok=True, message='已清除所选的私人数据和生成产物', deleted=result['deleted'],
                             selected_groups=result['selected_groups']))
 
-        delete_kb = body.get('delete_kb', False)
-        delete_web = body.get('delete_web', False)
-        delete_backup = body.get('delete_backup', False)
-        deleted = []
-        for fname in ['config.json', 'bilibili_cookies.json', 'mood_state.json', 'personas.json',
-                       'user_profiles.json', 'comment_log.json', 'bot_diary.json',
-                       'self_evolution.json', 'agent_skill_log.json', 'bot_runtime_state.json',
-                       'history_videos.json', 'interests.json', 'web_personas.json',
-                       'web_persona.json', 'web_mood.json', 'web_user_profiles.json',
-                       'web_action_log.json', 'web_prompt_templates.json', 'web_costs.json',
-                       '.web_secret_key', 'search_history.json', 'private_message_log.json',
-                       'private_context_db.json', 'standby_config.json', 'standby_stats.json',
-                       'monitor_config.json', 'monitor_stats.json', 'reply_cache.json',
-                       'processed_comments.json', 'psycho_profile.json', 'recommendation_log.json',
-                       'action_log.json', 'content_aversions.json', 'owner_profile.json',
-                       'kb_vector_index.json', 'interest_engine.json']:
-            fp = DATA_DIR / fname
-            if fp.exists():
-                fp.unlink()
-                deleted.append(fname)
-        from core.config import CIPHER_KEY_FILE
-        from core.user_data import HIGHLIGHTS_DIR, HTML_EXPORTS_DIR, MINDMAPS_DIR, QR_CODES_DIR, WORD_DIR
-        user_root_files = ['bot_memory.json', 'knowledge_metadata.json', 'bot_journal.md', 'learning_log.md']
-        for fname in user_root_files:
-            fp = USER_DATA_DIR / fname
-            if fp.exists():
-                fp.unlink()
-                deleted.append(fname)
-        cipher_key_file = Path(CIPHER_KEY_FILE)
-        if cipher_key_file.exists():
-            cipher_key_file.unlink()
-            deleted.append('.cipher_key')
-        if delete_kb:
-            knowledge_base_dir = active_knowledge_base_dir()
-            if knowledge_base_dir.exists():
-                import shutil
-                shutil.rmtree(knowledge_base_dir, ignore_errors=True)
-                deleted.append('KnowledgeBase/')
-        if delete_web:
-            web_dir = HIGHLIGHTS_DIR
-            if web_dir.exists():
-                import shutil
-                shutil.rmtree(web_dir, ignore_errors=True)
-                deleted.append('highlights/')
-        if delete_backup:
-            backup_dir = get_backup_dir()
-            if backup_dir.exists():
-                import shutil
-                shutil.rmtree(backup_dir, ignore_errors=True)
-                deleted.append(f'{backup_dir}')
-        # 清除生成的导出文件（思维导图 / Word / HTML / 二维码）
-        for export_dir in (MINDMAPS_DIR, WORD_DIR, HTML_EXPORTS_DIR, QR_CODES_DIR):
-            if export_dir.exists():
-                import shutil
-                shutil.rmtree(export_dir, ignore_errors=True)
-                deleted.append(f'{export_dir.name}/')
-        # 清除日志
-        with bot_output_lock:
-            bot_output_lines.clear()
-        log_line(f"恢复出厂设置完成，删除了 {len(deleted)} 个文件/目录" + ("（含知识库）" if delete_kb else "") + ("（含干货归档）" if delete_web else "") + ("（含备份）" if delete_backup else ""))
-        return jsonify(dict(ok=True, message=f'已清除 {len(deleted)} 个文件', deleted=deleted))
     except Exception as e:
         return jsonify(dict(ok=False, message=str(e))), 500
 
@@ -7484,7 +7624,7 @@ def api_up_follow_list():
     followed = []
     if mem_file.exists():
         try:
-            mem = json.loads(mem_file.read_text(encoding='utf-8'))
+            mem = json.loads(mem_file.read_text(encoding='utf-8-sig'))
             ups = mem.get('known_ups', {})
             for name, info in ups.items():
                 if isinstance(info, dict) and info.get('followed'):
@@ -7598,7 +7738,7 @@ def api_goal_ai_suggest():
     try:
         engine_file = DATA_DIR / 'interest_engine.json'
         if engine_file.exists():
-            data = json.loads(engine_file.read_text(encoding='utf-8'))
+            data = json.loads(engine_file.read_text(encoding='utf-8-sig'))
             raw = data.get('interests') if isinstance(data, dict) else []
             for item in raw or []:
                 keyword = item.get('keyword') if isinstance(item, dict) else item
@@ -7739,7 +7879,7 @@ def api_goal_pool_ai_fill():
     try:
         engine_file = DATA_DIR / 'interest_engine.json'
         if engine_file.exists():
-            data = json.loads(engine_file.read_text(encoding='utf-8'))
+            data = json.loads(engine_file.read_text(encoding='utf-8-sig'))
             raw = data.get('interests') if isinstance(data, dict) else []
             for item in raw or []:
                 keyword = item.get('keyword') if isinstance(item, dict) else item
@@ -8056,7 +8196,7 @@ def api_up_follow_update():
     if not mem_file.exists():
         return jsonify(dict(ok=False, message='记忆文件不存在')), 404
     try:
-        mem = json.loads(mem_file.read_text(encoding='utf-8'))
+        mem = json.loads(mem_file.read_text(encoding='utf-8-sig'))
     except Exception as exc:
         return jsonify(dict(ok=False, message=f'读取记忆文件失败: {redact_sensitive_text(str(exc))}')), 500
     ups = mem.get('known_ups') if isinstance(mem, dict) else None
@@ -8106,7 +8246,7 @@ def api_up_follow_ai_impression():
     if not mem_file.exists():
         return jsonify(dict(ok=False, message='记忆文件不存在')), 404
     try:
-        mem = json.loads(mem_file.read_text(encoding='utf-8'))
+        mem = json.loads(mem_file.read_text(encoding='utf-8-sig'))
     except Exception as exc:
         return jsonify(dict(ok=False, message=f'读取记忆文件失败: {redact_sensitive_text(str(exc))}')), 500
     ups = mem.get('known_ups') if isinstance(mem, dict) else None
@@ -8152,6 +8292,61 @@ def api_up_follow_ai_impression():
 
 
 # ── 知识库统计 ──
+@app.route('/api/mcp/status')
+def api_mcp_status():
+    """MCP 服务真实状态：mcp 包可用性、注册工具清单、知识库规模、可直接粘贴的客户端配置。"""
+    import sys as _sys
+    info = dict(ok=True, mcp_package=False, module_ready=False,
+                tools=[], kb_total=0, kb_categories=0, server_error="")
+
+    try:
+        import mcp  # noqa: F401
+        info["mcp_package"] = True
+    except ImportError:
+        info["server_error"] = "mcp 包未安装：pip install mcp"
+        return jsonify(info)
+
+    try:
+        from mcp_server import server as mcp_srv
+        tool_defs = [
+            (mcp_srv.TOOL_MATERIAL, "bili_video_material", "视频文案素材（元数据 + 字幕 + 弹幕 + 评论，输出 Markdown）", "bili"),
+            (mcp_srv.TOOL_SEARCH, "bili_search_videos", "搜索B站视频，返回结构化列表", "bili"),
+            (mcp_srv.TOOL_SCRIPT, "bili_video_to_script", "AI 一键生成口播稿/文案", "bili"),
+            (mcp_srv.TOOL_KB_STATS, "kb_stats", "知识库统计（总条目 / 分类分布）", "kb"),
+            (mcp_srv.TOOL_KB_LIST, "kb_list", "分页列出知识笔记", "kb"),
+            (mcp_srv.TOOL_KB_READ, "kb_read", "读取一篇知识笔记全文", "kb"),
+            (mcp_srv.TOOL_KB_SEARCH, "kb_search", "知识库全文搜索", "kb"),
+            (mcp_srv.TOOL_KB_EXPORT, "kb_export", "导出知识（单条 md/json 或全库 zip）", "kb"),
+        ]
+        info["tools"] = [
+            dict(name=name, desc=desc, group=group, registered=name == expected)
+            for expected, name, desc, group in tool_defs
+        ]
+        info["module_ready"] = True
+    except Exception as exc:  # noqa: BLE001
+        info["server_error"] = f"mcp_server 模块加载失败: {exc}"
+        return jsonify(info)
+
+    try:
+        from services.knowledge_tutor import scan_md_files
+        files = scan_md_files(active_knowledge_base_dir())
+        info["kb_total"] = len(files)
+        info["kb_categories"] = len({str(f.get("category_path") or "未分类") for f in files})
+    except Exception:  # noqa: BLE001 - 知识库状态缺失不影响 MCP 状态主体
+        pass
+
+    info["config"] = {
+        "mcpServers": {
+            "bili-learn": {
+                "command": _sys.executable,
+                "args": ["-m", "mcp_server"],
+                "cwd": str(Path(BASE_DIR).resolve()),
+            }
+        }
+    }
+    return jsonify(info)
+
+
 @app.route('/api/kb/stats')
 def api_kb_stats():
     kb_dir = active_knowledge_base_dir()
@@ -8274,7 +8469,7 @@ def api_visual_note_status(bvid):
     cache_file = VISUAL_NOTE_CACHE_DIR / f"{bvid}.json"
     if cache_file.exists():
         try:
-            data = json.loads(cache_file.read_text(encoding='utf-8'))
+            data = json.loads(cache_file.read_text(encoding='utf-8-sig'))
             return jsonify(data)
         except Exception:
             pass
@@ -9197,7 +9392,7 @@ def api_action_video2web():
             cookies = None
             if COOKIE_FILE.exists():
                 try:
-                    cookies = _json.loads(COOKIE_FILE.read_text(encoding='utf-8'))
+                    cookies = _json.loads(COOKIE_FILE.read_text(encoding='utf-8-sig'))
                 except Exception:
                     cookies = None
             sys.path.insert(0, str(BASE_DIR))
@@ -9887,7 +10082,7 @@ def _custom_meta():
     _, mpath = _custom_paths()
     if mpath.exists():
         try:
-            meta = _json.loads(mpath.read_text(encoding='utf-8'))
+            meta = _json.loads(mpath.read_text(encoding='utf-8-sig'))
         except Exception:
             meta = {}
     else:
@@ -10921,7 +11116,7 @@ def _disclaimer_html():
 <title>免责声明 — B站 AI 管理系统</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
 <style>
 :root{color-scheme:light;--bg:#f7f7f7;--surface:#fff;--text:#0d0d0d;--muted:#777;--faint:#999;--border:#e6e6e6;--input:#f7f7f7;--shadow:0 4px 24px rgba(0,0,0,.06)}
 :root[data-theme="dark"]{color-scheme:dark;--bg:#0d0d0d;--surface:#161616;--text:#f5f5f5;--muted:#a3a3a3;--faint:#8a8a8a;--border:#303030;--input:#101010;--shadow:0 20px 60px rgba(0,0,0,.42)}
@@ -10929,6 +11124,11 @@ def _disclaimer_html():
 body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;background:#f7f7f7;color:#0d0d0d;display:flex;align-items:center;justify-content:center;min-height:100vh;-webkit-font-smoothing:antialiased;transition:background .55s cubic-bezier(.4,0,.2,1),color .55s cubic-bezier(.4,0,.2,1)}
 body.theme-flash::after{content:'';position:fixed;inset:0;z-index:99999;pointer-events:none;background:radial-gradient(circle at var(--fx-x,50%) var(--fx-y,50%),rgba(255,255,255,.85),rgba(255,255,255,0) 55%);opacity:0;animation:themeFlash .6s cubic-bezier(.4,0,.2,1) both}
 @keyframes themeFlash{0%{opacity:0}22%{opacity:1}60%{opacity:.55}100%{opacity:0}}
+/* ── 主题切换动画：View Transitions 圆形扩散（与主面板一致）── */
+::view-transition-old(root){animation:vtOldFade .18s linear both;mix-blend-mode:normal}
+::view-transition-new(root){animation:none!important;mix-blend-mode:normal}
+@keyframes vtOldFade{from{opacity:1}to{opacity:0}}
+.theme-switching *,.theme-switching *::before,.theme-switching *::after{transition:none!important}
 .card{background:#fff;border:1px solid #e6e6e6;border-radius:16px;padding:40px 36px;max-width:480px;width:90%;text-align:center;box-shadow:0 4px 24px rgba(0,0,0,.06)}
 .card .icon{font-size:36px;margin-bottom:16px}
 .card h2{color:#D14343;font-size:20px;font-weight:600;margin-bottom:8px;letter-spacing:-.3px}
@@ -10977,8 +11177,8 @@ body{background:var(--bg)!important;color:var(--text)!important}
 .card.lang-switching{opacity:0;transform:translateY(10px)}
 @media(max-width:480px){.top-actions{left:12px;bottom:14px}.lang-menu{left:12px;bottom:64px}}
 </style>
-<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
-<script>if(typeof lucide==='undefined'){document.write('<script src="/assets/js/lucide.js"><\/script>')}</script>
+<script src="/assets/js/lucide.js"></script>
+<script>if(typeof lucide==='undefined'){window.lucide={createIcons:function(){}}}</script>
 </head>
 <body>
 <div class="top-actions">
@@ -11036,7 +11236,33 @@ else{msg.textContent=T.fail;msg.className='msg err';btn.disabled=false;inp.class
 <script>if(window.lucide)lucide.createIcons({attrs:{'stroke-width':1.5}});</script>
 <script>
 function applyTheme(){var t='light';try{t=localStorage.getItem('panel_theme')||'light'}catch(e){}document.documentElement.setAttribute('data-theme',t);var b=document.getElementById('themeBtn');if(b)b.textContent=t==='dark'?'☀':'◐'}
-function toggleTheme(e){var t=document.documentElement.getAttribute('data-theme')==='dark'?'light':'dark';try{localStorage.setItem('panel_theme',t)}catch(e){}var x=50,y=50;if(e){x=(e.clientX/window.innerWidth)*100;y=(e.clientY/window.innerHeight)*100}document.body.style.setProperty('--fx-x',x+'%');document.body.style.setProperty('--fx-y',y+'%');document.body.classList.remove('theme-flash');void document.body.offsetWidth;document.body.classList.add('theme-flash');setTimeout(function(){document.body.classList.remove('theme-flash')},650);applyTheme()}
+function toggleTheme(e){
+var next=document.documentElement.getAttribute('data-theme')==='dark'?'light':'dark';
+var root=document.documentElement;
+var done=function(){root.classList.remove('theme-switching')};
+var apply=function(){root.classList.add('theme-switching');try{localStorage.setItem('panel_theme',next)}catch(err){}applyTheme()};
+var reduceMotion=window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var x=e?e.clientX:window.innerWidth/2,y=e?e.clientY:window.innerHeight/2;
+if(reduceMotion){apply();setTimeout(done,80);return}
+if(typeof document.startViewTransition==='function'){
+try{
+var vt=document.startViewTransition(apply);
+vt.ready.then(function(){
+var r=Math.hypot(Math.max(x,window.innerWidth-x),Math.max(y,window.innerHeight-y));
+document.documentElement.animate({clipPath:['circle(0px at '+x+'px '+y+'px)','circle('+r+'px at '+x+'px '+y+'px)']},{duration:420,easing:'cubic-bezier(.4,0,.2,1)',pseudoElement:'::view-transition-new(root)'});
+}).catch(function(){});
+vt.finished.then(done).catch(done);
+return
+}catch(err){done()}
+}
+apply();
+document.body.style.setProperty('--fx-x',(x/window.innerWidth*100)+'%');
+document.body.style.setProperty('--fx-y',(y/window.innerHeight*100)+'%');
+document.body.classList.remove('theme-flash');void document.body.offsetWidth;
+document.body.classList.add('theme-flash');
+setTimeout(function(){document.body.classList.remove('theme-flash')},500);
+requestAnimationFrame(function(){requestAnimationFrame(done)})
+}
 applyTheme();applyI18n();
 </script>
 </body>
@@ -11052,7 +11278,7 @@ def _setup_html():
 <title>首次设置 · 管理面板</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
 <style>
 :root{color-scheme:light;--bg:#f7f7f7;--surface:#fff;--text:#0d0d0d;--muted:#777;--faint:#999;--border:#e6e6e6;--input:#f7f7f7;--shadow:0 4px 24px rgba(0,0,0,.06)}
 :root[data-theme="dark"]{color-scheme:dark;--bg:#0d0d0d;--surface:#161616;--text:#f5f5f5;--muted:#a3a3a3;--faint:#8a8a8a;--border:#303030;--input:#101010;--shadow:0 20px 60px rgba(0,0,0,.42)}
@@ -11082,12 +11308,19 @@ body{background:var(--bg)!important;color:var(--text)!important}
 .inp-row input::placeholder,.fg input::placeholder,.fg select::placeholder{color:var(--faint)!important}
 .card h2{color:var(--text)!important}
 .theme-btn{position:fixed;left:18px;bottom:20px;width:40px;height:40px;border-radius:50%;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:17px;cursor:pointer;z-index:99}
+/* ── 主题切换动画：View Transitions 圆形扩散（与主面板一致）── */
+::view-transition-old(root){animation:vtOldFade .18s linear both;mix-blend-mode:normal}
+::view-transition-new(root){animation:none!important;mix-blend-mode:normal}
+@keyframes vtOldFade{from{opacity:1}to{opacity:0}}
+.theme-switching *,.theme-switching *::before,.theme-switching *::after{transition:none!important}
+body.theme-flash::after{content:'';position:fixed;inset:0;z-index:99999;pointer-events:none;background:radial-gradient(circle at var(--fx-x,50%) var(--fx-y,50%),rgba(255,255,255,.55),rgba(255,255,255,0) 55%);opacity:0;animation:themeFlash .45s cubic-bezier(.4,0,.2,1) both}
+@keyframes themeFlash{0%{opacity:0}22%{opacity:1}60%{opacity:.55}100%{opacity:0}}
 </style>
-<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
-<script>if(typeof lucide==='undefined'){document.write('<script src="/assets/js/lucide.js"><\/script>')}</script>
+<script src="/assets/js/lucide.js"></script>
+<script>if(typeof lucide==='undefined'){window.lucide={createIcons:function(){}}}</script>
 </head>
 <body>
-<button class="theme-btn" type="button" onclick="toggleTheme()" id="themeBtn" aria-label="切换暗色模式">◐</button>
+<button class="theme-btn" type="button" onclick="toggleTheme(event)" id="themeBtn" aria-label="切换暗色模式">◐</button>
 <div class="card">
 <div class="icon"><i data-lucide="lock"></i></div>
 <h2>首次设置</h2>
@@ -11148,7 +11381,33 @@ else{msg.textContent='\u2717 '+d.message;msg.className='msg err';btn.disabled=fa
 <script>if(window.lucide)lucide.createIcons({attrs:{'stroke-width':1.5}});</script>
 <script>
 function applyTheme(){var t='light';try{t=localStorage.getItem('panel_theme')||'light'}catch(e){}document.documentElement.setAttribute('data-theme',t);var b=document.getElementById('themeBtn');if(b)b.textContent=t==='dark'?'☀':'◐'}
-function toggleTheme(){var t=document.documentElement.getAttribute('data-theme')==='dark'?'light':'dark';try{localStorage.setItem('panel_theme',t)}catch(e){}applyTheme()}
+function toggleTheme(e){
+var next=document.documentElement.getAttribute('data-theme')==='dark'?'light':'dark';
+var root=document.documentElement;
+var done=function(){root.classList.remove('theme-switching')};
+var apply=function(){root.classList.add('theme-switching');try{localStorage.setItem('panel_theme',next)}catch(err){}applyTheme()};
+var reduceMotion=window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var x=e?e.clientX:window.innerWidth/2,y=e?e.clientY:window.innerHeight/2;
+if(reduceMotion){apply();setTimeout(done,80);return}
+if(typeof document.startViewTransition==='function'){
+try{
+var vt=document.startViewTransition(apply);
+vt.ready.then(function(){
+var r=Math.hypot(Math.max(x,window.innerWidth-x),Math.max(y,window.innerHeight-y));
+document.documentElement.animate({clipPath:['circle(0px at '+x+'px '+y+'px)','circle('+r+'px at '+x+'px '+y+'px)']},{duration:420,easing:'cubic-bezier(.4,0,.2,1)',pseudoElement:'::view-transition-new(root)'});
+}).catch(function(){});
+vt.finished.then(done).catch(done);
+return
+}catch(err){done()}
+}
+apply();
+document.body.style.setProperty('--fx-x',(x/window.innerWidth*100)+'%');
+document.body.style.setProperty('--fx-y',(y/window.innerHeight*100)+'%');
+document.body.classList.remove('theme-flash');void document.body.offsetWidth;
+document.body.classList.add('theme-flash');
+setTimeout(function(){document.body.classList.remove('theme-flash')},500);
+requestAnimationFrame(function(){requestAnimationFrame(done)})
+}
 applyTheme();
 </script>
 </body>
@@ -11164,12 +11423,17 @@ def _login_html():
 <title>登录 · 管理面板</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
 <style>
 :root{color-scheme:light;--bg:#f7f7f7;--surface:#fff;--text:#0d0d0d;--muted:#777;--faint:#999;--border:#e6e6e6;--input:#f7f7f7;--shadow:0 4px 24px rgba(0,0,0,.06)}
 :root[data-theme="dark"]{color-scheme:dark;--bg:#0d0d0d;--surface:#161616;--text:#f5f5f5;--muted:#a3a3a3;--faint:#8a8a8a;--border:#303030;--input:#101010;--shadow:0 20px 60px rgba(0,0,0,.42)}
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;background:var(--bg);color:var(--text);display:flex;align-items:center;justify-content:center;min-height:100vh;-webkit-font-smoothing:antialiased;transition:background .55s cubic-bezier(.4,0,.2,1),color .55s cubic-bezier(.4,0,.2,1)}
+/* ── 主题切换动画：View Transitions 圆形扩散（与主面板一致）── */
+::view-transition-old(root){animation:vtOldFade .18s linear both;mix-blend-mode:normal}
+::view-transition-new(root){animation:none!important;mix-blend-mode:normal}
+@keyframes vtOldFade{from{opacity:1}to{opacity:0}}
+.theme-switching *,.theme-switching *::before,.theme-switching *::after{transition:none!important}
 body.theme-flash::after{content:'';position:fixed;inset:0;z-index:99999;pointer-events:none;background:radial-gradient(circle at var(--fx-x,50%) var(--fx-y,50%),rgba(255,255,255,.85),rgba(255,255,255,0) 55%);opacity:0;animation:themeFlash .6s cubic-bezier(.4,0,.2,1) both}
 body.theme-flash .card,body.theme-flash .fg input,body.theme-flash .btn,body.theme-flash .recover a,body.theme-flash .msg{transition:background .55s cubic-bezier(.4,0,.2,1),border-color .55s cubic-bezier(.4,0,.2,1),color .55s cubic-bezier(.4,0,.2,1),box-shadow .55s cubic-bezier(.4,0,.2,1)}
 @keyframes themeFlash{0%{opacity:0}22%{opacity:1}60%{opacity:.55}100%{opacity:0}}
@@ -11205,8 +11469,8 @@ body.theme-flash .card,body.theme-flash .fg input,body.theme-flash .btn,body.the
 @media(max-width:480px){.top-actions{left:12px;bottom:14px}.lang-menu{left:12px;bottom:64px}}
 @keyframes shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-6px)}75%{transform:translateX(6px)}}
 </style>
-<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
-<script>if(typeof lucide==='undefined'){document.write('<script src="/assets/js/lucide.js"><\/script>')}</script>
+<script src="/assets/js/lucide.js"></script>
+<script>if(typeof lucide==='undefined'){window.lucide={createIcons:function(){}}}</script>
 </head>
 <body>
 <div class="top-actions">
@@ -11241,7 +11505,33 @@ document.addEventListener('click',function(e){var m=document.getElementById('lan
 var inpU=document.getElementById('loginUser'),inpP=document.getElementById('loginPass');
 var btn=document.getElementById('loginBtn'),msg=document.getElementById('msg');
 function applyTheme(){var t='light';try{t=localStorage.getItem('panel_theme')||'light'}catch(e){}document.documentElement.setAttribute('data-theme',t);document.getElementById('themeBtn').textContent=t==='dark'?'☀':'◐'}
-function toggleTheme(e){var t=document.documentElement.getAttribute('data-theme')==='dark'?'light':'dark';try{localStorage.setItem('panel_theme',t)}catch(e){}var x=50,y=50;if(e){x=(e.clientX/window.innerWidth)*100;y=(e.clientY/window.innerHeight)*100}document.body.style.setProperty('--fx-x',x+'%');document.body.style.setProperty('--fx-y',y+'%');document.body.classList.remove('theme-flash');void document.body.offsetWidth;document.body.classList.add('theme-flash');setTimeout(function(){document.body.classList.remove('theme-flash')},650);applyTheme()}
+function toggleTheme(e){
+var next=document.documentElement.getAttribute('data-theme')==='dark'?'light':'dark';
+var root=document.documentElement;
+var done=function(){root.classList.remove('theme-switching')};
+var apply=function(){root.classList.add('theme-switching');try{localStorage.setItem('panel_theme',next)}catch(err){}applyTheme()};
+var reduceMotion=window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var x=e?e.clientX:window.innerWidth/2,y=e?e.clientY:window.innerHeight/2;
+if(reduceMotion){apply();setTimeout(done,80);return}
+if(typeof document.startViewTransition==='function'){
+try{
+var vt=document.startViewTransition(apply);
+vt.ready.then(function(){
+var r=Math.hypot(Math.max(x,window.innerWidth-x),Math.max(y,window.innerHeight-y));
+document.documentElement.animate({clipPath:['circle(0px at '+x+'px '+y+'px)','circle('+r+'px at '+x+'px '+y+'px)']},{duration:420,easing:'cubic-bezier(.4,0,.2,1)',pseudoElement:'::view-transition-new(root)'});
+}).catch(function(){});
+vt.finished.then(done).catch(done);
+return
+}catch(err){done()}
+}
+apply();
+document.body.style.setProperty('--fx-x',(x/window.innerWidth*100)+'%');
+document.body.style.setProperty('--fx-y',(y/window.innerHeight*100)+'%');
+document.body.classList.remove('theme-flash');void document.body.offsetWidth;
+document.body.classList.add('theme-flash');
+setTimeout(function(){document.body.classList.remove('theme-flash')},500);
+requestAnimationFrame(function(){requestAnimationFrame(done)})
+}
 applyTheme();applyI18n();
 [inpU,inpP].forEach(function(el){el.addEventListener('keydown',function(e){if(e.key==='Enter')doLogin()})});
 async function doLogin(){
@@ -11268,7 +11558,7 @@ else{msg.textContent=T.fail+d.message;msg.className='msg err';btn.disabled=false
 
 
 def _forgot_password_html():
-    return r"""<!DOCTYPE html>
+    html = r"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>忘记密码 · 管理面板</title><style>
 :root{color-scheme:light;--bg:#f7f7f7;--surface:#fff;--text:#0d0d0d;--muted:#777;--faint:#999;--border:#e6e6e6;--input:#f7f7f7;--shadow:0 4px 24px rgba(0,0,0,.06)}
@@ -11289,34 +11579,81 @@ body{background:var(--bg)!important;color:var(--text)!important}
 .tab-btn.active{background:#D97757!important;border-color:#D97757!important;color:#fff!important}
 .question{background:var(--input)!important;color:var(--text)!important}
 .theme-btn{position:fixed;left:18px;bottom:20px;width:40px;height:40px;border-radius:50%;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:17px;cursor:pointer;z-index:99}
-</style><script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
-<script>if(typeof lucide==='undefined'){document.write('<script src="/assets/js/lucide.js"><\/script>')}</script>
+/* ── 主题切换动画：View Transitions 圆形扩散（与主面板一致）── */
+::view-transition-old(root){animation:vtOldFade .18s linear both;mix-blend-mode:normal}
+::view-transition-new(root){animation:none!important;mix-blend-mode:normal}
+@keyframes vtOldFade{from{opacity:1}to{opacity:0}}
+.theme-switching *,.theme-switching *::before,.theme-switching *::after{transition:none!important}
+body.theme-flash::after{content:'';position:fixed;inset:0;z-index:99999;pointer-events:none;background:radial-gradient(circle at var(--fx-x,50%) var(--fx-y,50%),rgba(255,255,255,.55),rgba(255,255,255,0) 55%);opacity:0;animation:themeFlash .45s cubic-bezier(.4,0,.2,1) both}
+@keyframes themeFlash{0%{opacity:0}22%{opacity:1}60%{opacity:.55}100%{opacity:0}}
+.recovery-tip{margin-top:18px;padding:14px;border:1px dashed var(--border);border-radius:8px;text-align:left;background:var(--input)!important}
+.rt-title{font-size:13px;font-weight:600;color:var(--text)!important;margin-bottom:8px}
+.recovery-tip p{font-size:12px;color:var(--muted)!important;margin:0 0 6px;line-height:1.6}
+.rt-path{display:flex;align-items:center;gap:6px;margin-bottom:8px}
+.rt-path code{flex:1;min-width:0;font-size:11.5px;word-break:break-all;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:6px 8px;color:var(--text)!important;font-family:Consolas,monospace}
+.rt-copy{white-space:nowrap;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);font-size:12px;cursor:pointer;font-family:inherit}
+.rt-copy:hover{border-color:#D97757;color:#D97757}
+.rt-use b{color:var(--text)!important}
+</style><script src="/assets/js/lucide.js"></script>
+<script>if(typeof lucide==='undefined'){window.lucide={createIcons:function(){}}}</script>
 </head><body>
-<button class="theme-btn" type="button" onclick="toggleTheme()" id="themeBtn" aria-label="切换暗色模式">◐</button><div class="card"><h2>找回网页端密码</h2>
+<button class="theme-btn" type="button" onclick="toggleTheme(event)" id="themeBtn" aria-label="切换暗色模式">◐</button><div class="card"><h2>找回网页端密码</h2>
 <div class="tabs"><button type="button" class="tab-btn active" id="tabBtnQ" onclick="switchTab('q')">密保问题</button><button type="button" class="tab-btn" id="tabBtnE" onclick="switchTab('e')">邮箱验证</button></div>
-<div id="paneQ"><div id="lookupQ"><div class="fg"><label>用户名</label><input id="username" autocomplete="username"></div><button class="btn" onclick="loadQuestion()">下一步</button></div>
+<div id="paneQ"><div id="lookupQ"><div class="fg"><label>用户名</label><input id="username" placeholder="输入用户名" autocomplete="username"></div><button class="btn" onclick="loadQuestion()">下一步</button></div>
 <div id="resetQ" style="display:none"><div class="question" id="question"></div><div class="fg"><label>密保答案</label><input id="answer" type="password" autocomplete="off"></div><div class="fg"><label>新密码</label><input id="password" type="password" autocomplete="new-password"></div><div class="fg"><label>确认新密码</label><input id="password2" type="password" autocomplete="new-password"></div><button class="btn" onclick="resetPassword()">重置密码</button></div></div>
-<div id="paneE" style="display:none"><div id="lookupE"><div class="fg"><label>用户名</label><input id="usernameE" autocomplete="username"></div><button class="btn" onclick="lookupEmail()">下一步</button><p class="hint">需要先在“我的 → 邮箱找回”配置过邮箱。</p></div>
+<div id="paneE" style="display:none"><div id="lookupE"><div class="fg"><label>邮箱或用户名</label><input id="usernameE" placeholder="输入找回邮箱或用户名" autocomplete="off"></div><button class="btn" onclick="lookupEmail()">下一步</button><p class="hint">需要先在“我的 → 邮箱找回”配置过邮箱。</p></div>
 <div id="emailPane" style="display:none"><div class="fg"><label>选择接收验证码的邮箱</label><div id="emailOpts"></div></div><div class="fg"><label>验证码</label><div class="code-row"><input id="emailCode" placeholder="输入收到的验证码" autocomplete="one-time-code"><button type="button" class="btn" id="sendCodeBtn" onclick="sendEmailCode()">发送验证码</button></div></div><div class="fg"><label>新密码</label><input id="passwordE" type="password" autocomplete="new-password"></div><div class="fg"><label>确认新密码</label><input id="passwordE2" type="password" autocomplete="new-password"></div><button class="btn" onclick="resetPasswordEmail()">重置密码</button></div></div>
-<div class="msg" id="msg"></div><a class="back" href="/login">返回登录</a></div><script>
+<div class="msg" id="msg"></div><div class="recovery-tip"><div class="rt-title">找回不了？直接用「一次性恢复码」登录</div><p>用记事本打开这个文件（随软件安装自动生成）：</p><div class="rt-path"><code id="recPath"></code><button type="button" class="rt-copy" onclick="copyRecPath()">复制路径</button></div><p class="rt-use">把文件里的「一次性恢复码」<b>直接填到登录页的密码框</b>（用户名不变）即可登录，无需重置密码。登录成功后恢复码会自动更新，旧码立即失效。</p></div><a class="back" href="/login">返回登录</a></div><script>
 var msg=document.getElementById('msg');
+var _RECOVERY_FILE=__RECOVERY_FILE_PATH__;document.getElementById('recPath').textContent=_RECOVERY_FILE;
+function copyRecPath(){var btn=document.querySelector('.rt-copy');try{navigator.clipboard.writeText(_RECOVERY_FILE)}catch(e){}btn.textContent='已复制';setTimeout(function(){btn.textContent='复制路径'},1500)}
 function el(id){return document.getElementById(id)}
 function showMsg(t,c){msg.textContent=t;msg.className='msg '+c}
 function switchTab(t){el('tabBtnQ').className='tab-btn'+(t==='q'?' active':'');el('tabBtnE').className='tab-btn'+(t==='e'?' active':'');el('paneQ').style.display=t==='q'?'block':'none';el('paneE').style.display=t==='e'?'block':'none';showMsg('','')}
 async function loadQuestion(){var u=el('username').value.trim();if(!u){showMsg('请输入用户名','err');return}var r=await fetch('/api/auth/recovery-question',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u})});var d=await r.json();if(!d.ok){showMsg(d.message,'err');return}el('question').textContent=d.question;el('lookupQ').style.display='none';el('resetQ').style.display='block';showMsg('','')}
 async function resetPassword(){var p=el('password').value,p2=el('password2').value;if(p.length<4){showMsg('新密码至少4位','err');return}if(p!==p2){showMsg('两次输入的密码不一致','err');return}var r=await fetch('/api/auth/reset-password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:el('username').value.trim(),answer:el('answer').value,password:p})});var d=await r.json();showMsg(d.message,d.ok?'ok':'err');if(d.ok)setTimeout(function(){location.href='/'},800)}
-async function lookupEmail(){var u=el('usernameE').value.trim();if(!u){showMsg('请输入用户名','err');return}var r=await fetch('/api/auth/email-status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u})});var d=await r.json();if(!d.ok){showMsg(d.message,'err');return}if(!d.has_primary&&!d.has_backup){showMsg('该账号未配置找回邮箱，请改用“密保问题”方式','err');return}var h='';if(d.has_primary)h+='<label class="email-opt"><input type="radio" name="emailTarget" value="primary" checked> '+d.primary_masked+'（主邮箱）</label>';if(d.has_backup)h+='<label class="email-opt"><input type="radio" name="emailTarget" value="backup"'+(d.has_primary?'':' checked')+'> '+d.backup_masked+'（备用邮箱）</label>';el('emailOpts').innerHTML=h;el('lookupE').style.display='none';el('emailPane').style.display='block';showMsg('','')}
+async function lookupEmail(){var u=el('usernameE').value.trim();if(!u){showMsg('请输入邮箱或用户名','err');return}var r=await fetch('/api/auth/email-status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u})});var d=await r.json();if(!d.ok){showMsg(d.message,'err');return}if(!d.has_primary&&!d.has_backup){showMsg('该账号未配置找回邮箱，请改用“密保问题”方式','err');return}var h='';if(d.has_primary)h+='<label class="email-opt"><input type="radio" name="emailTarget" value="primary" checked> '+d.primary_masked+'（主邮箱）</label>';if(d.has_backup)h+='<label class="email-opt"><input type="radio" name="emailTarget" value="backup"'+(d.has_primary?'':' checked')+'> '+d.backup_masked+'（备用邮箱）</label>';el('emailOpts').innerHTML=h;el('lookupE').style.display='none';el('emailPane').style.display='block';showMsg('','')}
 function emailTarget(){var r=document.querySelector('input[name=emailTarget]:checked');return r?r.value:'primary'}
-async function sendEmailCode(){var u=el('usernameE').value.trim(),btn=el('sendCodeBtn');if(!u){showMsg('请输入用户名','err');return}if(btn.disabled)return;btn.disabled=true;btn.textContent='发送中...';try{var r=await fetch('/api/auth/email/send-code',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,target:emailTarget()})});var d=await r.json();showMsg(d.message,d.ok?'ok':'err');if(d.ok){el('emailCode').focus();var s=60;btn.textContent=s+'s';var iv=setInterval(function(){s--;if(s<=0){clearInterval(iv);btn.disabled=false;btn.textContent='重新发送'}else btn.textContent=s+'s'},1000);return}}catch(e){showMsg('发送失败，请重试','err')}btn.disabled=false;btn.textContent='发送验证码'}
+async function sendEmailCode(){var u=el('usernameE').value.trim(),btn=el('sendCodeBtn');if(!u){showMsg('请输入邮箱或用户名','err');return}if(btn.disabled)return;btn.disabled=true;btn.textContent='发送中...';try{var r=await fetch('/api/auth/email/send-code',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,target:emailTarget()})});var d=await r.json();showMsg(d.message,d.ok?'ok':'err');if(d.ok){el('emailCode').focus();var s=60;btn.textContent=s+'s';var iv=setInterval(function(){s--;if(s<=0){clearInterval(iv);btn.disabled=false;btn.textContent='重新发送'}else btn.textContent=s+'s'},1000);return}}catch(e){showMsg('发送失败，请重试','err')}btn.disabled=false;btn.textContent='发送验证码'}
 async function resetPasswordEmail(){var p=el('passwordE').value,p2=el('passwordE2').value,c=el('emailCode').value.trim();if(!c){showMsg('请输入邮箱验证码','err');return}if(p.length<4){showMsg('新密码至少4位','err');return}if(p!==p2){showMsg('两次输入的密码不一致','err');return}var r=await fetch('/api/auth/reset-password-email',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:el('usernameE').value.trim(),target:emailTarget(),code:c,password:p})});var d=await r.json();showMsg(d.message,d.ok?'ok':'err');if(d.ok)setTimeout(function(){location.href='/'},800)}
 </script>
 <script>if(window.lucide)lucide.createIcons({attrs:{'stroke-width':1.5}});</script>
 <script>
 function applyTheme(){var t='light';try{t=localStorage.getItem('panel_theme')||'light'}catch(e){}document.documentElement.setAttribute('data-theme',t);var b=document.getElementById('themeBtn');if(b)b.textContent=t==='dark'?'☀':'◐'}
-function toggleTheme(){var t=document.documentElement.getAttribute('data-theme')==='dark'?'light':'dark';try{localStorage.setItem('panel_theme',t)}catch(e){}applyTheme()}
+function toggleTheme(e){
+var next=document.documentElement.getAttribute('data-theme')==='dark'?'light':'dark';
+var root=document.documentElement;
+var done=function(){root.classList.remove('theme-switching')};
+var apply=function(){root.classList.add('theme-switching');try{localStorage.setItem('panel_theme',next)}catch(err){}applyTheme()};
+var reduceMotion=window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var x=e?e.clientX:window.innerWidth/2,y=e?e.clientY:window.innerHeight/2;
+if(reduceMotion){apply();setTimeout(done,80);return}
+if(typeof document.startViewTransition==='function'){
+try{
+var vt=document.startViewTransition(apply);
+vt.ready.then(function(){
+var r=Math.hypot(Math.max(x,window.innerWidth-x),Math.max(y,window.innerHeight-y));
+document.documentElement.animate({clipPath:['circle(0px at '+x+'px '+y+'px)','circle('+r+'px at '+x+'px '+y+'px)']},{duration:420,easing:'cubic-bezier(.4,0,.2,1)',pseudoElement:'::view-transition-new(root)'});
+}).catch(function(){});
+vt.finished.then(done).catch(done);
+return
+}catch(err){done()}
+}
+apply();
+document.body.style.setProperty('--fx-x',(x/window.innerWidth*100)+'%');
+document.body.style.setProperty('--fx-y',(y/window.innerHeight*100)+'%');
+document.body.classList.remove('theme-flash');void document.body.offsetWidth;
+document.body.classList.add('theme-flash');
+setTimeout(function(){document.body.classList.remove('theme-flash')},500);
+requestAnimationFrame(function(){requestAnimationFrame(done)})
+}
 applyTheme();
 </script>
 </body></html>"""
+    # 运行时注入一次性恢复码文件的真实路径（C 盘完整路径，告知用户直接填入即可登录）
+    return html.replace(
+        '__RECOVERY_FILE_PATH__',
+        json.dumps(str(_recovery_file_path()), ensure_ascii=False))
 
 
 def _account_security_html():
@@ -11508,6 +11845,20 @@ def api_auth_reset_password():
     return jsonify(dict(ok=True, message=message))
 
 
+def _match_panel_account(web_cfg: dict, value: str) -> bool:
+    """忘记密码流程：按 用户名 / 主邮箱 / 备用邮箱 识别账号（大小写不敏感）。
+
+    忘记密码页“邮箱验证”页签允许直接填找回邮箱，这里统一匹配三种标识。
+    """
+    v = (value or '').strip().lower()
+    if not v:
+        return False
+    if v == str(web_cfg.get('username') or '').strip().lower():
+        return True
+    return any(v == str(web_cfg.get(k) or '').strip().lower()
+               for k in ('email', 'email_backup'))
+
+
 @app.route('/api/auth/email-status', methods=['POST'])
 def api_auth_email_status():
     # 查询账号是否配置了找回邮箱（脱敏展示），供忘记密码页选择接收方式
@@ -11515,9 +11866,9 @@ def api_auth_email_status():
     username = (data.get('username') or '').strip()
     config = read_json(CONFIG_FILE, {})
     web_cfg = config.get('web', {})
-    if username != web_cfg.get('username'):
+    if not _match_panel_account(web_cfg, username):
         time.sleep(0.5)
-        return jsonify(dict(ok=False, message='账号不存在'))
+        return jsonify(dict(ok=False, message='账号或邮箱不存在'))
     primary = str(web_cfg.get('email') or '').strip()
     backup = str(web_cfg.get('email_backup') or '').strip()
     return jsonify(dict(
@@ -11541,9 +11892,9 @@ def api_auth_email_send_code():
     config = read_json(CONFIG_FILE, {})
     web_cfg = config.get('web', {})
     if not email_addr:
-        if username != web_cfg.get('username'):
+        if not _match_panel_account(web_cfg, username):
             time.sleep(0.5)
-            return jsonify(dict(ok=False, message='账号不存在或未配置邮箱找回'))
+            return jsonify(dict(ok=False, message='账号或邮箱不存在，或未配置邮箱找回'))
         email_addr = str((web_cfg.get('email_backup') if target == 'backup' else web_cfg.get('email')) or '').strip()
         if not email_addr:
             return jsonify(dict(ok=False, message='该账号未配置' + ('备用' if target == 'backup' else '') + '邮箱，无法发送验证码'))
@@ -11581,19 +11932,20 @@ def api_auth_reset_password_email():
     config = read_json(CONFIG_FILE, {})
     web_cfg = config.get('web', {})
     email_addr = str((web_cfg.get('email_backup') if target == 'backup' else web_cfg.get('email')) or '').strip()
-    if username != web_cfg.get('username') or not email_addr:
+    if not _match_panel_account(web_cfg, username) or not email_addr:
         time.sleep(0.8)
-        return jsonify(dict(ok=False, message='账号不存在或未配置邮箱找回'))
+        return jsonify(dict(ok=False, message='账号或邮箱不存在，或未配置邮箱找回'))
+    real_username = str(web_cfg.get('username') or '').strip()  # 输入可能是邮箱，落盘必须用真实用户名
     ok_code, msg_code = _email_verify_code(email_addr, code)
     if not ok_code:
         return jsonify(dict(ok=False, message=msg_code))
     web_cfg['password'] = _hash_password(password)
-    rotated = _rotate_recovery_code(config, username)
+    rotated = _rotate_recovery_code(config, real_username)
     session['disclaimer_agreed'] = True
     session['panel_authenticated'] = True
     with _PASSWORD_RESET_LOCK:
         _PASSWORD_RESET_ATTEMPTS.pop(client_key, None)
-    log_line(f"面板密码通过邮箱验证码重置，用户: {username}")
+    log_line(f"面板密码通过邮箱验证码重置，用户: {real_username}")
     message = '密码已重置' if rotated else '密码已重置，但本地恢复码更新失败'
     return jsonify(dict(ok=True, message=message))
 
@@ -12413,6 +12765,12 @@ def _check_auth():
     _health_paths = ('/api/health', '/deploy_status', '/api/asr/status')
     if request.path in _health_paths:
         return None
+    # 0.5 前端公共库本地回退（lucide / chart.js）——免登录放行。
+    # 免责声明页、登录页、首次设置页、找回密码页与项目介绍弹窗都引用这些脚本；
+    # 若被鉴权 302 到 /login，浏览器会把登录页 HTML 当作 JS 解析而静默失败，
+    # 图标库缺失会让页面初始化中断、全部按钮无反应。这些是公开前端库，无敏感数据。
+    if request.path.startswith('/assets/'):
+        return None
 
     # 1. Every browser session must explicitly acknowledge the disclaimer.
     # BILI_DISCLAIMER_SKIP is only for the terminal launcher prompt; it must
@@ -12794,7 +13152,7 @@ def api_dm_system_up_assistant():
     records = []
     if follow_log.exists():
         try:
-            raw = json.loads(follow_log.read_text(encoding='utf-8'))
+            raw = json.loads(follow_log.read_text(encoding='utf-8-sig'))
             records = raw if isinstance(raw, list) else []
         except Exception:
             records = []
@@ -12802,7 +13160,7 @@ def api_dm_system_up_assistant():
     ups = {}
     if mem_file.exists():
         try:
-            mem = json.loads(mem_file.read_text(encoding='utf-8'))
+            mem = json.loads(mem_file.read_text(encoding='utf-8-sig'))
             ups = mem.get('known_ups', {}) if isinstance(mem, dict) else {}
         except Exception:
             ups = {}
@@ -13142,7 +13500,7 @@ def api_skills():
         skills_file = DATA_DIR / "skills.json"
         if not skills_file.exists(): return jsonify(ok=True, skills=[])
         import json as _json
-        return jsonify(ok=True, skills=_json.loads(skills_file.read_text(encoding="utf-8")))
+        return jsonify(ok=True, skills=_json.loads(skills_file.read_text(encoding="utf-8-sig")))
     except Exception as e:
         return jsonify(ok=False, message=str(e)), 500
 
@@ -13152,7 +13510,7 @@ def api_evolution():
         evo_file = DATA_DIR / "evolution_log.json"
         if not evo_file.exists(): return jsonify(ok=True, logs=[], mood={})
         import json as _json
-        data = _json.loads(evo_file.read_text(encoding="utf-8"))
+        data = _json.loads(evo_file.read_text(encoding="utf-8-sig"))
         return jsonify(ok=True, logs=data.get("logs", []), mood=data.get("mood", {}))
     except Exception as e:
         return jsonify(ok=False, message=str(e)), 500

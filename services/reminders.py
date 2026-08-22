@@ -20,7 +20,7 @@ def _path(data_dir=None) -> Path:
 
 def _read(data_dir=None) -> list[dict]:
     try:
-        rows = json.loads(_path(data_dir).read_text(encoding="utf-8"))
+        rows = json.loads(_path(data_dir).read_text(encoding="utf-8-sig"))
         return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
     except (OSError, json.JSONDecodeError):
         return []

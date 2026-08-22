@@ -7,7 +7,7 @@ class BrainHistoryMixin:
     def _load_history_videos(self):
         if os.path.exists(HISTORY_VIDEOS_FILE):
             try:
-                with open(HISTORY_VIDEOS_FILE, 'r', encoding='utf-8') as f:
+                with open(HISTORY_VIDEOS_FILE, 'r', encoding='utf-8-sig') as f:
                     data = json.load(f)
                     data.setdefault("videos", [])
                     return data

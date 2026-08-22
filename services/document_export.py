@@ -27,7 +27,7 @@ def _read_doc_cfg() -> dict:
     try:
         cfg_path = Path(CONFIG_FILE)
         if cfg_path.exists():
-            with open(cfg_path, "r", encoding="utf-8") as f:
+            with open(cfg_path, "r", encoding="utf-8-sig") as f:
                 return json.load(f).get("document_export", {}) or {}
     except Exception:
         pass

@@ -42,7 +42,7 @@ def _load_bili_cookies() -> dict:
     cookie_file = DATA_DIR / "bilibili_cookies.json"
     if cookie_file.exists():
         try:
-            with open(cookie_file, 'r', encoding='utf-8') as f:
+            with open(cookie_file, 'r', encoding='utf-8-sig') as f:
                 return json.load(f)
         except Exception:
             pass

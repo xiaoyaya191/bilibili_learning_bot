@@ -4,6 +4,7 @@
 
 ### Added
 
+- True Agent mode: an autonomous Agent Loop where the LLM plans, calls 17 built-in tools (search, watch, analyze, archive, DM, schedule...), reflects on results, and self-terminates; coexists with the classic Pipeline, with full session history in the web panel.
 - Favorability system: per-user relationship scores tracked across comments, DMs, and follows, with AI-driven adjustments, manual panel controls, and a default-off feature switch.
 - AI Skill Bank: videos are distilled into reusable skill cards on archive, injected into Agent DM replies by relevance, and fully manageable (CRUD) from the web panel.
 - Segmented AI DM replies: the bot can first acknowledge ("let me watch it"), then return with a real summary after processing.
@@ -11,15 +12,26 @@
 - Learning mini-goals: AI auto-setting plus manual CRUD and progress tracking.
 - Email-based password recovery via verification codes, first-run email setup wizard (skippable), backup email support, and profile email management.
 - Custom web panel port and an optional hide-system-tray setting (tray shown by default).
+- New-user tutorial now opens with a "View project introduction" step (2-minute illustrated overview, skippable or viewable directly).
+- Circular-reveal (View Transitions) theme-switch animation on all auth pages (disclaimer / first-run setup / login / forgot-password), matching the main panel.
 
 ### Fixed
 
+- Linux startup crash `ModuleNotFoundError: No module named 'msvcrt'` (#25): platform-conditional file locking (msvcrt on Windows, fcntl on Linux/Termux) in the private-message manager.
+- QR login "登录凭据不完整": incomplete callback cookies are now auto-retried 3x via callback redirect before failing, and the account profile is warmed in the background right after login.
+- "账号资料暂时无法同步": nav fetch retries once on transient failure and the failure cache TTL dropped 60s→20s so manual re-check recovers faster.
+- Files saved as UTF-8 with BOM (Notepad/PowerShell default) no longer break config/cookie/history loading — 141 JSON read points now use BOM-tolerant decoding.
+- Bot started from the web panel no longer hangs forever in the terminal QR wizard when Bilibili credentials are missing; it exits immediately with a clear message.
+- Expired Bilibili cookies can no longer launch a "zombie run" (AI analysis burning tokens while every interaction fails -101): start now verifies credentials against the nav API first.
 - Bilibili API Brotli encoding failures ("Can not decode content-encoding: br") via a three-layer Accept-Encoding and decode fallback in `utils/bili_compat.py`.
 - Duplicate system tray icons through a named-mutex single-owner guard.
 - Six memory-system bugs: AI-side memories could not really be deleted or edited from the panel, profiles resurrected after deletion, permanent memories were silently dropped by the 1000-entry trim, search results were polluted by unfiltered AI memories, and duplicate deletes reported fake success.
 - Follow-action attribute-8 false failure detection (risk-control verdict now verified with delay and retry).
 - Watch-history re-fetch that stopped working for some entries.
 - All partition "check status" and "refresh" buttons now show loading animation and toast feedback.
+- Web panel "all buttons unresponsive": two conflicting global click handlers formed a death loop (every button only spun, `onclick` never fired); loading states are now managed by each handler itself.
+- New users never saw the onboarding tutorial: the server-side onboarding state is now authoritative, so residual browser localStorage flags can no longer hide it.
+- Auth pages silently broken when CDN is unreachable: local `/assets/` copies of lucide/Chart.js now load first and are exempt from auth redirects (a 302-to-login HTML used to kill JS parsing and freeze every button).
 
 ### Optimized
 

@@ -25,7 +25,8 @@ WEBSITE="https://bxya.app/"
 GROUP_NUMBER="1056941856"
 GITHUB_URL="https://github.com/xiaoyaya191/bilibili_learning_bot"
 VERSION="v3.1.4"
-ZIP_URL="https://github.com/xiaoyaya191/bilibili_learning_bot/archive/refs/tags/${VERSION}.zip"
+# 始终安装 main 分支最新源码（不再锁死 tag）
+ZIP_URL="https://github.com/xiaoyaya191/bilibili_learning_bot/archive/refs/heads/main.zip"
 
 if [ -f "$(pwd)/web_panel.py" ]; then
     INSTALL_DIR="$(pwd)"
@@ -226,7 +227,7 @@ if [ -d "$INSTALL_DIR" ] && [ -f "$INSTALL_DIR/web_panel.py" ]; then
     cd "$INSTALL_DIR"
     print_info "当前目录: $(pwd)"
 else
-    print_step "下载稳定版源码 version ${VERSION}"
+    print_step "下载最新版源码（main 分支）"
     zip_file="$HOME/${VERSION}.zip"
     if [ -d "$INSTALL_DIR" ]; then
         rm -rf "$INSTALL_DIR"
@@ -244,7 +245,7 @@ else
         print_error "解压失败了"
     fi
     rm -f "$zip_file"
-    extract_dir="$HOME/bilibili_learning_bot-${VERSION#v}"
+    extract_dir="$HOME/bilibili_learning_bot-main"
     if [ -d "$extract_dir" ]; then
         mv "$extract_dir" "$INSTALL_DIR"
         print_success "解压成功"

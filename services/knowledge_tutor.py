@@ -82,7 +82,7 @@ def scan_md_files(kb_dir: str | Path | None = None) -> list[dict[str, Any]]:
             # 读取 UP主 信息
             up_name = ""
             try:
-                with open(fpath, 'r', encoding='utf-8') as f:
+                with open(fpath, 'r', encoding='utf-8-sig') as f:
                     head = f.read(800)
                     up_m = re.search(r'\*\*UP主\*\*:\s*(.+)', head)
                     if up_m:
@@ -91,6 +91,10 @@ def scan_md_files(kb_dir: str | Path | None = None) -> list[dict[str, Any]]:
                 pass
 
             size_kb = round(os.path.getsize(fpath) / 1024, 1)
+            try:
+                mtime = os.path.getmtime(fpath)
+            except OSError:
+                mtime = 0.0
             results.append({
                 "bvid": bvid,
                 "title": title,
@@ -99,6 +103,7 @@ def scan_md_files(kb_dir: str | Path | None = None) -> list[dict[str, Any]]:
                 "up_name": up_name,
                 "category_path": category_path,
                 "size_kb": size_kb,
+                "mtime": mtime,
             })
 
     results.sort(key=lambda x: (x['category_path'], x['title']))

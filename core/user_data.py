@@ -24,7 +24,7 @@ def _configured_user_data_dir() -> Path:
     default = _default_user_data_dir()
     pointer = default / "Data" / "storage_location.json"
     try:
-        data = json.loads(pointer.read_text(encoding="utf-8"))
+        data = json.loads(pointer.read_text(encoding="utf-8-sig"))
         target = str(data.get("path") or "").strip()
         if target:
             candidate = Path(target).expanduser().resolve()
@@ -100,8 +100,8 @@ def _copy_missing(source: Path, destination: Path) -> None:
 def _merge_legacy_api_settings(source: Path, destination: Path) -> None:
     """Preserve a local user's API setup when moving to LocalAppData."""
     try:
-        old_config = json.loads(source.read_text(encoding="utf-8"))
-        new_config = json.loads(destination.read_text(encoding="utf-8")) if destination.exists() else {}
+        old_config = json.loads(source.read_text(encoding="utf-8-sig"))
+        new_config = json.loads(destination.read_text(encoding="utf-8-sig")) if destination.exists() else {}
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return
     old_api = old_config.get("api") if isinstance(old_config, dict) else None

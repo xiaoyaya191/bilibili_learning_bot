@@ -38,7 +38,7 @@ class KnowledgeBaseClassifier:
     def _load_metadata(self):
         if os.path.exists(KB_METADATA_FILE):
             try:
-                with open(KB_METADATA_FILE, 'r', encoding='utf-8') as f:
+                with open(KB_METADATA_FILE, 'r', encoding='utf-8-sig') as f:
                     return json.load(f)
             except (OSError, json.JSONDecodeError) as e:
                 log(f'加载JSON文件失败: {e}', 'DEBUG')

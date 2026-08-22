@@ -27,7 +27,7 @@ class ResearchArchive:
         if not self.path.exists():
             return {"schema_version": 1, "projects": [], "records": []}
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
+            data = json.loads(self.path.read_text(encoding="utf-8-sig"))
             data.setdefault("projects", [])
             data.setdefault("records", [])
             return data

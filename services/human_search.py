@@ -117,7 +117,7 @@ def _deep_merge(target: dict, patch: dict) -> dict:
 def _load_json(path: Path, default: Any = None) -> Any:
     try:
         if path.exists():
-            return json.loads(path.read_text(encoding="utf-8"))
+            return json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception:
         pass
     return default

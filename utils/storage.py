@@ -55,7 +55,9 @@ class JsonStore:
         with self._lock:
             try:
                 if self._path.exists():
-                    return json.loads(self._path.read_text(encoding="utf-8"))
+                    # utf-8-sig：兼容带 BOM 的文件（记事本/PowerShell 默认 UTF-8 BOM），
+                    # 无 BOM 文件同样可读，避免用户手改配置后静默丢失。
+                    return json.loads(self._path.read_text(encoding="utf-8-sig"))
             except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
                 import sys
                 print(f"[JSON] 读取失败 {self._path.name}: {e}", file=sys.stderr, flush=True)

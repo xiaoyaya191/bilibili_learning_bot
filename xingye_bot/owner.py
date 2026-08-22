@@ -154,7 +154,7 @@ class OwnerRecognizer:
         try:
             if path.exists():
                 import json
-                return json.loads(path.read_text(encoding="utf-8"))
+                return json.loads(path.read_text(encoding="utf-8-sig"))
         except Exception as e:
             print(f"[owner] JSON读取失败 {path}: {e}")
         return {}

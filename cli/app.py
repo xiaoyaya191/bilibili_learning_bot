@@ -807,7 +807,7 @@ AUTO_RECLASSIFY_CLEAN_EMPTY = config.get("knowledge", {}).get("auto_reclassify_c
 def _load_json_file(path, default):
     if os.path.exists(path):
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, "r", encoding="utf-8-sig") as f:
                 return json.load(f)
         except Exception as e:
             log(f"[WARN] JSON加载失败 {path}: {e}", "WARN")
@@ -1587,7 +1587,7 @@ async def _mindmap_from_video_input(cfg):
     cookies = None
     if os.path.exists(COOKIE_FILE):
         try:
-            with open(COOKIE_FILE, 'r', encoding='utf-8') as f:
+            with open(COOKIE_FILE, 'r', encoding='utf-8-sig') as f:
                 cookies = json.load(f)
             print(f"{Fore.GREEN}[LOGIN] 已加载本地登录Cookie (UID: {cookies.get('DedeUserID','?')}){Style.RESET_ALL}")
         except Exception:
@@ -1605,7 +1605,7 @@ async def _mindmap_from_video_input(cfg):
             sibling_cookie = os.path.join(os.path.dirname(BASE_DIR), sib_dir, sib_file)
             if os.path.exists(sibling_cookie):
                 try:
-                    with open(sibling_cookie, 'r', encoding='utf-8') as f:
+                    with open(sibling_cookie, 'r', encoding='utf-8-sig') as f:
                         cookies = json.load(f)
                     print(f"{Fore.GREEN}[LOGIN] 已从 {sib_dir} 加载Cookie{Style.RESET_ALL}")
                     break
@@ -3582,7 +3582,7 @@ def show_interest_prefs_menu():
                 psycho_path = os.path.join(DATA_DIR, "psycho_profile.json")
                 if os.path.exists(psycho_path):
                     import json
-                    with open(psycho_path, 'r', encoding='utf-8') as f:
+                    with open(psycho_path, 'r', encoding='utf-8-sig') as f:
                         psycho_data = json.load(f)
                     # 创建简易代理对象
                     class PsychoProxy:
@@ -3745,7 +3745,7 @@ def show_comment_log():
         return
     
     try:
-        with open(COMMENT_LOG_FILE, 'r', encoding='utf-8') as f:
+        with open(COMMENT_LOG_FILE, 'r', encoding='utf-8-sig') as f:
             data = json.load(f)
         
         history = data.get("history", [])
@@ -4110,7 +4110,7 @@ def show_private_message_log():
         return
 
     try:
-        with open(PRIVATE_MESSAGE_LOG_FILE, 'r', encoding='utf-8') as f:
+        with open(PRIVATE_MESSAGE_LOG_FILE, 'r', encoding='utf-8-sig') as f:
             data = json.load(f)
         history = data.get("history", [])
         if not history:
@@ -4136,7 +4136,7 @@ def _load_recent_journal_events(limit=20):
     if not os.path.exists(JOURNAL_FILE):
         return []
     try:
-        with open(JOURNAL_FILE, "r", encoding="utf-8") as f:
+        with open(JOURNAL_FILE, "r", encoding="utf-8-sig") as f:
             content = f.read()
     except Exception as e:
         print(f"{Fore.YELLOW}[WARN] 读取日记文件失败: {e}{Style.RESET_ALL}", flush=True)
@@ -4469,7 +4469,7 @@ async def _manual_send_danmaku(bvid: str, text: str) -> dict:
         return {"code": -1, "msg": f"bilibili_api 导入失败: {e}"}
     if not os.path.exists(COOKIE_FILE):
         return {"code": -1, "msg": "未登录，请先扫码登录"}
-    with open(COOKIE_FILE, 'r', encoding='utf-8') as f:
+    with open(COOKIE_FILE, 'r', encoding='utf-8-sig') as f:
         cookies = json.load(f)
     cred = Credential(
         sessdata=cookies.get('SESSDATA', ''),
@@ -4744,7 +4744,7 @@ def _show_followed_ups():
         print(f"{Fore.YELLOW}[WARN]  暂无关注记录（bot_memory.json 不存在）{Style.RESET_ALL}")
         return
     try:
-        with open(mem_file, 'r', encoding='utf-8') as f:
+        with open(mem_file, 'r', encoding='utf-8-sig') as f:
             mem = json.load(f)
     except (OSError, json.JSONDecodeError):
         print(f"{Fore.RED}[ERROR] 读取关注记录失败{Style.RESET_ALL}")
@@ -5315,7 +5315,7 @@ async def video_to_html_bg():
     brain.bili._load_credential()
     cookie_loaded = False
     if os.path.exists(COOKIE_FILE):
-        with open(COOKIE_FILE, 'r', encoding='utf-8') as f:
+        with open(COOKIE_FILE, 'r', encoding='utf-8-sig') as f:
             brain.cookies = json.load(f)
         cookie_loaded = True
         log(f"[AUTO] 从本地项目加载到登录Cookie (UID: {brain.cookies.get('DedeUserID','?')})", "LOGIN")
@@ -5333,7 +5333,7 @@ async def video_to_html_bg():
             sibling_cookie = os.path.join(os.path.dirname(BASE_DIR), sib_dir, sib_file)
             if os.path.exists(sibling_cookie):
                 try:
-                    with open(sibling_cookie, 'r', encoding='utf-8') as f:
+                    with open(sibling_cookie, 'r', encoding='utf-8-sig') as f:
                         brain.cookies = json.load(f)
                     uid = brain.cookies.get('DedeUserID', '?')
                     log(f"[AUTO] 从 {sib_dir} 项目加载到登录Cookie (UID: {uid})", "LOGIN")
@@ -6213,7 +6213,7 @@ def show_kb_statistics():
             print(f"  • {category}: {count} 个文件")
     
     if os.path.exists(LEARNING_LOG_FILE):
-        with open(LEARNING_LOG_FILE, 'r', encoding='utf-8') as f:
+        with open(LEARNING_LOG_FILE, 'r', encoding='utf-8-sig') as f:
             log_lines = len(f.readlines())
         print(f"\n{Fore.YELLOW}[NOTE] 学习日志:{Style.RESET_ALL}")
         print(f"  • 学习记录: {log_lines} 条")
@@ -6234,7 +6234,7 @@ def show_learning_log():
     print(f"{Fore.CYAN}════════════════════════════════════════════════{Style.RESET_ALL}")
     
     try:
-        with open(LEARNING_LOG_FILE, 'r', encoding='utf-8') as f:
+        with open(LEARNING_LOG_FILE, 'r', encoding='utf-8-sig') as f:
             lines = f.readlines()
         
         if lines:
@@ -6256,7 +6256,7 @@ def save_search_history(query, results_count):
     try:
         history = []
         if os.path.exists(SEARCH_HISTORY_FILE):
-            with open(SEARCH_HISTORY_FILE, 'r', encoding='utf-8') as f:
+            with open(SEARCH_HISTORY_FILE, 'r', encoding='utf-8-sig') as f:
                 history = json.load(f)
         history.append({
             "time": datetime.now().isoformat(),
@@ -6325,7 +6325,7 @@ def show_search_history():
         print(f"{Fore.YELLOW}[INFO] 暂无搜索记录{Style.RESET_ALL}")
         return
     try:
-        with open(SEARCH_HISTORY_FILE, 'r', encoding='utf-8') as f:
+        with open(SEARCH_HISTORY_FILE, 'r', encoding='utf-8-sig') as f:
             history = json.load(f)
         if not history:
             print(f"{Fore.YELLOW}[INFO] 搜索记录为空{Style.RESET_ALL}")
@@ -6777,7 +6777,7 @@ def export_config():
     for key, path in file_map:
         if os.path.exists(path):
             try:
-                with open(path, "r", encoding="utf-8") as f:
+                with open(path, "r", encoding="utf-8-sig") as f:
                     export_data[key] = _sanitize_export_data(json.load(f), key)
                 print(f"  {Fore.GREEN}{Style.RESET_ALL} {key} ({os.path.basename(path)})")
                 exported_files += 1
@@ -6788,7 +6788,7 @@ def export_config():
     kb_metadata_file = KB_METADATA_FILE
     if os.path.exists(kb_metadata_file):
         try:
-            with open(kb_metadata_file, "r", encoding="utf-8") as f:
+            with open(kb_metadata_file, "r", encoding="utf-8-sig") as f:
                 export_data["knowledge_metadata"] = json.load(f)
             print(f"  {Fore.GREEN}{Style.RESET_ALL} knowledge_metadata")
             exported_files += 1
@@ -6798,7 +6798,7 @@ def export_config():
     # 学习日志 (纯文本)
     if os.path.exists(LEARNING_LOG_FILE):
         try:
-            with open(LEARNING_LOG_FILE, "r", encoding="utf-8") as f:
+            with open(LEARNING_LOG_FILE, "r", encoding="utf-8-sig") as f:
                 export_data["learning_log"] = f.read()
             print(f"  {Fore.GREEN}{Style.RESET_ALL} learning_log.md")
             exported_files += 1
@@ -6809,7 +6809,7 @@ def export_config():
     psycho_file = os.path.join(DATA_DIR, "psycho_profile.json")
     if os.path.exists(psycho_file):
         try:
-            with open(psycho_file, "r", encoding="utf-8") as f:
+            with open(psycho_file, "r", encoding="utf-8-sig") as f:
                 export_data["psycho_profile"] = json.load(f)
             print(f"  {Fore.GREEN}{Style.RESET_ALL} psycho_profile.json")
             exported_files += 1
@@ -6820,7 +6820,7 @@ def export_config():
     aversions_file = os.path.join(DATA_DIR, "content_aversions.json")
     if os.path.exists(aversions_file):
         try:
-            with open(aversions_file, "r", encoding="utf-8") as f:
+            with open(aversions_file, "r", encoding="utf-8-sig") as f:
                 export_data["content_aversions"] = json.load(f)
             print(f"  {Fore.GREEN}{Style.RESET_ALL} content_aversions.json")
             exported_files += 1
@@ -6830,7 +6830,7 @@ def export_config():
     # Bot日志 (纯文本)
     if os.path.exists(JOURNAL_FILE):
         try:
-            with open(JOURNAL_FILE, "r", encoding="utf-8") as f:
+            with open(JOURNAL_FILE, "r", encoding="utf-8-sig") as f:
                 export_data["bot_journal"] = f.read()
             print(f"  {Fore.GREEN}{Style.RESET_ALL} bot_journal.md")
             exported_files += 1
@@ -6841,7 +6841,7 @@ def export_config():
     rec_log_file = os.path.join(DATA_DIR, "recommendation_log.json")
     if os.path.exists(rec_log_file):
         try:
-            with open(rec_log_file, "r", encoding="utf-8") as f:
+            with open(rec_log_file, "r", encoding="utf-8-sig") as f:
                 export_data["recommendation_log"] = json.load(f)
             print(f"  {Fore.GREEN}{Style.RESET_ALL} recommendation_log.json")
             exported_files += 1
@@ -6852,7 +6852,7 @@ def export_config():
     action_log_file = os.path.join(DATA_DIR, "action_log.json")
     if os.path.exists(action_log_file):
         try:
-            with open(action_log_file, "r", encoding="utf-8") as f:
+            with open(action_log_file, "r", encoding="utf-8-sig") as f:
                 export_data["action_log"] = json.load(f)
             print(f"  {Fore.GREEN}{Style.RESET_ALL} action_log.json")
             exported_files += 1
@@ -6863,7 +6863,7 @@ def export_config():
     owner_file = os.path.join(DATA_DIR, "owner_profile.json")
     if os.path.exists(owner_file):
         try:
-            with open(owner_file, "r", encoding="utf-8") as f:
+            with open(owner_file, "r", encoding="utf-8-sig") as f:
                 export_data["owner_profile"] = json.load(f)
             print(f"  {Fore.GREEN}{Style.RESET_ALL} owner_profile.json")
             exported_files += 1
@@ -6874,7 +6874,7 @@ def export_config():
     vector_index_file = os.path.join(DATA_DIR, "kb_vector_index.json")
     if os.path.exists(vector_index_file):
         try:
-            with open(vector_index_file, "r", encoding="utf-8") as f:
+            with open(vector_index_file, "r", encoding="utf-8-sig") as f:
                 export_data["kb_vector_index"] = json.load(f)
             print(f"  {Fore.GREEN}{Style.RESET_ALL} kb_vector_index.json")
             exported_files += 1
@@ -6917,7 +6917,7 @@ def import_config():
         return
 
     try:
-        with open(import_path, "r", encoding="utf-8") as f:
+        with open(import_path, "r", encoding="utf-8-sig") as f:
             import_data = json.load(f)
     except json.JSONDecodeError as e:
         print(f"{Fore.RED}[ERROR] JSON解析失败: {e}{Style.RESET_ALL}")

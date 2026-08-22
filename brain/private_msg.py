@@ -112,7 +112,7 @@ class PrivateMessageManager:
     def _load_log(self):
         if os.path.exists(PRIVATE_MESSAGE_LOG_FILE):
             try:
-                with open(PRIVATE_MESSAGE_LOG_FILE, 'r', encoding='utf-8') as f:
+                with open(PRIVATE_MESSAGE_LOG_FILE, 'r', encoding='utf-8-sig') as f:
                     return json.load(f)
             except (OSError, json.JSONDecodeError) as e:
                 log(f"[WARN] 私信日志加载失败: {e}", "WARN")

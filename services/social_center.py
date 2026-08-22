@@ -33,7 +33,7 @@ def _store_path(name: str) -> Path:
 
 def _read_rows(name: str) -> list[dict[str, Any]]:
     try:
-        rows = json.loads(_store_path(name).read_text(encoding="utf-8"))
+        rows = json.loads(_store_path(name).read_text(encoding="utf-8-sig"))
         return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
     except (OSError, json.JSONDecodeError):
         return []
@@ -52,7 +52,7 @@ def _append_publish_log(entry: dict[str, Any]) -> None:
         path = _store_path("dynamic_publish_log.json")
         rows = []
         try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
+            existing = json.loads(path.read_text(encoding="utf-8-sig"))
             if isinstance(existing, list):
                 rows = existing
         except (OSError, json.JSONDecodeError):

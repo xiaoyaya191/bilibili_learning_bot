@@ -34,7 +34,7 @@ def is_bili_logged_in():
     if not os.path.exists(COOKIE_FILE):
         return False
     try:
-        with open(COOKIE_FILE, 'r', encoding='utf-8') as f:
+        with open(COOKIE_FILE, 'r', encoding='utf-8-sig') as f:
             cookies = json.load(f)
         return bool(cookies.get('SESSDATA', '').strip()) and bool(cookies.get('DedeUserID', '').strip())
     except Exception:
@@ -48,7 +48,7 @@ def check_login_status():
         return
 
     try:
-        with open(COOKIE_FILE, 'r', encoding='utf-8') as f:
+        with open(COOKIE_FILE, 'r', encoding='utf-8-sig') as f:
             cookies = json.load(f)
 
         print(f"{Fore.CYAN}════════════════════════════════════════════════{Style.RESET_ALL}")

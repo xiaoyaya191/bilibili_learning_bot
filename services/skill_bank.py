@@ -39,7 +39,7 @@ def load_skill_bank() -> dict:
     bank = {"settings": dict(DEFAULT_SETTINGS), "skills": []}
     try:
         if os.path.exists(SKILL_BANK_FILE):
-            with open(SKILL_BANK_FILE, "r", encoding="utf-8") as f:
+            with open(SKILL_BANK_FILE, "r", encoding="utf-8-sig") as f:
                 data = json.load(f)
             if isinstance(data, dict):
                 if isinstance(data.get("settings"), dict):

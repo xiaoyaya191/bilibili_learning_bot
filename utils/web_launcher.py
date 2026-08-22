@@ -26,7 +26,7 @@ def get_web_port() -> int:
             import json as _json
             from core.config import CONFIG_FILE as _CONFIG_FILE
             if os.path.exists(_CONFIG_FILE):
-                with open(_CONFIG_FILE, "r", encoding="utf-8") as f:
+                with open(_CONFIG_FILE, "r", encoding="utf-8-sig") as f:
                     _cfg = _json.load(f)
                 raw = str((_cfg.get("web", {}) or {}).get("port") or "").strip()
         except Exception:

@@ -64,13 +64,13 @@ class ActionReviewInbox:
 
     def _read(self) -> list[dict]:
         try:
-            rows = json.loads(self.path.read_text(encoding="utf-8"))
+            rows = json.loads(self.path.read_text(encoding="utf-8-sig"))
             return rows if isinstance(rows, list) else []
         except Exception:
             rows = []
         if not self.path.exists() and self.legacy_path.exists():
             try:
-                legacy = json.loads(self.legacy_path.read_text(encoding="utf-8"))
+                legacy = json.loads(self.legacy_path.read_text(encoding="utf-8-sig"))
                 for row in legacy if isinstance(legacy, list) else []:
                     row = dict(row)
                     row.setdefault("action_type", "video_like")
@@ -92,7 +92,7 @@ class ActionReviewInbox:
 
     def _current_account_uid(self) -> str:
         try:
-            cookies = json.loads((self.path.parent / "bilibili_cookies.json").read_text(encoding="utf-8"))
+            cookies = json.loads((self.path.parent / "bilibili_cookies.json").read_text(encoding="utf-8-sig"))
             return str((cookies or {}).get("DedeUserID") or "").strip()
         except (OSError, json.JSONDecodeError, AttributeError):
             return ""
@@ -173,7 +173,7 @@ class ActionReviewInbox:
             rows.append(row)
             self._write(rows)
             try:
-                config = json.loads((self.path.parent / "config.json").read_text(encoding="utf-8"))
+                config = json.loads((self.path.parent / "config.json").read_text(encoding="utf-8-sig"))
                 notify_enabled = (config.get("approval_review") or {}).get("desktop_notification", True)
                 if notify_enabled is not False:
                     from utils.desktop_notifications import enqueue

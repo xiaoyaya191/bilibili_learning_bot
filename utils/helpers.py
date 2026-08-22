@@ -78,7 +78,7 @@ def _load_json_file(path, default=None):
     """安全加载 JSON 文件，不存在或损坏时返回 default"""
     if os.path.exists(path):
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, "r", encoding="utf-8-sig") as f:
                 return json.load(f)
         except (json.JSONDecodeError, OSError):
             pass

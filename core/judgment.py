@@ -121,7 +121,7 @@ def get_judgment():
             return _cache["judgment"]
         user_cfg = {}
         try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            with open(CONFIG_FILE, "r", encoding="utf-8-sig") as f:
                 raw = json.load(f)
             j = raw.get("judgment") if isinstance(raw, dict) else None
             if isinstance(j, dict):

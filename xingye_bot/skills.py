@@ -153,7 +153,7 @@ class SkillBank:
     def _load(self):
         try:
             if self.skills_file.exists():
-                return json.loads(self.skills_file.read_text(encoding="utf-8"))
+                return json.loads(self.skills_file.read_text(encoding="utf-8-sig"))
         except Exception:
             pass
         return []

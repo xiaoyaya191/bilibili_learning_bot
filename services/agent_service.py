@@ -21,7 +21,7 @@ class AgentSkillRunner:
     def _load_goal_log(self):
         if os.path.exists(AGENT_SKILL_LOG_FILE):
             try:
-                with open(AGENT_SKILL_LOG_FILE, 'r', encoding='utf-8') as f:
+                with open(AGENT_SKILL_LOG_FILE, 'r', encoding='utf-8-sig') as f:
                     return json.load(f)
             except Exception as e:
                 log(f"[WARN] Agent技能日志加载失败: {e}", "WARN")

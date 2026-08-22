@@ -28,13 +28,13 @@ def load_standby_config() -> dict:
     """加载待机模式配置"""
     if os.path.exists(STANDBY_CONFIG_FILE):
         try:
-            with open(STANDBY_CONFIG_FILE, 'r', encoding='utf-8') as f:
+            with open(STANDBY_CONFIG_FILE, 'r', encoding='utf-8-sig') as f:
                 return json.load(f)
         except Exception:
             pass
     if os.path.exists(CONFIG_FILE):
         try:
-            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+            with open(CONFIG_FILE, 'r', encoding='utf-8-sig') as f:
                 cfg = json.load(f)
             sc = cfg.get('standby', {})
             if sc:
@@ -69,7 +69,7 @@ def save_standby_config(cfg: dict) -> bool:
 def load_stats() -> dict:
     if os.path.exists(STANDBY_STATS_FILE):
         try:
-            with open(STANDBY_STATS_FILE, 'r', encoding='utf-8') as f:
+            with open(STANDBY_STATS_FILE, 'r', encoding='utf-8-sig') as f:
                 return json.load(f)
         except Exception:
             pass
@@ -103,7 +103,7 @@ class StandbyBot:
     def _load_cookies(self):
         if os.path.exists(COOKIE_FILE):
             try:
-                with open(COOKIE_FILE, 'r', encoding='utf-8') as f:
+                with open(COOKIE_FILE, 'r', encoding='utf-8-sig') as f:
                     self.cookies = json.load(f)
             except Exception:
                 self.cookies = None
@@ -111,7 +111,7 @@ class StandbyBot:
     def _load_api_config(self):
         if os.path.exists(CONFIG_FILE):
             try:
-                with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                with open(CONFIG_FILE, 'r', encoding='utf-8-sig') as f:
                     cfg = json.load(f)
                 api = cfg.get('api', {})
                 self.api_key = api.get('unified_api_key', '') or os.getenv('BILI_AI_API_KEY', '')

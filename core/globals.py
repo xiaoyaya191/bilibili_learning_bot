@@ -403,7 +403,7 @@ from core.config import DEFAULT_CONFIG  # noqa: E402
 def _load_json_file(path, default=None):
     if os.path.exists(path):
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, "r", encoding="utf-8-sig") as f:
                 return json.load(f)
         except (json.JSONDecodeError, OSError):
             pass
@@ -426,7 +426,7 @@ def save_search_history(query, results_count):
     try:
         history = []
         if os.path.exists(SEARCH_HISTORY_FILE):
-            with open(SEARCH_HISTORY_FILE, 'r', encoding='utf-8') as f:
+            with open(SEARCH_HISTORY_FILE, 'r', encoding='utf-8-sig') as f:
                 history = json.load(f)
         history.append({
             "time": datetime.now().isoformat(),

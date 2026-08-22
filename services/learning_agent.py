@@ -308,7 +308,7 @@ def _load_bili_cookies() -> dict:
     cookie_file = DATA_DIR / "bilibili_cookies.json"
     if cookie_file.exists():
         try:
-            with open(cookie_file, 'r', encoding='utf-8') as f:
+            with open(cookie_file, 'r', encoding='utf-8-sig') as f:
                 return json.load(f)
         except Exception:
             pass
@@ -487,7 +487,7 @@ class LearningAgentSession:
         path = SESSION_DIR / f"{session_id}.json"
         if not path.exists():
             return None
-        d = json.loads(path.read_text(encoding='utf-8'))
+        d = json.loads(path.read_text(encoding='utf-8-sig'))
         return LearningAgentSession.from_dict(d)
 
     @staticmethod
@@ -497,7 +497,7 @@ class LearningAgentSession:
         sessions = []
         for f in sorted(SESSION_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
             try:
-                d = json.loads(f.read_text(encoding='utf-8'))
+                d = json.loads(f.read_text(encoding='utf-8-sig'))
                 if session_type and d.get("session_type") != session_type:
                     continue
                 sessions.append({

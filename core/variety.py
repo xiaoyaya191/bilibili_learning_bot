@@ -57,7 +57,7 @@ def _load() -> dict:
         cfg = {}
         try:
             import json
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            with open(CONFIG_FILE, "r", encoding="utf-8-sig") as f:
                 raw = json.load(f)
             v = raw.get("variety") if isinstance(raw, dict) else None
             if isinstance(v, dict):

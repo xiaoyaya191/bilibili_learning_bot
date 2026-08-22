@@ -37,3 +37,45 @@ def test_log_template_uses_structured_error_detection_for_candidates():
     assert "log-line.candidate" in template
     assert "panel_onboarding_seen_v2" in template
     assert "/api/onboarding" in template
+
+
+def test_guide_intro_step_round_trip(monkeypatch, tmp_path):
+    """教程第一步「查看项目介绍」：POST /api/guide/intro 后 guide-status 应标记完成。"""
+    import web_panel
+
+    config_file = Path(tmp_path) / "config.json"
+    monkeypatch.setattr(web_panel, "CONFIG_FILE", config_file)
+    monkeypatch.setattr(web_panel, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(web_panel, "COOKIE_FILE", tmp_path / "cookies.json")
+    _allow_web_request(monkeypatch, web_panel)
+
+    web_panel.write_json(config_file, {"web": {"username": "u", "password": "h"}})
+    client = web_panel.app.test_client()
+
+    status = client.get("/api/guide-status").get_json()
+    assert status["ok"] is True
+    assert status["steps"]["intro"] is False
+    assert status["total"] == 7
+
+    marked = client.post("/api/guide/intro").get_json()
+    assert marked["ok"] is True
+
+    status = client.get("/api/guide-status").get_json()
+    assert status["steps"]["intro"] is True
+
+
+def test_guide_status_tolerates_malformed_web_section(monkeypatch, tmp_path):
+    """web 节点不是 dict 时 intro 步骤按未完成处理，接口不能 500。"""
+    import web_panel
+
+    config_file = Path(tmp_path) / "config.json"
+    monkeypatch.setattr(web_panel, "CONFIG_FILE", config_file)
+    monkeypatch.setattr(web_panel, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(web_panel, "COOKIE_FILE", tmp_path / "cookies.json")
+    _allow_web_request(monkeypatch, web_panel)
+
+    web_panel.write_json(config_file, {"web": "not-a-dict"})
+    client = web_panel.app.test_client()
+    status = client.get("/api/guide-status").get_json()
+    assert status["ok"] is True
+    assert status["steps"]["intro"] is False

@@ -47,7 +47,7 @@ class BrainRuntimeMixin:
     def _load_memory(self):
         if os.path.exists(MEMORY_FILE):
             try:
-                with open(MEMORY_FILE, 'r', encoding='utf-8') as f:
+                with open(MEMORY_FILE, 'r', encoding='utf-8-sig') as f:
                     data = json.load(f)
                 if isinstance(data.get("known_ups"), list):
                     old_list = data["known_ups"]

@@ -27,7 +27,7 @@ class InterestManager:
     def _load_interests(self):
         if os.path.exists(self.interests_file):
             try:
-                with open(self.interests_file, 'r', encoding='utf-8') as f:
+                with open(self.interests_file, 'r', encoding='utf-8-sig') as f:
                     data = json.load(f)
                     return data.get("interests", [])
             except (OSError, json.JSONDecodeError) as e:
@@ -103,7 +103,7 @@ class BiliToolbox:
     @staticmethod
     def _read_json(path, default):
         try:
-            value = json.loads(Path(path).read_text(encoding="utf-8"))
+            value = json.loads(Path(path).read_text(encoding="utf-8-sig"))
             return value
         except (OSError, ValueError, TypeError):
             return default
@@ -520,7 +520,7 @@ class BiliToolbox:
         try:
             cookies = {}
             if os.path.exists(COOKIE_FILE):
-                with open(COOKIE_FILE, "r", encoding="utf-8") as source:
+                with open(COOKIE_FILE, "r", encoding="utf-8-sig") as source:
                     cookies = json.load(source)
             from api.subtitles import fetch_bilibili_subtitles
             ok, subtitles, description, _ = await asyncio.wait_for(

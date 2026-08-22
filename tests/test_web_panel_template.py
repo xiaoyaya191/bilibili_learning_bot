@@ -62,7 +62,7 @@ def test_prompt_injection_settings_exist_only_in_config_editor_safety_group():
 def test_agent_goal_placeholder_is_a_single_valid_html_attribute():
     template = (Path(__file__).resolve().parents[1] / "web_panel.html").read_text(encoding="utf-8")
 
-    assert 'placeholder="例如：搜索 AI 工具视频，观看后提炼知识和可复用技能"' in template
+    assert 'placeholder="例如：帮我看看最近B站上大家在讨论什么 AI Agent 框架，挑一个最火的视频总结要点，存进知识库"' in template
 
 
 def test_runtime_web_template_has_no_duplicate_ids():
@@ -110,10 +110,14 @@ def test_new_user_tutorial_is_available_on_first_use_and_from_about_page():
     template = (Path(__file__).resolve().parents[1] / "web_panel.html").read_text(encoding="utf-8")
 
     for marker in (
-        "openNewUserTutorial",
-        "maybeOpenNewUserTutorial",
-        "panel_onboarding_seen_v1",
-        "进入新手教程",
+        "openNewUserTutorial",      # 关于页可重开教程
+        "maybeOpenNewUserTutorial", # 首次进入自动展开引导
+        "panel_onboarding_seen_v2", # v2 引导状态键（仪表盘内嵌卡片）
+        "reopenDashGuide",          # 关于页"新手教程"按钮入口
+        "dashGuideIntro",           # 教程第一步：跳过/直接查看项目介绍
+        "/api/guide/intro",         # 第一步完成状态上报端点
+        "查看项目介绍",
+        "直接查看",
         "tutorial-step",
     ):
         assert marker in template

@@ -212,7 +212,7 @@ async def organize_knowledge_base():
             # 读取文件内容用于AI分类
             file_content = ""
             try:
-                with open(fp, 'r', encoding='utf-8') as fh:
+                with open(fp, 'r', encoding='utf-8-sig') as fh:
                     file_content = fh.read(3000)
             except Exception as e:
                 log(f'非预期异常: {e}', 'WARN')
