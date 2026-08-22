@@ -4154,6 +4154,8 @@ h+='<div class="fg"><label>图文笔记模式</label><select id="cqNoteMode"><op
 h+='<div class="fg"><label>候选视频数量</label><input id="cqCandidatePoolSize" type="number" min="5" max="100" value="'+((c.video?c.video.candidate_pool_size:0)||20)+'"></div>';
 h+='<div class="fr"><div class="fg"><label>图文抽帧间隔(秒)</label><input id="cqVisualNoteInterval" type="number" min="1" max="60" value="'+((c.video?c.video.visual_note_frame_interval:0)||6)+'"></div><div class="fg"><label>图文最多抽帧数</label><input id="cqVisualNoteMaxFrames" type="number" min="9" max="360" value="'+((c.video?c.video.visual_note_max_frames:0)||240)+'"></div><div class="fg"><label>网格列数</label><input id="cqVisualNoteCols" type="number" min="1" max="4" value="'+((c.video?c.video.visual_note_grid_cols:0)||3)+'"></div><div class="fg"><label>网格行数</label><input id="cqVisualNoteRows" type="number" min="1" max="4" value="'+((c.video?c.video.visual_note_grid_rows:0)||3)+'"></div></div>';
 h+='</fieldset>';
+// 兴趣偏好
+h+='<fieldset class="fs"><legend><i data-lucide="target"></i> 兴趣爱好</legend><p class="form-hint">填写后，机器人优先看标题或简介命中这些词的视频；留空时会放行全部推荐。</p><div class="fg"><label>兴趣关键词（一行一个或逗号分隔）</label><textarea id="cqInterests" class="kw-textarea" placeholder="例如：Python, AI, 科研方法, 历史"></textarea></div><p id="cqInterestStatus" class="form-hint"></p></fieldset>';
 // 行为
 h+='<fieldset class="fs"><legend><i data-lucide="folder"></i> 知识库路径</legend>';
 h+='<div class="fg"><label>自定义知识库目录（留空=默认C盘数据目录）</label>';

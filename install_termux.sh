@@ -51,7 +51,7 @@ pkg upgrade -y
 # ---------- Step 2: 安装系统依赖 ----------
 echo ""
 echo "[2/4] 安装系统编译依赖 (libyaml 解决 PyYAML 编译问题)..."
-pkg install -y python python-pip libyaml libyaml-dev clang make binutils
+pkg install -y python coreutils libyaml clang make binutils
 
 # ---------- Step 3: 升级 pip ----------
 echo ""

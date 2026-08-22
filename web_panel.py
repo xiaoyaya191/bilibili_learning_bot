@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # pyright: reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnknownArgumentType=false, reportUnknownParameterType=false, reportMissingParameterType=false, reportPrivateUsage=false, reportPrivateLocalImportUsage=false, reportUnusedCallResult=false, reportDeprecated=false, reportMissingTypeStubs=false, reportMissingImports=false, reportAny=false
 """
@@ -11654,6 +11654,49 @@ applyTheme();
     return html.replace(
         '__RECOVERY_FILE_PATH__',
         json.dumps(str(_recovery_file_path()), ensure_ascii=False))
+
+
+def _account_security_html():
+    return r"""<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>账号安全 · 管理面板</title><style>
+*{box-sizing:border-box}body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Microsoft YaHei',sans-serif;background:#f7f7f7;color:#111;display:flex;align-items:center;justify-content:center;min-height:100vh}.card{background:#fff;border:1px solid #e6e6e6;border-radius:8px;padding:32px;max-width:420px;width:92%;box-shadow:0 4px 24px rgba(0,0,0,.06)}h2{font-size:20px;margin:0 0 24px}.fg{margin-bottom:15px}.fg label{display:block;font-size:12px;color:#777;margin-bottom:6px}.fg input,.fg select{width:100%;padding:10px 12px;border:1px solid #ddd;border-radius:6px;font-size:15px;background:#fff}.btn{width:100%;padding:11px;border:0;border-radius:6px;background:#D97757;color:#fff;font-size:14px;cursor:pointer}.msg{font-size:13px;min-height:20px;margin-top:12px}.err{color:#b42318}.ok{color:#267a45}.back{display:block;text-align:center;margin-top:16px;color:#666;text-decoration:none;font-size:13px}
+</style></head><body><div class="card"><h2>设置密保问题</h2><div class="fg"><label>问题</label><select id="preset" onchange="toggleCustom()"><option value="父亲的名字是什么？">父亲名字</option><option value="你的小学名字是什么？">小学名字</option><option value="custom">自定义问题</option></select></div><div class="fg" id="customRow" style="display:none"><label>自定义问题</label><input id="custom" autocomplete="off"></div><div class="fg"><label>答案</label><input id="answer" type="password" autocomplete="off"></div><button class="btn" onclick="saveQuestion()">保存密保问题</button><div class="msg" id="msg"></div><a class="back" href="/">返回管理面板</a></div><script>
+function toggleCustom(){document.getElementById('customRow').style.display=document.getElementById('preset').value==='custom'?'block':'none'}async function saveQuestion(){var q=document.getElementById('preset').value;if(q==='custom')q=document.getElementById('custom').value.trim();var a=document.getElementById('answer').value,m=document.getElementById('msg');if(q.length<2||!a.trim()){m.textContent='请完整填写问题和答案';m.className='msg err';return}var r=await fetch('/api/auth/security-question',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question:q,answer:a})});var d=await r.json();m.textContent=d.message;m.className='msg '+(d.ok?'ok':'err');if(d.ok)setTimeout(function(){location.href='/'},700)}
+</script></body></html>"""
+
+
+def _forgot_password_html():
+    return r"""<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>忘记密码 · 管理面板</title><style>
+:root{color-scheme:light;--bg:#f7f7f7;--surface:#fff;--text:#0d0d0d;--muted:#777;--faint:#999;--border:#e6e6e6;--input:#f7f7f7;--shadow:0 4px 24px rgba(0,0,0,.06)}
+:root[data-theme="dark"]{color-scheme:dark;--bg:#0d0d0d;--surface:#161616;--text:#f5f5f5;--muted:#a3a3a3;--faint:#8a8a8a;--border:#303030;--input:#101010;--shadow:0 20px 60px rgba(0,0,0,.42)}
+*{box-sizing:border-box}body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Microsoft YaHei',sans-serif;background:#f7f7f7;color:#111;display:flex;align-items:center;justify-content:center;min-height:100vh}.card{background:#fff;border:1px solid #e6e6e6;border-radius:8px;padding:32px;max-width:420px;width:92%;box-shadow:0 4px 24px rgba(0,0,0,.06)}h2{font-size:20px;margin:0 0 24px}.fg{margin-bottom:15px}.fg label{display:block;font-size:12px;color:#777;margin-bottom:6px}.fg input{width:100%;padding:10px 12px;border:1px solid #ddd;border-radius:6px;font-size:15px}.question{padding:11px 12px;background:#f3f3f3;border-radius:6px;margin-bottom:15px}.btn{width:100%;padding:11px;border:0;border-radius:6px;background:#D97757;color:#fff;font-size:14px;cursor:pointer}.msg{font-size:13px;min-height:20px;margin-top:12px}.err{color:#b42318}.ok{color:#267a45}.back{display:block;text-align:center;margin-top:16px;color:#666;text-decoration:none;font-size:13px}
+.card{background:var(--surface)!important;border-color:var(--border)!important;box-shadow:var(--shadow)!important}
+body{background:var(--bg)!important;color:var(--text)!important}
+.card .sub,.card .lines .en,.recover,.hint,.back,.fg label{color:var(--muted)!important}
+.inp-row input,.fg input,.fg select{background:var(--input)!important;border-color:var(--border)!important;color:var(--text)!important}
+.inp-row input::placeholder,.fg input::placeholder,.fg select::placeholder{color:var(--faint)!important}
+.card h2{color:var(--text)!important}
+.theme-btn{position:fixed;left:18px;bottom:20px;width:40px;height:40px;border-radius:50%;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:17px;cursor:pointer;z-index:99}
+</style><script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+<script>if(typeof lucide==='undefined'){document.write('<script src="/assets/js/lucide.js"><\/script>')}</script>
+</head><body>
+<button class="theme-btn" type="button" onclick="toggleTheme()" id="themeBtn" aria-label="切换暗色模式">◐</button><div class="card"><h2>找回网页端密码</h2>
+<div id="lookup"><div class="fg"><label>用户名</label><input id="username" autocomplete="username"></div><button class="btn" onclick="loadQuestion()">下一步</button></div>
+<div id="reset" style="display:none"><div class="question" id="question"></div><div class="fg"><label>密保答案</label><input id="answer" type="password" autocomplete="off"></div><div class="fg"><label>新密码</label><input id="password" type="password" autocomplete="new-password"></div><div class="fg"><label>确认新密码</label><input id="password2" type="password" autocomplete="new-password"></div><button class="btn" onclick="resetPassword()">重置密码</button></div>
+<div class="msg" id="msg"></div><a class="back" href="/login">返回登录</a></div><script>
+var msg=document.getElementById('msg');
+async function loadQuestion(){var u=document.getElementById('username').value.trim();if(!u){msg.textContent='请输入用户名';msg.className='msg err';return}var r=await fetch('/api/auth/recovery-question',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u})});var d=await r.json();if(!d.ok){msg.textContent=d.message;msg.className='msg err';return}document.getElementById('question').textContent=d.question;document.getElementById('lookup').style.display='none';document.getElementById('reset').style.display='block';msg.textContent=''}
+async function resetPassword(){var p=document.getElementById('password').value,p2=document.getElementById('password2').value;if(p.length<4){msg.textContent='新密码至少4位';msg.className='msg err';return}if(p!==p2){msg.textContent='两次输入的密码不一致';msg.className='msg err';return}var r=await fetch('/api/auth/reset-password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:document.getElementById('username').value.trim(),answer:document.getElementById('answer').value,password:p})});var d=await r.json();msg.textContent=d.message;msg.className='msg '+(d.ok?'ok':'err');if(d.ok)setTimeout(function(){location.href='/'},800)}
+</script>
+<script>if(window.lucide)lucide.createIcons({attrs:{'stroke-width':1.5}});</script>
+<script>
+function applyTheme(){var t='light';try{t=localStorage.getItem('panel_theme')||'light'}catch(e){}document.documentElement.setAttribute('data-theme',t);var b=document.getElementById('themeBtn');if(b)b.textContent=t==='dark'?'☀':'◐'}
+function toggleTheme(){var t=document.documentElement.getAttribute('data-theme')==='dark'?'light':'dark';try{localStorage.setItem('panel_theme',t)}catch(e){}applyTheme()}
+applyTheme();
+</script>
+</body></html>"""
 
 
 def _account_security_html():
