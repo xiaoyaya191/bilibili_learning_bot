@@ -7,8 +7,11 @@
 
 | 文件 | 路径 | 用途 |
 |------|------|------|
-| `config.json` | `Data/config.json` | 主配置文件 |
-| `bilibili_cookies.json` | `Data/bilibili_cookies.json` | B站登录Cookie |
+| `config.json` | `%USERPROFILE%\BiliLearn\Data\config.json` | 主配置文件 |
+| `bilibili_cookies.json` | `%USERPROFILE%\BiliLearn\Data\bilibili_cookies.json` | B站登录Cookie |
+
+私密运行数据统一由 `core.user_data` 定位。设置 `BILI_USER_DATA_DIR` 可修改用户数据根目录。
+知识库和生成文件默认保留在项目目录；知识库可通过 `knowledge.base_dir` 自定义。
 
 ## 配置加载方式
 
@@ -68,9 +71,9 @@ save_config(config)
 ```python
 from core.config import (
     BASE_DIR,          # 项目根目录
-    DATA_DIR,          # Data/ 数据目录
-    CONFIG_FILE,       # Data/config.json
-    COOKIE_FILE,       # Data/bilibili_cookies.json
+    DATA_DIR,          # 用户数据根/Data
+    CONFIG_FILE,       # 用户数据根/Data/config.json
+    COOKIE_FILE,       # 用户数据根/Data/bilibili_cookies.json
     KNOWLEDGE_BASE_DIR, # KnowledgeBase/ 知识库目录
     HIGHLIGHTS_DIR,    # highlights/ 归档目录
 )
@@ -85,8 +88,6 @@ from core.config import (
 | `BILI_AI_MODEL_BRAIN` | `api.model_brain` | 思考模型 |
 | `BILI_AI_MODEL_VISION` | `api.model_vision` | 视觉模型 |
 | `BILI_AI_MODEL_HTML` | `api.model_html` | HTML模型 |
-| `BILI_ACCOUNT_DATA_DIR` | - | 多账号数据目录（Web面板） |
-| `BILI_ACCOUNT_NAME` | - | 账号显示名称（Web面板） |
 | `BILI_CIPHER_KEY` | - | 敏感词加密密钥 |
 
 ## JSON 文件工具函数

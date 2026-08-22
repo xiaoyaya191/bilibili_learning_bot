@@ -7,8 +7,8 @@ services/interest_engine.py — 智能兴趣引擎 v2.0
 - 方案C: 多维度评分(相关性/新颖度/多样性/质量) + 动态阈值
 - 方案D: 混合渐进，默认 = "推荐"组合
 
-配置驱动: Data/interest_engine.json
-向后兼容: 旧的 Data/interests.json 自动迁移
+配置驱动: 用户数据目录/Data/interest_engine.json
+向后兼容: 旧的 interests.json 自动迁移
 """
 import json
 import os
@@ -17,6 +17,7 @@ from datetime import datetime
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple, Set
 from colorama import Fore, Style
+from core.user_data import DATA_DIR
 
 # ── 默认配置 ──
 DEFAULT_ENGINE_CONFIG = {
@@ -26,7 +27,9 @@ DEFAULT_ENGINE_CONFIG = {
     "synonym_map": {},          # {keyword: [syn1, syn2, ...]}
     "settings": {
         "proxy_mode": "smart",       # "simple" | "smart" | "ai_only" | "watch_all"
-        "serendipity_rate": 0.1,     # 10% 随机探索
+        # Interests should be strict by default. Exploration is opt-in from
+        # the Interest page instead of silently admitting unrelated videos.
+        "serendipity_rate": 0.0,
         "auto_sync_psycho": True,    # 从PsychoProfile自动同步
         "use_synonyms": True,        # 启用同义词扩展
         "ai_suggest": True,          # AI定期建议关键词
@@ -85,10 +88,7 @@ FUZZY_RELATED = {
     "数据库": ["mysql", "postgresql", "mongodb", "redis", "sql"],
 }
 
-ENGINE_CONFIG_FILE = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "Data", "interest_engine.json"
-)
+ENGINE_CONFIG_FILE = str(DATA_DIR / "interest_engine.json")
 
 # ── 日志辅助 ──
 def _elog(msg: str, tag: str = "ENGINE"):
@@ -161,7 +161,7 @@ class InterestEngine:
                 target[k] = v
 
     def _migrate_from_legacy(self) -> Optional[dict]:
-        """从旧 Data/interests.json 迁移"""
+        """从旧 interests.json 迁移"""
         legacy_path = os.path.join(
             os.path.dirname(self.config_file), "interests.json"
         )
@@ -222,7 +222,7 @@ class InterestEngine:
 
     @property
     def serendipity_rate(self) -> float:
-        return self.settings.get("serendipity_rate", 0.1)
+        return self.settings.get("serendipity_rate", 0.0)
 
     @property
     def history_tags(self) -> List[str]:
@@ -274,6 +274,17 @@ class InterestEngine:
                 item["weight"] = weight
                 self.save()
                 return True
+        return False
+
+    def _update_auto_weight(self, keyword: str, weight: str) -> bool:
+        """心理画像自动调权：只作用于 AI 自动建议的兴趣，手动设置的兴趣权重不被覆盖。"""
+        kw = str(keyword).strip().lower()
+        for item in self.interests_list:
+            if isinstance(item, dict) and item.get("keyword", "") == kw:
+                if not item.get("auto_suggested", False):
+                    _elog(f"手动兴趣「{kw}」权重不受心理画像自动调整", "INFO")
+                    return False
+                return self.update_weight(kw, weight)
         return False
 
     # ── 排除词管理 ──
@@ -457,7 +468,7 @@ class InterestEngine:
         if mode != "watch_all" and self.should_serendipity():
             return MatchResult(
                 passed=True, matched_keywords=["灵光一闪"],
-                match_reason="🎲 灵光一闪: 随机探索非兴趣内容",
+                match_reason="灵光一闪: 随机探索非兴趣内容",
                 total_score=8.0
             )
 
@@ -547,22 +558,22 @@ class InterestEngine:
                         if self.add_interest(str(kw), auto_suggested=True):
                             added += 1
 
-            # L4: 深层动机 → 权重调整
+            # L4: 深层动机 → 权重调整（仅自动建议的兴趣，手动设置不覆盖）
             l4 = getattr(psycho_profile, 'deep_motivations', None)
             if l4:
                 if isinstance(l4, dict):
                     for kw, strength in l4.items():
                         if strength > 0.7:
-                            self.update_weight(str(kw), "high")
+                            self._update_auto_weight(str(kw), "high")
                         elif strength > 0.4:
-                            self.update_weight(str(kw), "medium")
+                            self._update_auto_weight(str(kw), "medium")
 
-            # L5: 衰退兴趣标记
+            # L5: 衰退兴趣标记（仅自动建议的兴趣，手动设置不覆盖）
             l5 = getattr(psycho_profile, 'declining', None)
             if l5:
                 if isinstance(l5, list):
                     for kw in l5:
-                        self.update_weight(str(kw), "low")
+                        self._update_auto_weight(str(kw), "low")
 
             if added > 0:
                 self.save()
@@ -666,25 +677,25 @@ class InterestEngine:
         w = sc.get("weights", {})  # 提前定义，f-string中引用
         print(f"""
 {Fore.CYAN}╔══════════════════════════════════════════════════════════╗
-║              🎯 兴趣偏好设置 (引擎 v2.0)                  ║
+║              兴趣偏好设置 (引擎 v2.0)                  ║
 ╚══════════════════════════════════════════════════════════╝{Style.RESET_ALL}
 
 {Fore.CYAN}【方案A】智能关键词增强:{Style.RESET_ALL}
   • 兴趣总数: {stats['total']} (手动{stats['manual']} | AI建议{stats['auto_suggested']})
   • 权重分布: 高{stats['high_weight']} | 中{stats['medium_weight']} | 低{stats['low_weight']}
   • 排除词: {stats['negative_keywords']} 个
-  • 同义词扩展: {Fore.GREEN + '✓' if self.settings.get('use_synonyms') else Fore.YELLOW + '✗'}{Style.RESET_ALL}
-  • AI关键词建议: {Fore.GREEN + '✓' if self.settings.get('ai_suggest') else Fore.YELLOW + '✗'}{Style.RESET_ALL}
+  • 同义词扩展: {Fore.GREEN + '' if self.settings.get('use_synonyms') else Fore.YELLOW + ''}{Style.RESET_ALL}
+  • AI关键词建议: {Fore.GREEN + '' if self.settings.get('ai_suggest') else Fore.YELLOW + ''}{Style.RESET_ALL}
 
 {Fore.CYAN}【方案B】AI驱动兴趣画像:{Style.RESET_ALL}
-  • PsychoProfile同步: {Fore.GREEN + '✓' if self.settings.get('auto_sync_psycho') else Fore.YELLOW + '✗'}{Style.RESET_ALL}
+  • PsychoProfile同步: {Fore.GREEN + '' if self.settings.get('auto_sync_psycho') else Fore.YELLOW + ''}{Style.RESET_ALL}
   • 灵光一闪: {stats['serendipity']} (随机探索非兴趣)
   • 历史标签追踪: {stats['history_tags']} 个
 
 {Fore.CYAN}【方案C】智能过滤评分:{Style.RESET_ALL}
-  • 多维度评分: {Fore.GREEN + '✓' if stats['scoring_enabled'] else Fore.YELLOW + '✗'}{Style.RESET_ALL}
+  • 多维度评分: {Fore.GREEN + '' if stats['scoring_enabled'] else Fore.YELLOW + ''}{Style.RESET_ALL}
   • 权重: 相关性{w.get('relevance',0.4):.0%} | 新颖度{w.get('novelty',0.2):.0%} | 多样性{w.get('diversity',0.15):.0%} | 质量{w.get('quality',0.25):.0%}
-  • 动态阈值: {Fore.GREEN + '✓' if sc.get('dynamic_threshold') else Fore.YELLOW + '✗'}{Style.RESET_ALL} (基准{sc.get('threshold_base',6.0)})
+  • 动态阈值: {Fore.GREEN + '' if sc.get('dynamic_threshold') else Fore.YELLOW + ''}{Style.RESET_ALL} (基准{sc.get('threshold_base',6.0)})
 
 {Fore.CYAN}【方案D】过滤模式:{Style.RESET_ALL} {Fore.GREEN}{stats['proxy_mode']}{Style.RESET_ALL}
   • simple=纯关键词 | smart=智能混合(推荐) | ai_only=纯AI | watch_all=全看

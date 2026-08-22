@@ -13,6 +13,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+
+def _hidden_subprocess_kwargs() -> dict:
+    """Avoid flashing ffmpeg helper windows on Windows."""
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    return {"creationflags": flags} if flags else {}
+
 from .settings import DATA_DIR
 
 try:
@@ -217,7 +223,7 @@ class VideoASR:
             "-t", "1800",  # 最多30分钟
             audio_path,
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, **_hidden_subprocess_kwargs())
         if result.returncode != 0:
             raise RuntimeError(f"ffmpeg 提取音频失败: {result.stderr[:200]}")
         return audio_path

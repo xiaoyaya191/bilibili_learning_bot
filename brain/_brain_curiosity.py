@@ -30,7 +30,7 @@ class BrainCuriosityMixin:
         
         # 动态视频数量：起始默认2-3个，根据AI评估的content_richness逐步提升
         max_videos = CURIOSITY_DEEP_DIVE_DEFAULT_VIDEOS
-        log(f"🧭 好奇心驱动深度搜索启动！主题: '{topic}' (初始上限{max_videos}个，按需提升至{CURIOSITY_DEEP_DIVE_HIGH_VIDEOS}个)", "LEARN")
+        log(f"好奇心驱动深度搜索启动！主题: '{topic}' (初始上限{max_videos}个，按需提升至{CURIOSITY_DEEP_DIVE_HIGH_VIDEOS}个)", "LEARN")
         
         videos_watched = 0
         key_findings = []
@@ -46,7 +46,7 @@ class BrainCuriosityMixin:
             # 搜索B站视频
             if current_query not in search_queries_tried:
                 search_queries_tried.add(current_query)
-                log(f"🔍 B站搜索第{dive_round+1}轮: '{current_query}' (上限:{max_videos}个)", "LEARN")
+                log(f"B站搜索第{dive_round+1}轮: '{current_query}' (上限:{max_videos}个)", "LEARN")
                 
                 try:
                     if not self.agent_runner:
@@ -75,7 +75,7 @@ class BrainCuriosityMixin:
                         continue
                     
                     videos_watched += 1
-                    log(f"📺 [{videos_watched}/{max_videos}] 深度看: 《{title[:40]}》", "LEARN")
+                    log(f"[{videos_watched}/{max_videos}] 深度看: 《{title[:40]}》", "LEARN")
                     
                     try:
                         await _bili_throttle("深度搜索-看视频")
@@ -105,10 +105,19 @@ class BrainCuriosityMixin:
                         f"已看{videos_watched}个相关视频\n"
                         f"视频内容摘要:\n" + "\n---\n".join(all_subtitles[-5:])
                     )
+                    # [CFG] deep_search.prompts.curiosity 非空时替代默认系统提示词（每次调用热读取）
+                    _cur_prompt = SYSTEM_PROMPT_CURIOSITY_DIVE
+                    try:
+                        from core.config import load_config as _lc
+                        _p = ((_lc().get("deep_search") or {}).get("prompts") or {}).get("curiosity")
+                        if _p and str(_p).strip():
+                            _cur_prompt = str(_p)
+                    except Exception:
+                        pass
                     resp = await self._call_ai_with_retry(
                         model=MODEL_BRAIN,
                         messages=[
-                            {"role": "system", "content": SYSTEM_PROMPT_CURIOSITY_DIVE},
+                            {"role": "system", "content": _cur_prompt},
                             {"role": "user", "content": f"{review_context}\n\n{videos_watched}/{max_videos}个视频（上限{videos_watched}/{CURIOSITY_DEEP_DIVE_HIGH_VIDEOS}）。请判断是继续搜索还是已足够，并评估内容丰度。"}
                         ],
                         timeout=90
@@ -148,15 +157,15 @@ class BrainCuriosityMixin:
                     if content_richness >= 0.6 and dive_tier < 2:
                         dive_tier = 2
                         max_videos = CURIOSITY_DEEP_DIVE_HIGH_VIDEOS
-                        log(f"📈 内容丰度 {content_richness:.0%} -> 上限提升至{max_videos}个 (干货满满！)", "LEARN")
+                        log(f"内容丰度 {content_richness:.0%} -> 上限提升至{max_videos}个 (干货满满！)", "LEARN")
                     elif content_richness >= 0.3 and dive_tier < 1:
                         dive_tier = 1
                         max_videos = CURIOSITY_DEEP_DIVE_MID_VIDEOS
-                        log(f"📈 内容丰度 {content_richness:.0%} -> 上限提升至{max_videos}个", "LEARN")
+                        log(f"内容丰度 {content_richness:.0%} -> 上限提升至{max_videos}个", "LEARN")
                     
                     if dive_decision.get("continue_search") and dive_decision.get("new_query"):
                         current_query = dive_decision["new_query"]
-                        log(f"🧭 继续深度搜索，新关键词: '{current_query}' (满意度: {dive_decision.get('satisfaction', 0):.0%}, 丰度:{content_richness:.0%})", "LEARN")
+                        log(f"继续深度搜索，新关键词: '{current_query}' (满意度: {dive_decision.get('satisfaction', 0):.0%}, 丰度:{content_richness:.0%})", "LEARN")
                         continue
                     else:
                         tier_label = ["浅层","中等","丰富"][dive_tier]
@@ -175,7 +184,7 @@ class BrainCuriosityMixin:
             try:
                 self.write_learning_log(f"深度搜索/{topic}", topic, "")
                 # 写入日记
-                if hasattr(self, "diary_mgr"):
+                if (config.get("diary", {}) or {}).get("enabled", False) and hasattr(self, "diary_mgr"):
                     self.diary_mgr.add_entry(
                         f"好奇心深度搜索: {topic}",
                         f"搜索主题「{topic}」观看了{videos_watched}个视频。\n关键发现:\n{summary_text}",

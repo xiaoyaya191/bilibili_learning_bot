@@ -1,36 +1,106 @@
+"""真正的进化系统：基于行为反馈自动调整人格参数。"""
 from __future__ import annotations
 
-from typing import Any
-
-from .llm import ModelClient
-from .memory import MemoryBank
-from .state import BotState, JsonStore, now_iso
+import json
+from datetime import datetime
+from pathlib import Path
 
 
 class EvolutionEngine:
-    def __init__(self, model: ModelClient, state: BotState, memory: MemoryBank):
-        self.model = model
-        self.state = state
-        self.memory = memory
-        self.store = JsonStore("web_growth_log.json", {"items": []})
+    """基于互动反馈的自动进化系统。"""
 
-    def logs(self) -> dict[str, Any]:
-        return self.store.read()
+    def __init__(self, data_dir=None):
+        if data_dir is None:
+            try:
+                from core.user_data import DATA_DIR
+                data_dir = DATA_DIR
+            except Exception:
+                data_dir = Path(".")
+        self.data_dir = Path(data_dir)
+        self.log_file = self.data_dir / "evolution_log.json"
+        self.state_file = self.data_dir / "evolution_state.json"
+        self.state = self._load_state()
+        self.logs = self._load_logs()
 
-    async def reflect(self) -> dict[str, Any]:
-        persona = self.state.active_persona()
-        memories = self.memory.list(limit=20)
-        prompt = (
-            "请根据最近互动为这个 AI 角色做一次每日反思。只输出 JSON，字段：reflection、style_delta、new_rule、mood。\n"
-            f"当前人格：{persona}\n最近记忆：{memories}"
-        )
-        text = await self.model.chat([
-            {"role": "system", "content": "你是角色成长记录员，只提出温和、可控的性格演化建议。"},
-            {"role": "user", "content": prompt},
-        ], purpose="personality-evolution")
-        item = {"raw": text, "created_at": now_iso()}
-        data = self.store.read()
-        data.setdefault("items", []).insert(0, item)
-        data["items"] = data["items"][:200]
-        self.store.write(data)
-        return item
+    def _load_state(self):
+        try:
+            if self.state_file.exists():
+                return json.loads(self.state_file.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        return {
+            "mood": "neutral",  # happy/excited/neutral/sad/frustrated
+            "energy": 100,
+            "traits": {
+                "curiosity": 0.5,
+                "caution": 0.3,
+                "sociability": 0.5,
+                "creativity": 0.4,
+            },
+            "total_interactions": 0,
+            "success_count": 0,
+            "fail_count": 0,
+        }
+
+    def _load_logs(self):
+        try:
+            if self.log_file.exists():
+                data = json.loads(self.log_file.read_text(encoding="utf-8"))
+                return data.get("logs", [])
+        except Exception:
+            pass
+        return []
+
+    def _save(self):
+        try:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            self.state_file.write_text(json.dumps(self.state, ensure_ascii=False, indent=2), encoding="utf-8")
+            self.log_file.write_text(json.dumps({"logs": self.logs[-200:], "mood": self.state}, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def record_event(self, event_type, success, detail=""):
+        """记录一个互动事件并调整状态。"""
+        self.state["total_interactions"] += 1
+        if success:
+            self.state["success_count"] += 1
+            self._adjust_mood(1, f"{event_type}成功")
+            self.state["traits"]["sociability"] = min(1.0, self.state["traits"]["sociability"] + 0.01)
+        else:
+            self.state["fail_count"] += 1
+            self._adjust_mood(-2, f"{event_type}失败: {detail}")
+            self.state["traits"]["caution"] = min(1.0, self.state["traits"]["caution"] + 0.02)
+
+        self.logs.append({
+            "time": datetime.now().isoformat(),
+            "event": event_type,
+            "success": success,
+            "detail": detail[:200],
+            "mood": self.state["mood"],
+        })
+        self.logs = self.logs[-200:]
+        self._save()
+
+    def _adjust_mood(self, delta, reason):
+        """调整心情值。"""
+        mood_map = {"frustrated": -2, "sad": -1, "neutral": 0, "happy": 1, "excited": 2}
+        reverse_map = {v: k for k, v in mood_map.items()}
+        current = mood_map.get(self.state["mood"], 0)
+        new_val = max(-2, min(2, current + delta))
+        self.state["mood"] = reverse_map.get(new_val, "neutral")
+        self.state["energy"] = max(0, min(100, self.state["energy"] + delta))
+
+    def get_mood_prompt(self):
+        """生成心情提示词注入到 AI prompt。"""
+        mood_desc = {
+            "excited": "你现在非常兴奋，回复风格热情洋溢，多用感叹号",
+            "happy": "你现在心情不错，回复风格友好愉快",
+            "neutral": "你现在心情平静，正常回复即可",
+            "sad": "你现在有点低落，回复风格偏沉稳",
+            "frustrated": "你现在有点沮丧，回复风格谨慎简短",
+        }
+        return mood_desc.get(self.state["mood"], "")
+
+    def get_trait_adjustments(self):
+        """返回当前 trait 参数，用于调整互动概率。"""
+        return self.state["traits"]

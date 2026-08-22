@@ -95,7 +95,7 @@ class BrainUpsMixin:
             UP_FOLLOW_FAVORITE_UID_LIST.remove(uid)
             config.setdefault("up_follow", {})["favorite_up_uid_list"] = UP_FOLLOW_FAVORITE_UID_LIST
             save_config(config)
-        log(f"💔 已取消喜欢UP主: {up_name}", "FAVORITE")
+        log(f"已取消喜欢UP主: {up_name}", "FAVORITE")
 
     def get_favorite_ups(self):
         """获取所有喜欢的UP主列表 [{name, uid, ...}]。"""
@@ -135,7 +135,7 @@ class BrainUpsMixin:
                 if uid:
                     uid = int(uid)
                     self.set_up_uid(up_name, uid)
-                    log(f"🔍 搜索解析 UP主: {up_name} → UID: {uid}", "RESOLVE")
+                    log(f"搜索解析 UP主: {up_name} → UID: {uid}", "RESOLVE")
                     return uid
         except Exception as e:
             log(f"搜索UP主 {up_name} 失败: {e}", "WARN")

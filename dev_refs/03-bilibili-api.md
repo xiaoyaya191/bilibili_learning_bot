@@ -8,7 +8,7 @@
 ```python
 from api.client import BiliClient
 
-# 创建客户端（自动从 Data/bilibili_cookies.json 加载凭证）
+# 创建客户端（自动从用户数据目录加载凭证）
 bili = BiliClient()
 bili._load_credential()  # 加载 cookie
 await bili.init_user_info()  # 初始化用户信息
@@ -142,7 +142,8 @@ await _bili_throttle()
 
 ```python
 # 从文件加载
-cookie_file = "Data/bilibili_cookies.json"
+from core.config import COOKIE_FILE
+cookie_file = COOKIE_FILE
 if os.path.exists(cookie_file):
     with open(cookie_file, 'r', encoding='utf-8') as f:
         cookies = json.load(f)

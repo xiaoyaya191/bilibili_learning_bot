@@ -88,12 +88,12 @@ UP主：{up}
     outline = (outline_resp.choices[0].message.content or "").strip()
 
     note_parts = [
-        "## 🎯 长视频章节锁定笔记\n",
+        "## 长视频章节锁定笔记\n",
         "> 本笔记采用“章节锁定 + 内容追加”流程生成：先固定章节大纲，再逐章补充知识点，减少长视频信息遗漏。\n",
         "### 锁定章节大纲\n",
         outline,
         "\n---\n",
-        "## 📌 逐章内容追加\n",
+        "## 逐章内容追加\n",
     ]
 
     for idx, chunk in enumerate(chunks, start=1):

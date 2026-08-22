@@ -52,9 +52,11 @@ class BotSkills:
         safety = self.safety.check(comment_text, user_id=user_id, user_name=user_name)
         if safety["blocked"] or safety["risk"] == "high":
             return {"raw": "{}", "risk": safety["risk"], "blocked": str(safety["blocked"])}
+        template = str(self.state.templates().get("comment_reply") or "").strip()
+        if not template:
+            raise ValueError("请先在提示词设置中填写评论回复提示词")
         prompt = (
-            f"{self.state.templates().get('comment_reply', '请为 B 站评论生成自然回复。')}\n"
-            "要求：短句、不过度热情、不引战、不营销。\n"
+            f"{template}\n"
             "只返回 JSON，字段为 reply、tone、risk。risk 只能是 low/medium/high。\n"
             f"评论内容：{comment_text}"
         )
@@ -76,7 +78,7 @@ class BotSkills:
             {"role": "system", "content": self.state.persona_prompt_block()},
             {"role": "system", "content": self.memory.prompt_block(comment_text, user_id=user_id)},
             {"role": "user", "content": [
-                {"type": "text", "text": "请结合评论文字和图片内容，生成一条自然 B 站回复。只返回 JSON：reply、tone、risk。"},
+                {"type": "text", "text": "请按照当前人格和用户提示词，结合评论文字与图片的可确认事实生成回复。只返回 JSON：reply、tone、risk。"},
                 {"type": "text", "text": f"评论：{comment_text}"},
                 {"type": "image_url", "image_url": {"url": image_url}},
             ]},
@@ -95,9 +97,12 @@ class BotSkills:
         ], purpose="video-summary")
 
     async def dynamic_draft(self, topic: str, source_note: str = "") -> str:
+        template = str(self.state.templates().get("dynamic_draft") or "").strip()
+        if not template:
+            raise ValueError("请先在提示词设置中填写动态草稿提示词")
         return await self.model.chat([
             {"role": "system", "content": self.state.persona_prompt_block()},
-            {"role": "user", "content": f"{self.state.templates().get('dynamic_draft', '写一条 B 站动态草稿。')}\n主题：{topic}\n素材：{source_note}\n要求自然、有观点、不像广告。"},
+            {"role": "user", "content": f"{template}\n主题：{topic}\n素材：{source_note}"},
         ], purpose="dynamic-draft")
 
     async def image_prompt(self, idea: str) -> str:
@@ -123,3 +128,85 @@ class BotSkills:
             {"role": "system", "content": "你是检索规划助手。当前没有搜索结果，请给出搜索关键词、可信来源类型和核验清单。"},
             {"role": "user", "content": query},
         ], model_role="fast", purpose="search-plan")
+
+
+# ===== 持久化技能库 =====
+import json
+from pathlib import Path
+from datetime import datetime
+
+
+class SkillBank:
+    """持久化的 AI 技能库，越用越聪明。"""
+
+    def __init__(self, data_dir=None):
+        if data_dir is None:
+            try:
+                from core.user_data import DATA_DIR
+                data_dir = DATA_DIR
+            except Exception:
+                data_dir = Path(".")
+        self.data_dir = Path(data_dir)
+        self.skills_file = self.data_dir / "skills.json"
+        self.skills = self._load()
+
+    def _load(self):
+        try:
+            if self.skills_file.exists():
+                return json.loads(self.skills_file.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        return []
+
+    def _save(self):
+        try:
+            self.skills_file.parent.mkdir(parents=True, exist_ok=True)
+            self.skills_file.write_text(json.dumps(self.skills, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def add(self, topic, skill_text, source_bvid="", score=0):
+        """添加一条技能。"""
+        skill = {
+            "topic": topic[:50],
+            "skill": skill_text[:500],
+            "source_bvid": source_bvid,
+            "score": score,
+            "created_at": datetime.now().isoformat(),
+            "used_count": 0,
+        }
+        # 去重：同主题的更新
+        existing = [s for s in self.skills if s.get("topic") == topic]
+        if existing:
+            existing[0].update(skill)
+        else:
+            self.skills.append(skill)
+        self._save()
+
+    def get_relevant(self, topic="", limit=5):
+        """获取和主题相关的技能。"""
+        if not self.skills:
+            return []
+        if topic:
+            relevant = [s for s in self.skills if topic.lower() in s.get("topic", "").lower() or s.get("topic", "").lower() in topic.lower()]
+            if relevant:
+                return relevant[:limit]
+        return sorted(self.skills, key=lambda x: x.get("used_count", 0), reverse=True)[:limit]
+
+    def prompt_block(self, topic=""):
+        """生成注入到 AI prompt 的技能块。"""
+        relevant = self.get_relevant(topic)
+        if not relevant:
+            return ""
+        lines = ["[已掌握的相关技能]"]
+        for s in relevant:
+            lines.append(f"- {s['topic']}: {s['skill'][:100]}")
+        return "\n".join(lines)
+
+    def increment_use(self, topic):
+        """增加技能使用次数。"""
+        for s in self.skills:
+            if s.get("topic") == topic:
+                s["used_count"] = s.get("used_count", 0) + 1
+                break
+        self._save()

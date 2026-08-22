@@ -16,11 +16,13 @@ import httpx
 
 from .llm import ModelClient
 from .settings import BotSettings, DATA_DIR
+from utils.subtitles import subtitle_priority
+
 from .grid_frames import (
-    extract_grid_frames,
+    extract_visual_note_grids,
     grid_images_to_base64,
     replace_markers_with_screenshots,
-    bilinote_prompt_suffix,
+    visual_note_prompt_suffix,
 )
 
 # imageio-ffmpeg 回退检测
@@ -107,7 +109,7 @@ class VideoUnderstanding:
         return Path(configured).expanduser()
 
     # ═══════════════════════════════════════════════════════════════
-    # 🔐 WBI 签名（防 B站 API 返回错误字幕数据）
+    # WBI 签名（防 B站 API 返回错误字幕数据）
     # ═══════════════════════════════════════════════════════════════
     async def _get_wbi_keys(self, cookies: dict[str, str] | None = None) -> tuple | None:
         """获取 WBI 签名密钥（类级别缓存，一次获取全局复用）。"""
@@ -143,7 +145,7 @@ class VideoUnderstanding:
         return sp
 
     # ═══════════════════════════════════════════════════════════════
-    # 📡 主入口
+    # 主入口
     # ═══════════════════════════════════════════════════════════════
     async def understand(self, bvid_or_url: str, mode: str = "", cookies: dict[str, str] | None = None) -> UnderstandingResult:
         selected = normalize_mode(mode or self.settings.video_mode)
@@ -175,11 +177,16 @@ class VideoUnderstanding:
         video_path: Path | None = None
         try:
             video_path = await self.download_video(asset, cookies=cookies)
-            if self.settings.frame_anchor_mode == "bilinote" and video_path:
-                grid_imgs = extract_grid_frames(video_path)
+            if self.settings.frame_note_mode == "visual_note" and video_path:
+                grid_imgs = extract_visual_note_grids(video_path, {
+                    "visual_note_frame_interval": self.settings.visual_note_frame_interval,
+                    "visual_note_max_frames": self.settings.visual_note_max_frames,
+                    "visual_note_grid_cols": self.settings.visual_note_grid_cols,
+                    "visual_note_grid_rows": self.settings.visual_note_grid_rows,
+                })
                 if grid_imgs:
                     asset.frames = []
-                    summary = await self.summarize_with_grid(asset, video_path, grid_imgs, selected in {"hybrid", "smart"})
+                    summary = await self.summarize_with_grid(asset, video_path, grid_imgs, selected in {"hybrid", "smart"}, self.settings.custom_video_prompt)
                     if self.settings.video_delete_after_understand:
                         self.delete_downloaded_video(video_path)
                     return UnderstandingResult(selected, True, "", asset, summary, gate)
@@ -206,7 +213,7 @@ class VideoUnderstanding:
             pass
 
     # ═══════════════════════════════════════════════════════════════
-    # 🔍 fetch_metadata — 获取视频元数据（🆕 带 WBI 签名 + HTTP/2）
+    # fetch_metadata — 获取视频元数据（带 WBI 签名 + HTTP/2）
     # ═══════════════════════════════════════════════════════════════
     async def fetch_metadata(self, bvid: str, cookies: dict[str, str] | None = None) -> VideoAsset:
         headers = {"User-Agent": USER_AGENT, "Referer": f"https://www.bilibili.com/video/{bvid}"}
@@ -232,7 +239,7 @@ class VideoUnderstanding:
         )
 
     # ═══════════════════════════════════════════════════════════════
-    # 📝 fetch_subtitles — 获取 CC 字幕（🆕 带 WBI 签名 + HTTP/2）
+    # fetch_subtitles — 获取 CC 字幕（带 WBI 签名 + HTTP/2）
     # ═══════════════════════════════════════════════════════════════
     async def fetch_subtitles(self, asset: VideoAsset, cookies: dict[str, str] | None = None) -> None:
         headers = {"User-Agent": USER_AGENT, "Referer": asset.url}
@@ -329,7 +336,7 @@ class VideoUnderstanding:
         return overlap > 0
 
     # ═══════════════════════════════════════════════════════════════
-    # ⬇️ download_video — DASH 音视频分离下载 + ffmpeg 合并带声音
+    # download_video — DASH 音视频分离下载 + ffmpeg 合并带声音
     # ═══════════════════════════════════════════════════════════════
     def _resolve_quality(self) -> int:
         """把配置中的画质档位解析为 B站 qn 值；默认 best=127（自动最高画质）。"""
@@ -437,7 +444,7 @@ class VideoUnderstanding:
                 "-c:a", "aac", "-b:a", "192k",
                 "-movflags", "+faststart",
                 str(out_path),
-            ], capture_output=True, text=True)
+            ], capture_output=True, text=True, **_hidden_subprocess_kwargs())
 
             if result.returncode != 0:
                 # AAC 编码失败，回退到纯 copy 模式
@@ -447,7 +454,7 @@ class VideoUnderstanding:
                     "-c", "copy",
                     "-movflags", "+faststart",
                     str(out_path),
-                ], check=True, capture_output=True)
+                ], check=True, capture_output=True, **_hidden_subprocess_kwargs())
         finally:
             # 清理临时音视频分片文件
             video_tmp.unlink(missing_ok=True)
@@ -456,7 +463,7 @@ class VideoUnderstanding:
         return out_path
 
     # ═══════════════════════════════════════════════════════════════
-    # 🎞️ extract_frames — ffmpeg 抽帧（主方案）
+    # extract_frames — ffmpeg 抽帧（主方案）
     # ═══════════════════════════════════════════════════════════════
     def extract_frames(self, video_path: Path, frame_count: int) -> list[Path]:
         ffmpeg = (find_ffmpeg() if find_ffmpeg else None) or shutil.which("ffmpeg")
@@ -490,7 +497,8 @@ class VideoUnderstanding:
             pattern,
         ]
         try:
-            subprocess.run(command, check=True, capture_output=True, text=True, timeout=120)
+            subprocess.run(command, check=True, capture_output=True, text=True, timeout=120,
+                           **_hidden_subprocess_kwargs())
         except subprocess.CalledProcessError as e:
             raise RuntimeError(
                 f"ffmpeg 抽帧失败 (rc={e.returncode}): {e.stderr.strip()[-300:]}"
@@ -502,7 +510,7 @@ class VideoUnderstanding:
         return frames
 
     # ═══════════════════════════════════════════════════════════════
-    # 🎞️ extract_frames_with_opencv — OpenCV 回退方案
+    # extract_frames_with_opencv — OpenCV 回退方案
     # ═══════════════════════════════════════════════════════════════
     def extract_frames_with_opencv(self, video_path: Path, frame_count: int, out_dir: Path) -> list[Path]:
         try:
@@ -536,7 +544,7 @@ class VideoUnderstanding:
         return paths
 
     # ═══════════════════════════════════════════════════════════════
-    # ⏱️ probe_duration — ffprobe/ffmpeg 获取时长
+    # probe_duration — ffprobe/ffmpeg 获取时长
     # ═══════════════════════════════════════════════════════════════
     def probe_duration(self, video_path: Path) -> int:
         """获取视频时长(秒)。优先 ffprobe，fallback 到 ffmpeg stderr 解析。"""
@@ -549,7 +557,8 @@ class VideoUnderstanding:
                 "-of", "default=noprint_wrappers=1:nokey=1",
                 str(video_path),
             ]
-            result = subprocess.run(command, check=False, text=True, capture_output=True, timeout=15)
+            result = subprocess.run(command, check=False, text=True, capture_output=True, timeout=15,
+                                    **_hidden_subprocess_kwargs())
             try:
                 return int(float(result.stdout.strip()))
             except ValueError:
@@ -561,7 +570,7 @@ class VideoUnderstanding:
             try:
                 result = subprocess.run(
                     [ffmpeg, "-i", str(video_path), "-f", "null", "-"],
-                    capture_output=True, text=True, timeout=30
+                    capture_output=True, text=True, timeout=30, **_hidden_subprocess_kwargs()
                 )
                 import re
                 m = re.search(r"Duration:\s*(\d+):(\d+):(\d+)\.(\d+)", result.stderr)
@@ -574,7 +583,7 @@ class VideoUnderstanding:
         return 0
 
     # ═══════════════════════════════════════════════════════════════
-    # 🧠 smart_gate — AI 智能筛选门
+    # smart_gate — AI 智能筛选门
     # ═══════════════════════════════════════════════════════════════
     async def smart_gate(self, asset: VideoAsset) -> dict[str, Any]:
         prompt = (
@@ -609,7 +618,7 @@ class VideoUnderstanding:
         return data
 
     # ═══════════════════════════════════════════════════════════════
-    # 📝 summarize_text_only — 纯文本总结
+    # summarize_text_only — 纯文本总结
     # ═══════════════════════════════════════════════════════════════
     async def summarize_text_only(self, asset: VideoAsset, gate: dict[str, Any] | None = None) -> str:
         content = (
@@ -624,7 +633,7 @@ class VideoUnderstanding:
         ], purpose="video-subtitle-understand")
 
     # ═══════════════════════════════════════════════════════════════
-    # 🖼️ summarize_with_frames — 多模态（帧+字幕）总结
+    # summarize_with_frames — 多模态（帧+字幕）总结
     # ═══════════════════════════════════════════════════════════════
     async def summarize_with_frames(self, asset: VideoAsset, include_subtitles: bool) -> str:
         text = (
@@ -645,11 +654,12 @@ class VideoUnderstanding:
         ], model_role="vision", purpose="video-frame-understand")
 
     # ═══════════════════════════════════════════════════════════════
-    # 🖼️📝 summarize_with_grid — BiliNote 式图文笔记（网格帧 + 标记回写）
+    # summarize_with_grid — 图文学习笔记（网格帧 + 标记回写）
     # ═══════════════════════════════════════════════════════════════
-    async def summarize_with_grid(self, asset: VideoAsset, video_path: Path, grid_imgs: list, include_subtitles: bool) -> str:
-        """frame_anchor_mode='bilinote' 时调用：把网格图发给 LLM 生成图文笔记，
-        并把 `*Screenshot-[mm:ss]` / `*Content-[mm:ss]` 标记替换为真实截图。"""
+    async def summarize_with_grid(self, asset: VideoAsset, video_path: Path, grid_imgs: list, include_subtitles: bool, custom_prompt: str = "") -> str:
+        """frame_note_mode='visual_note' 时调用：把网格图发给 LLM 生成图文笔记，
+        并把 `*Screenshot-[mm:ss]` / `*Content-[mm:ss]` 标记替换为真实截图。
+        custom_prompt: 用户自定义提示词，追加在标准 prompt 之后。"""
         grid_b64 = grid_images_to_base64(grid_imgs) if grid_imgs else []
         text = (
             "你正在为 B 站视频生成一份「图文笔记」。请结合网格截图、基础信息"
@@ -657,7 +667,7 @@ class VideoUnderstanding:
             f"标题：{asset.title}\nUP：{asset.up_name}\n时长：{asset.duration}s\n"
             f"简介：{asset.description[:1000]}\n"
             f"字幕：{(asset.subtitles if include_subtitles else '[本模式不使用字幕]')[:6000]}\n"
-            + bilinote_prompt_suffix()
+            + visual_note_prompt_suffix(custom_prompt)
         )
         content: list[dict[str, Any]] = [{"type": "text", "text": text}]
         for b64 in grid_b64:
@@ -665,6 +675,10 @@ class VideoUnderstanding:
         md = await self.model.chat([
             {"role": "system", "content": "你是视频图文笔记助手，必须同时参考画面证据和文本证据，输出带目录、带配图的 Markdown。"},
             {"role": "user", "content": content},
-        ], model_role="vision", purpose="video-bilinote-note")
+        ], model_role="vision", purpose="video-visual-note")
         md, _ = replace_markers_with_screenshots(md, video_path, inline=True)
         return md
+def _hidden_subprocess_kwargs() -> dict:
+    """Avoid flashing an ffmpeg console window on Windows."""
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    return {"creationflags": flags} if flags else {}

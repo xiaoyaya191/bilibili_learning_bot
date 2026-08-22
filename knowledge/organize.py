@@ -7,6 +7,7 @@ from core.globals import *
 from utils.display import log
 from utils.helpers import sanitize_filename
 from brain.video_analysis import _scan_knowledge_base_md_files
+from knowledge.classifier import KnowledgeBaseClassifier
 
 async def organize_knowledge_base():
     """扫描并整理知识库：将非3层目录结构的文件AI自动归位。
@@ -18,7 +19,7 @@ async def organize_knowledge_base():
     4. 支持4选1确认：本次允许/一直允许/不允许/AI审查
     """
     print(f"\n{Fore.LIGHTYELLOW_EX}╔══════════════════════════════════════════════════════════╗{Style.RESET_ALL}")
-    print(f"{Fore.LIGHTYELLOW_EX}║  📂 一键整理知识库 - AI智能归类到3层                      ║{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}║  一键整理知识库 - AI智能归类到3层                      ║{Style.RESET_ALL}")
     print(f"{Fore.LIGHTYELLOW_EX}╚══════════════════════════════════════════════════════════╝{Style.RESET_ALL}")
 
     if not os.path.exists(KNOWLEDGE_BASE_DIR):
@@ -64,9 +65,9 @@ async def organize_knowledge_base():
             unique_shallow.append(entry)
 
     print(f"\n{Fore.CYAN}扫描结果:{Style.RESET_ALL}")
-    print(f"  {Fore.GREEN}✓ 3层已到位: {len(ok_files)} 个{Style.RESET_ALL}")
-    print(f"  {Fore.YELLOW}⚠ 非3层需整理: {len(unique_shallow)} 个{Style.RESET_ALL}")
-    print(f"  {Fore.RED}🗑 重复文件(可清理): {len(duplicates)} 个{Style.RESET_ALL}")
+    print(f"  {Fore.GREEN}3层已到位: {len(ok_files)} 个{Style.RESET_ALL}")
+    print(f"  {Fore.YELLOW}非3层需整理: {len(unique_shallow)} 个{Style.RESET_ALL}")
+    print(f"  {Fore.RED}重复文件(可清理): {len(duplicates)} 个{Style.RESET_ALL}")
 
     if not unique_shallow and not duplicates:
         print(f"{Fore.GREEN}[OK] 知识库已全部整理完毕！{Style.RESET_ALL}")
@@ -128,7 +129,7 @@ async def organize_knowledge_base():
         print(f"  {Fore.CYAN}[整理] 选择 (1-4, 回车=1): {Style.RESET_ALL}", end="")
 
         import sys
-        sys.stdout.flush()
+        (sys.stdout.flush() if sys.stdout else None)
         ch = input().strip()
 
         if ch == "2":
@@ -144,12 +145,11 @@ async def organize_knowledge_base():
     async def ai_review(action_desc, detail=""):
         """AI审查"""
         try:
-            resp = await _call_ai_with_retry_static(
+            raw = await _call_ai_with_retry_static(
                 model=MODEL_BRAIN,
                 messages=[{"role": "user", "content": f"你是安全审查助手。评估此操作是否合理:{action_desc}。详情:{detail[:300]}。只返回JSON: {{\"safe\":true/false,\"reason\":\"理由\"}}"}],
                 request_timeout=20
             )
-            raw = resp.choices[0].message.content
             s = raw.find("{")
             e = raw.rfind("}")
             if s >= 0 and e >= s:
@@ -297,12 +297,12 @@ async def organize_knowledge_base():
 
     # ── 汇总 ──
     print(f"\n{Fore.LIGHTYELLOW_EX}╔══════════════════════════════════════════════════════════╗{Style.RESET_ALL}")
-    print(f"{Fore.LIGHTYELLOW_EX}║  📂 整理完成！                                            ║{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}║  整理完成！                                            ║{Style.RESET_ALL}")
     print(f"{Fore.LIGHTYELLOW_EX}╠══════════════════════════════════════════════════════════╣{Style.RESET_ALL}")
-    print(f"{Fore.LIGHTYELLOW_EX}║{Style.RESET_ALL}  {Fore.GREEN}✓ AI归类移动: {moved_count} 个{Style.RESET_ALL}")
-    print(f"{Fore.LIGHTYELLOW_EX}║{Style.RESET_ALL}  {Fore.RED}🗑 重复清理: {deleted_count} 个{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}║{Style.RESET_ALL}  {Fore.GREEN}AI归类移动: {moved_count} 个{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}║{Style.RESET_ALL}  {Fore.RED}重复清理: {deleted_count} 个{Style.RESET_ALL}")
     print(f"{Fore.LIGHTYELLOW_EX}║{Style.RESET_ALL}  {Fore.YELLOW}⊘ 跳过: {skipped_count} 个{Style.RESET_ALL}")
-    print(f"{Fore.LIGHTYELLOW_EX}║{Style.RESET_ALL}  {Fore.GREEN}✓ 3层文件: {len(ok_files)} 个 (未动){Style.RESET_ALL}")
+    print(f"{Fore.LIGHTYELLOW_EX}║{Style.RESET_ALL}  {Fore.GREEN}3层文件: {len(ok_files)} 个 (未动){Style.RESET_ALL}")
     print(f"{Fore.LIGHTYELLOW_EX}╚══════════════════════════════════════════════════════════╝{Style.RESET_ALL}")
 
     # 显示新的分类结构
@@ -314,4 +314,3 @@ async def organize_knowledge_base():
 
 # ── [N] 自定义知识管理（增删改查）───────────────────────────────────────
 CUSTOM_KNOWLEDGE_DIR = os.path.join(KNOWLEDGE_BASE_DIR, "自定义知识")
-

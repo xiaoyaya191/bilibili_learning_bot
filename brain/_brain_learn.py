@@ -7,32 +7,34 @@ import re
 from datetime import datetime
 
 from brain._mixin_imports import *
+from api.subtitles import SYSTEM_PROMPT_COMMENT_SUMMARY
+from brain.local_note import build_local_subtitle_note
 
 
 class BrainLearnMixin:
     """学习与知识归档方法"""
 
-    async def learn_from_video(self, bvid, title, up, url, subtitle_text, topic_suggestion, video_desc="", score=None, comment_summary=None):
-        # 🔒 二次守卫：分数不达标直接拒绝归档
+    async def learn_from_video(self, bvid, title, up, url, subtitle_text, topic_suggestion, video_desc="", score=None, comment_summary=None, skip_auto_export=False):
+        # 二次守卫：分数不达标直接拒绝归档
         if score is not None and score < LEARN_MIN_SCORE:
-            log(f"📭 learn_from_video 拒绝低分归档: score={score:.1f}<{LEARN_MIN_SCORE} | 《{title}》", "LEARN")
+            log(f"learn_from_video 拒绝低分归档: score={score:.1f}<{LEARN_MIN_SCORE} | 《{title}》", "LEARN")
             return False
-        # 🔒 内容守卫：可学文本过短拒绝归档
+        # 内容守卫：可学文本过短拒绝归档
         if not subtitle_text or len(subtitle_text.strip()) < 100:
-            log(f"📭 learn_from_video 拒绝内容不足归档: {len(subtitle_text) if subtitle_text else 0}字<100 | 《{title}》", "LEARN")
+            log(f"learn_from_video 拒绝内容不足归档: {len(subtitle_text) if subtitle_text else 0}字<100 | 《{title}》", "LEARN")
             return False
-        # 🔒 AI语义守卫：字幕内容是否与标题真正匹配？（归档前最后一道防线）
+        # AI语义守卫：字幕内容是否与标题真正匹配？（归档前最后一道防线）
         if AI_SUBTITLE_VERIFY_ENABLED and title and subtitle_text:
             is_match, ai_conf, ai_reason = await self._ai_verify_subtitle_content(
                 title, subtitle_text, video_desc
             )
             if not is_match and ai_conf >= 0.7:
-                log(f"📭 learn_from_video 拒绝归档（AI语义不匹配）: conf={ai_conf:.2f} | {ai_reason} | 《{title}》", "LEARN")
+                log(f"learn_from_video 拒绝归档（AI语义不匹配）: conf={ai_conf:.2f} | {ai_reason} | 《{title}》", "LEARN")
                 return False
             elif not is_match:
-                log(f"⚠️ AI语义验证低置信不匹配(conf={ai_conf:.2f})，仍放行归档: {ai_reason} | 《{title}》", "WARN")
+                log(f"AI语义验证低置信不匹配(conf={ai_conf:.2f})，仍放行归档: {ai_reason} | 《{title}》", "WARN")
             else:
-                log(f"✅ AI语义验证通过: conf={ai_conf:.2f} | {ai_reason} | 《{title}》", "LEARN")
+                log(f"AI语义验证通过: conf={ai_conf:.2f} | {ai_reason} | 《{title}》", "LEARN")
         log(f"触发学习机制！主题建议: '{topic_suggestion}'", "LEARN")
 
         try:
@@ -40,7 +42,14 @@ class BrainLearnMixin:
             classify_text = subtitle_text
             if video_desc:
                 classify_text = f"[视频简介] {video_desc[:500]}\n\n[视频内容] {subtitle_text}"
-            category_path = self.classifier.classify_content(title, classify_text, bvid, topic_suggestion)
+            try:
+                category_path = await asyncio.wait_for(
+                    self.classifier.classify_content(title, classify_text, bvid, topic_suggestion),
+                    timeout=15,
+                )
+            except Exception as classify_error:
+                category_path = "未分类"
+                log(f"智能分类不可用，15秒内降级到未分类: {classify_error}", "WARN")
             log(f"智能分类结果: '{category_path}'", "KB")
             
             category_folder = self.classifier.get_or_create_folder(category_path)
@@ -68,32 +77,40 @@ class BrainLearnMixin:
                 if prompt_suffix:
                     summary_context += f"\n\n【笔记风格要求】\n{prompt_suffix}"
 
-            if should_use_chapter_lock(subtitle_text, config):
-                log("长视频触发章节锁定 + 内容追加算法", "LEARN")
-                summary_content = await generate_chapter_locked_note(
-                    ai_call=self._call_ai_with_retry,
-                    model=MODEL_BRAIN,
-                    system_prompt=SYSTEM_PROMPT_SUMMARY,
-                    title=title,
-                    up=up,
-                    url=url,
-                    subtitle_text=subtitle_text,
-                    video_desc=video_desc,
-                    cfg=config,
-                )
-            else:
-                resp = await self._call_ai_with_retry(
-                    model=MODEL_BRAIN,
-                    messages=[
-                        {"role": "system", "content": SYSTEM_PROMPT_SUMMARY},
-                        {"role": "user", "content": summary_context}
-                    ]
-                )
-                summary_content = resp.choices[0].message.content
+            summary_heading = "## [BRAIN] AI内容总结"
+            try:
+                if should_use_chapter_lock(subtitle_text, config):
+                    log("长视频触发章节锁定 + 内容追加算法", "LEARN")
+                    summary_content = await generate_chapter_locked_note(
+                        ai_call=self._call_ai_with_retry,
+                        model=MODEL_BRAIN,
+                        system_prompt=SYSTEM_PROMPT_SUMMARY,
+                        title=title,
+                        up=up,
+                        url=url,
+                        subtitle_text=subtitle_text,
+                        video_desc=video_desc,
+                        cfg=config,
+                    )
+                else:
+                    resp = await self._call_ai_with_retry(
+                        model=MODEL_BRAIN,
+                        messages=[
+                            {"role": "system", "content": SYSTEM_PROMPT_SUMMARY},
+                            {"role": "user", "content": summary_context}
+                        ]
+                    )
+                    summary_content = resp.choices[0].message.content
+                if not str(summary_content or "").strip():
+                    raise RuntimeError("AI总结返回空内容")
+            except Exception as summary_error:
+                summary_heading = "## 本地降级归档（原始材料）"
+                summary_content = build_local_subtitle_note(subtitle_text, video_desc)
+                log(f"AI总结不可用，已改为保存原始字幕摘录: {summary_error}", "WARN")
             
             desc_section = f"- **简介**: {video_desc}\n" if video_desc else ""
             file_header = (
-                f"# 📚 知识归档\n\n"
+                f"# 知识归档\n\n"
                 f"【视频信息】\n"
                 f"- **标题**: {title}\n"
                 f"- **UP主**: {up}\n"
@@ -103,12 +120,12 @@ class BrainLearnMixin:
                 f"- **分类**: {category_path}\n"
                 f"- **视频ID**: {bvid}\n\n"
                 f"---\n\n"
-                f"## [BRAIN] AI内容总结\n\n"
+                f"{summary_heading}\n\n"
             )
 
             full_content = file_header + summary_content
             
-            # 💬 评论区补充：合并在同一归档文件末尾
+            # 评论区补充：合并在同一归档文件末尾
             if comment_summary and len(comment_summary.strip()) > 5:
                 full_content += f"\n\n---\n\n{comment_summary.strip()}\n"
                 log(f"评论区补充已合并到归档", "LEARN")
@@ -127,25 +144,38 @@ class BrainLearnMixin:
             log(f"知识已总结并保存到: {file_path}", "SUCCESS")
             self.write_learning_log(category_path, title, file_path)
 
-            if MINDMAP_ENABLED and MINDMAP_AUTO_GENERATE:
-                try:
-                    mindmap_path = export_mindmap(file_path, cfg=config)
-                    log(f"思维导图已生成: {mindmap_path}", "SUCCESS")
-                except Exception as mm_e:
-                    log(f"思维导图生成失败: {mm_e}", "WARN")
+            # [P1-6] 技能提炼：AI 从视频方法论生成技能卡片（失败不影响归档主流程）
+            try:
+                from services.skill_bank import auto_extract_after_archive
+                _skill_source = str(summary_content or "")
+                if len(_skill_source) < 150:
+                    _skill_source = subtitle_text
+                await auto_extract_after_archive(
+                    title, _skill_source, video_bvid=bvid, video_url=url
+                )
+            except Exception as _skill_exc:
+                log(f"技能提炼跳过: {_skill_exc}", "WARN")
 
-            # 📄 Word 文档自动导出（独立 Word/ 文件夹，受 document_export.enabled 控制）
-            if DOC_EXPORT_ENABLED:
-                try:
-                    from services.document_export import export_docx
-                    docx_path = export_docx(file_path, kb_root=KNOWLEDGE_BASE_DIR)
-                    log(f"Word 文档已导出: {docx_path}", "SUCCESS")
-                except Exception as de_e:
-                    log(f"Word 文档导出失败: {de_e}", "WARN")
+            if not skip_auto_export:
+                if MINDMAP_ENABLED and MINDMAP_AUTO_GENERATE:
+                    try:
+                        mindmap_path = export_mindmap(file_path, cfg=config)
+                        log(f"思维导图已生成: {mindmap_path}", "SUCCESS")
+                    except Exception as mm_e:
+                        log(f"思维导图生成失败: {mm_e}", "WARN")
+
+                # Word 文档自动导出（独立 Word/ 文件夹，受 document_export.enabled 控制）
+                if DOC_EXPORT_ENABLED:
+                    try:
+                        from services.document_export import export_docx
+                        docx_path = export_docx(file_path, kb_root=KNOWLEDGE_BASE_DIR)
+                        log(f"Word 文档已导出: {docx_path}", "SUCCESS")
+                    except Exception as de_e:
+                        log(f"Word 文档导出失败: {de_e}", "WARN")
             
             self.classifier.show_category_structure()
 
-            # 📦 Highlights archive: save high-quality content to highlights/ folder
+            # Highlights archive: save high-quality content to highlights/ folder
             if DRY_GOODS_ENABLED and score is not None and score >= DRY_GOODS_MIN_SCORE:
                 try:
                     dry_category_folder = os.path.join(DRY_GOODS_DIR, category_path)
@@ -153,7 +183,7 @@ class BrainLearnMixin:
                     dry_file_path = os.path.join(dry_category_folder, file_name)
                     if not os.path.exists(dry_file_path):
                         dry_file_header = (
-                            f"# 🔥 Highlights\n\n"
+                            f"# Highlights\n\n"
                             f"【Video Info】\n"
                             f"- **Title**: {title}\n"
                             f"- **Author**: {up}\n"
@@ -174,7 +204,7 @@ class BrainLearnMixin:
                 except Exception as dry_e:
                     log(f"Highlights archive failed: {dry_e}", "WARN")
 
-            # 🧠 更新向量索引
+            # 更新向量索引
             if self.kb_search:
                 try:
                     await self.kb_search.update_entry(file_path)
@@ -193,7 +223,7 @@ class BrainLearnMixin:
         """从评论区提取有价值知识，返回摘要文本（不再写独立文件）。
         
         返回: (comment_summary: str | None, skipped_reason: str)
-        - 有知识 → ("## 💬 评论区补充\n- xxx", "")
+        - 有知识 → ("## 评论区补充\n- xxx", "")
         - 无知识/skip → (None, "原因")
         """
         # ── 质量门槛 ──
@@ -233,7 +263,7 @@ class BrainLearnMixin:
                 return None, f"AI判断评论区无实质知识内容"
 
             # 清理掉可能的 markdown 标题标记（保持简洁）
-            summary = summary.replace("## 💬 评论区知识精华", "## 💬 评论区补充")
+            summary = summary.replace("## 评论区知识精华", "## 评论区补充")
             log(f"评论区知识提炼成功 ({len(summary)}字)，将合并到视频归档", "SUCCESS")
             return summary, ""
 
@@ -260,7 +290,7 @@ class BrainLearnMixin:
             return True, 0, "未找到对应知识文件"
         
         file_path = found_files[0]
-        log(f"🔍 开始验证知识文件: {os.path.basename(file_path)}", "KB")
+        log(f"开始验证知识文件: {os.path.basename(file_path)}", "KB")
         
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
@@ -296,7 +326,7 @@ class BrainLearnMixin:
             if needs_rewrite:
                 corrected = verify_result.get("corrected_content")
                 if corrected and KNOWLEDGE_VERIFY_AUTO_FIX:
-                    log(f"🚨 知识可靠性不足(评分:{overall_score:.0%})，备份原文件并重写...", "WARN")
+                    log(f"知识可靠性不足(评分:{overall_score:.0%})，备份原文件并重写...", "WARN")
                     backup_and_rewrite_knowledge(file_path, corrected, verify_result)
                     return False, len(issues_bad), f"已修正（评分{overall_score:.0%}）"
                 else:

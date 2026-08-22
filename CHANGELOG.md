@@ -1,5 +1,159 @@
 # 更新日志
 
+## 3.1.4 favorability, skill bank, and reliability (2026-08-22)
+
+### Added
+
+- Favorability system: per-user relationship scores tracked across comments, DMs, and follows, with AI-driven adjustments, manual panel controls, and a default-off feature switch.
+- AI Skill Bank: videos are distilled into reusable skill cards on archive, injected into Agent DM replies by relevance, and fully manageable (CRUD) from the web panel.
+- Segmented AI DM replies: the bot can first acknowledge ("let me watch it"), then return with a real summary after processing.
+- Multi-threaded model availability testing with custom concurrency, timeout, and prompt; vision-capable models are included in fetching and testing.
+- Learning mini-goals: AI auto-setting plus manual CRUD and progress tracking.
+- Email-based password recovery via verification codes, first-run email setup wizard (skippable), backup email support, and profile email management.
+- Custom web panel port and an optional hide-system-tray setting (tray shown by default).
+
+### Fixed
+
+- Bilibili API Brotli encoding failures ("Can not decode content-encoding: br") via a three-layer Accept-Encoding and decode fallback in `utils/bili_compat.py`.
+- Duplicate system tray icons through a named-mutex single-owner guard.
+- Six memory-system bugs: AI-side memories could not really be deleted or edited from the panel, profiles resurrected after deletion, permanent memories were silently dropped by the 1000-entry trim, search results were polluted by unfiltered AI memories, and duplicate deletes reported fake success.
+- Follow-action attribute-8 false failure detection (risk-control verdict now verified with delay and retry).
+- Watch-history re-fetch that stopped working for some entries.
+- All partition "check status" and "refresh" buttons now show loading animation and toast feedback.
+
+### Optimized
+
+- Redesigned login, about, profile, config editor, learning live, UP-follow, and AI history search partitions; dashboard animations retuned to smooth Apple-style motion.
+- Human-readable logs: common WARN/ERROR messages are auto-translated into plain-language hints, unknown issues point to the support QQ group, with dedup to prevent spam.
+- Memory/KB and watch-history partitions now cache for 15 seconds and proxy covers from local disk for instant loads.
+- Runtime display precision changed from seconds to minutes; installer script updated to v3.1.4; test suite grown to 385 passing pytest cases.
+
+## 3.1.3## 3.1.3 social workspaces and reminder controls (2026-08-09)
+
+- Added the Bilibili watch-later workspace with explicit list, add, remove, and clear operations.
+- Added a unified local reminder workspace and a local dynamic draft center.
+- Added dynamic publishing to the existing review inbox. Dynamic publishing remains disabled by default.
+- Added fine-grained toggles for active DMs, watch later, owner sharing, dynamic drafts, and dynamic publishing.
+- Added safe open-folder access for known user-data groups and a bracket-emote preference for generated messages.
+
+## 3.1.3 reliability follow-up (2026-08-09)
+
+- Treat closed-comment error `12002` as terminal so mention delivery does not retry it.
+- Fixed Bilibili DM avatar/name lookups and legacy knowledge BV recovery.
+- Added universal refresh feedback, mobile DM overflow guards, and `deploy_termux.sh`.
+
+## 3.1.3 visual and alert workflow polish (2026-08-09)
+
+- Added TXT and JSON exports for the currently filtered, redacted full log stream.
+- Added an optional, default-off email-review mode. When enabled, quota/spend alerts are persisted as pending review records instead of contacting SMTP.
+- Improved grid-frame deduplication with a grayscale visual fingerprint so near-identical consecutive frames do not fill a nine-cell grid.
+
+## 3.1.3 ASR and Agent workspaces (2026-08-09)
+
+- Moved ASR from the generic tool center into its own page with the existing engine, model, device, storage path, dependency status, and real download/load progress controls.
+- Added an Agent workspace for task configuration, reusable Skills, and MCP service registration. MCP registration validates HTTP(S) endpoints and never connects during save.
+- Added AI-assisted Skill extraction from a specified public BV, using only public metadata and the currently configured model. Skill extraction never performs account actions.
+
+## 3.1.3 dashboard and smart safety polish (2026-08-09)
+
+- Reduced dashboard resource-card spacing so runtime metrics no longer leave artificial vertical gaps.
+- Learning Live now keeps only a compact idle state while no bot video is active; subtitle timeline, recent history, and runtime log panels appear only for an active video.
+- Replaced editable keyword and prompt-injection fields with one Smart Safety System switch. The server keeps its existing local rules but never returns their text through safety, injection, or general configuration APIs.
+
+## 3.1.3 AI quota email alerts (2026-08-09)
+
+- Added local SMTP configuration and a test-email action under the AI configuration tab. SMTP passwords are encrypted at rest and never exposed from Web APIs.
+- Added cooldown-deduplicated alerts for explicit provider billing failures such as HTTP 402, insufficient balance, and quota exhaustion.
+- Added an optional alert threshold for locally recorded project spend; it is labelled separately from provider balance because generic OpenAI-compatible APIs do not expose a shared balance API.
+
+## 3.1.3 login status and icon noise fix (2026-08-09)
+
+- Replaced unavailable brand icon names that caused repeated Lucide console warnings during page refreshes.
+- Made Bilibili login presentation defensive: it now shows UID fallback and distinguishes a verified profile from locally valid credentials whose public profile cannot be refreshed.
+- Replaced the silent login-status catch with a visible, actionable error state.
+
+## 3.1.3 memory and multimodal consolidation (2026-08-09)
+
+- Added managed permanent-memory CRUD and Bilibili contact portraits for UID, nickname, avatar, video topics, chat style, and interest types.
+- Injected only relevant stored memories and contact portraits into reply context as untrusted reference data.
+- Added a single multimodal master setting that synchronizes cover, comment-image, and frame-analysis compatibility keys.
+- Renamed the owner-share probability control to willingness and exposed its cooldown and daily-limit policy through the existing share service.
+- Verified Python compilation and authenticated Flask test-client responses for the memory, relationship, vision, and share-status APIs.
+
+## 3.1.3 storage, export, and agent update (2026-08-09)
+
+- Added persistent user-data location selection with optional migration and a restart-required response.
+- Added detailed storage inventory and per-group safe export controls in About.
+- Added one-note exports as Markdown, TXT, JSON, and locally generated PNG with optional local background/font.
+- Restricted the language menu to Chinese, English, and Russian using Lucide icons.
+- Cached watch-history cards by source-file modification time and cached KB archive BV lookup to reduce repeated scans.
+- Added agent routing for explicit video like, favorite, coin, and pseudo-triple requests through the existing owner/review safeguards.
+- Verified with `319 passed`, inline-script parse, and live `/api/health` HTTP 200.
+
+## 3.1.3 maintenance patch (2026-08-08)
+
+- Fixed stale Learning Live video state after the bot stops.
+- Fixed refresh buttons that depended on the implicit browser `event` global.
+- Fixed the mobile private-message sidebar selector and horizontal overflow guard.
+- Kept library pages at a 30-item default and retained lazy/async cover rendering for large card collections.
+- Re-read the knowledge-library file list after automatic cover enrichment.
+- Added a message-level related-BV preference for private-message video inspection to reduce old-context mixups.
+- Verification: 319 tests passed and the live web health endpoint reported version 3.1.3.
+
+## 3.1.3 维护规则与源码备份 (2026-08-08)
+
+- 新增源码小备份约定：备份统一放在 `F:\bililearn`，目录名使用 `bililearn_YYYY_M_D说明`。
+- 每个备份目录包含 `更新内容.txt`，记录快照范围、优点、已知问题和验证结果。
+- 默认排除真实配置、Cookie、Data、模型、二维码、运行日志和构建产物，避免备份泄露隐私。
+- README 增加当前维护状态和备份规则；本次快照为 `F:\bililearn\bililearn_2026_8_8第一个备份`。
+
+## 3.1.2 正式发布版 (2026-08-01)
+
+> 本版本合入了 3.1.3 / 3.1.4 / 3.1.5 内部迭代的所有修复与发布验收内容。
+
+### 🔧 稳定性与上下文
+- 修复实时监听私信处理：网页设置的自动回复和每轮数量会实际传入监听器；AI 处理超时会跳过该条并继续轮询，B站 `-509` 会退避 10 秒。
+- 主动分享、主动私信和审核后执行的私信都会写入同一份持久上下文与长期记忆；后续追问会回查最近分享的视频 BV。
+- 连续短消息可合并处理。需要读取视频时，先发送与视频标题相关的进度回复，再基于可验证资料给出结论。
+- 监听日志读取失败会在网页显示错误原因，不再静默留空。
+- 按 bilibili-api 的 `send_comment()` 规则修正顶层评论回复：使用 `root=评论ID, parent=None`，不再错误传入相同的根评论和父评论 ID。
+- 子回复继续使用 `root=根评论ID, parent=目标子回复ID`；AI 选择已不在当前评论快照中的 ID 时直接跳过。
+- `12006 没有该评论` 会作为不可重试的目标失效处理，避免无意义重复发送。
+
+### ✅ 发布验收
+- 冻结 EXE 验证了人格创建、启用、编辑、删除，以及兴趣、收藏夹、日记、心情、行为设置和二维码生成。
+- 监听模式在未完成 B 站登录时不再先报告启动成功后立即退出，改为直接提示先登录。
+- 发布验收覆盖 54 个本地读取接口和 20 个本地写入/撤销流程。
+- Windows 网页应用保留所有用户数据在 `%LOCALAPPDATA%\BiliLearn`，打包产物不包含登录 Cookie、API Key、聊天记录、知识库、二维码或 ASR 模型。
+- 发布前全量测试：`309 passed`。
+
+## 3.1.2 Windows 网页应用入口 (2026-07-11)
+
+### 🖥️ Windows 应用
+- `desktop_app.py` 改为本地 Web 控制面板启动器：启动服务后自动在默认浏览器打开 `http://127.0.0.1:8080`。
+- `build_windows_exe.bat` 构建网页应用 EXE，打包界面与现有 Web 面板保持一致。
+- 移除 Qt 桌面界面依赖，后续功能和视觉迭代统一在 Web 面板进行。
+
+
+## 3.1.2 架构收敛与稳定性修复 (2026-07-11)
+
+### 🔧 修复与重构
+- 网页生成统一由 `services.html_renderer` 承担包装、阅读页与幻灯片导出；视频、知识辅导和深研模块不再各自维护完整 HTML 模板。
+- 修复阅读页 Markdown 列表解析，避免 `-`/`*` 标记被输出到正文。
+- Web 面板首次启动先创建数据目录；备份列表接口改为 `GET`；快捷配置预设写入标准 `active_preset`，并兼容历史错误字段。
+- 知识辅导同步请求超过三分钟会返回明确超时状态，不再错误报告成功。
+- Web Word/PDF 导出改复用 `services.document_export`；`requirements.txt` 纳入 `python-docx` 与 `reportlab`。
+- Web 健康检查、部署状态和 Docker 镜像标签统一使用 `VERSION` 的 `3.1.2`；备份路径支持 `BILI_BACKUP_DIR` 并默认使用用户目录。
+
+### 📚 文档与参考页
+- 重写 README、开发索引、架构说明和服务模板，明确二次开发边界与统一网页生成入口。
+- 升级网页生成提示词，新增学习摘要、深研证据链参考页面。
+
+### ✅ 验证
+- `python -m pytest -q`：53 passed。
+- 全量 `compileall`、Web 首次启动和备份路径冒烟验证通过。
+
+
 ## 3.0.3 抽帧画质选择 + 平台聚焦 (2026-07-07)
 
 ### ✨ 新功能
@@ -123,7 +277,7 @@
 
 ### 🔧 更新
 
-- README 更新到 `v3.0.2`，补充全平台视频分析、Landing 快速识别、`yt-dlp` 依赖与 Web 本地文件安全说明。
+- README 更新到 `v3..2`，补充全平台视频分析、Landing 快速识别、`yt-dlp` 依赖与 Web 本地文件安全说明。
 - VitePress 侧边栏加入“使用文档”和“与旧版区别”。
 - 文档站首页、功能特点、部署快速开始同步补充新能力。
 

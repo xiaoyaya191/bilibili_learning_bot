@@ -8,7 +8,7 @@
 - 根据看的视频画一个用户画像 / 我是一个什么样的人（用户可自定义）
 
 增强能力（2026-07-07）：
-- **持久多会话**：会话按 JSON 落盘到 Data/HomeChat/，支持新建/选择/重命名/删除/持久上下文。
+- **持久多会话**：会话按 JSON 落盘到用户数据目录的 Data/HomeChat/。
 - **上下文模式**：persistent(持久上下文，保留最近若干轮) / infinite(无限上下文，全部历史) / none(无上下文，仅知识库检索)。
 - **高度自定义**：可自定义系统提示词、调用模型、温度；默认 AI 模式，可切 Agent。
 """
@@ -23,9 +23,12 @@ from pathlib import Path
 from typing import Any
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = BASE_DIR / "Data"
+from core.config import resolve_knowledge_base_dir
+from core.user_data import DATA_DIR, USER_DATA_DIR
+
 CONV_DIR = DATA_DIR / "HomeChat"
-LEARNING_LOG_FILE = BASE_DIR / "learning_log.md"
+LEARNING_LOG_FILE = USER_DATA_DIR / "learning_log.md"
+
 
 # 持久上下文模式下保留的最近消息轮数上限（单条消息计 1）
 PERSISTENT_HISTORY_LIMIT = 20
@@ -134,12 +137,7 @@ def _append_message(conv: dict, role: str, content: str) -> None:
 #  上下文采集
 # ─────────────────────────────────────────────
 def _resolve_kb_dir(cfg: dict | None) -> Path:
-    if cfg and isinstance(cfg, dict):
-        kb = cfg.get("knowledge_base_dir") or (cfg.get("knowledge", {}) or {}).get("base_dir")
-        if kb:
-            p = Path(kb)
-            return p if p.is_absolute() else BASE_DIR / p
-    return BASE_DIR / "KnowledgeBase"
+    return Path(resolve_knowledge_base_dir(cfg))
 
 
 def read_recent_videos(limit: int = 20) -> list[dict[str, str]]:
@@ -338,7 +336,7 @@ async def _agent_mode(message: str, cfg: dict | None, ctx: dict[str, Any]) -> di
             elif res.get("summary"):
                 detail = "（已生成总结）"
             summary_lines.append(f"- 技能 {step.get('skill', '?')}: {status}{detail}")
-        answer = "🤖 Agent 已完成任务规划与执行：\n" + "\n".join(summary_lines)
+        answer = "Agent 已完成任务规划与执行：\n" + "\n".join(summary_lines)
         raw = json.dumps(result, ensure_ascii=False)
         if len(raw) > 1800:
             raw = raw[:1800] + "\n…(已截断)"
@@ -346,7 +344,7 @@ async def _agent_mode(message: str, cfg: dict | None, ctx: dict[str, Any]) -> di
         return {"ok": True, "mode": "agent", "intent": "agent", "answer": answer, "context": _ctx_summary(ctx)}
     except Exception as e:
         return {"ok": False, "mode": "agent", "intent": "agent",
-                "answer": f"⚠️ Agent 执行失败：{e}\n\n（Agent 需要有效的 B站登录与运行中的机器人上下文才能搜索/观看视频）",
+                "answer": f"Agent 执行失败：{e}\n\n（Agent 需要有效的 B站登录与运行中的机器人上下文才能搜索/观看视频）",
                 "context": _ctx_summary(ctx)}
 
 
@@ -402,7 +400,7 @@ async def home_chat(message: str, mode: str = "ai", cfg: dict | None = None,
         answer = await _call_llm(system, message, history_ctx, model=eff_model, temperature=eff_temp)
     except Exception as e:
         answer = (
-            f"⚠️ AI 调用失败：{e}\n\n"
+            f"AI 调用失败：{e}\n\n"
             "请检查设置中的 API Key / Base URL / 模型(对话) 是否已正确配置，"
             "或稍后重试。你也可以切换到 Agent 模式尝试。"
         )

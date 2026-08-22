@@ -6,11 +6,41 @@ import html
 import json
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-DEFAULT_OUTPUT_DIR = BASE_DIR / "MindMaps"
+from core.user_data import MINDMAPS_DIR
+
+DEFAULT_OUTPUT_DIR = MINDMAPS_DIR
+
+_MINDMAP_ASSETS = Path(__file__).resolve().parent.parent / "assets" / "mindmap"
+_MINDMAP_CDN = {
+    "d3": "https://cdn.jsdelivr.net/npm/d3@7",
+    "markmap-view": "https://cdn.jsdelivr.net/npm/markmap-view",
+    "markmap-lib": "https://cdn.jsdelivr.net/npm/markmap-lib",
+}
+
+
+def _mindmap_script_tags() -> str:
+    """返回三个 <script> 标签：优先内联本地资源（离线可用），缺失时回退 CDN。
+
+    国内网络访问 jsdelivr 不稳定，本地内联保证思维导图永远能打开。
+    """
+    tags = []
+    for name in ("d3", "markmap-view", "markmap-lib"):
+        local = _MINDMAP_ASSETS / f"{name}.js"
+        if local.exists():
+            try:
+                content = local.read_text(encoding="utf-8", errors="replace")
+                tags.append(f"<script>{content}</script>")
+                continue
+            except OSError:
+                pass
+        tags.append(f'<script src="{_MINDMAP_CDN[name]}"></script>')
+    return "\n".join(tags)
+
 
 
 def _sanitize_filename(name: str) -> str:
@@ -62,44 +92,56 @@ def _trim_markdown(markdown: str, max_depth: int = 3, include_images: bool = Tru
 
 
 async def _ai_outline_async(markdown: str, prompt: str) -> str | None:
-    """可选：用配置的提示词把笔记转换为更利于思维导图的大纲（标题层级）。"""
+    """用本项目统一 AI 客户端把笔记转换为更利于思维导图的大纲（标题层级）。
+    复用 services/_services_ai.py 的 call_ai()，不再依赖外部 xingye_bot。"""
     try:
-        from xingye_bot.llm import ModelClient
-        from xingye_bot.settings import load_settings
-        from xingye_bot.state import BotState
-        client = ModelClient(load_settings(), BotState())
+        from services._services_ai import call_ai
+
         system = (
             "你负责把知识笔记转换为思维导图大纲，只输出 Markdown 标题层级（#/##/###）和要点列表。\n"
             "要求：保留核心知识与逻辑结构，剔除冗余铺垫；不要输出代码块以外的解释文字。\n"
             f"用户附加要求：{prompt}"
         )
-        resp = await client.chat(
-            [{"role": "system", "content": system}, {"role": "user", "content": markdown[:6000]}],
-            model_role="chat", purpose="mindmap_outline",
+        result = await call_ai(
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": markdown[:6000]},
+            ],
+            temperature=0.3,
+            verbose=False,
         )
-        if isinstance(resp, str) and resp.strip():
-            return resp
-        if hasattr(resp, "choices"):
-            return resp.choices[0].message.content
+        if result and result.strip():
+            return result.strip()
     except Exception:
         return None
     return None
 
 
-def _maybe_ai_outline(markdown: str, prompt: str | None) -> str:
-    """在同步/异步上下文中安全地尝试 AI 大纲增强；失败或不可用时回退原始 markdown。"""
-    if not prompt:
+def _maybe_ai_outline(markdown: str, prompt: str | None, require_ai: bool = False) -> str:
+    """在同步/异步上下文中安全地尝试 AI 大纲增强；require_ai=True 时失败即报错。"""
+    ai_prompt = (prompt or "请将这份笔记整理成适合思维导图的结构化大纲。").strip()
+    if not prompt and not require_ai:
         return markdown
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
-            return markdown  # 已在异步循环中，避免嵌套事件循环
-    except RuntimeError:
-        pass
+            if require_ai:
+                raise RuntimeError("当前异步上下文无法同步强制生成 AI 思维导图大纲")
+            return markdown
+    except RuntimeError as e:
+        if str(e):
+            raise
     try:
-        return asyncio.run(_ai_outline_async(markdown, prompt)) or markdown
-    except Exception:
-        return markdown
+        outlined = asyncio.run(_ai_outline_async(markdown, ai_prompt))
+        if outlined:
+            return outlined
+    except Exception as e:
+        if require_ai:
+            raise RuntimeError(f"AI 思维导图大纲生成失败: {e}") from e
+    if require_ai:
+        raise RuntimeError("AI 思维导图大纲生成失败：未返回有效内容")
+    return markdown
+
 
 
 def markdown_to_mindmap_html(markdown: str, title: str = "知识思维导图", theme: str = "default", max_depth: int = 3, include_images: bool = True) -> str:
@@ -109,6 +151,7 @@ def markdown_to_mindmap_html(markdown: str, title: str = "知识思维导图", t
     dark = theme == "dark"
     bg = "#0d1117" if dark else "#ffffff"
     fg = "#e6edf3" if dark else "#1f2328"
+    _mindmap_scripts = _mindmap_script_tags()
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -128,9 +171,7 @@ foreignObject img{{max-width:200px;max-height:150px;border-radius:8px;display:bl
 <body>
 <div class="toolbar"><h1>{safe_title}</h1><p>由 bilibili_learning_bot 自动生成</p></div>
 <svg id="mindmap"></svg>
-<script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
-<script src="https://cdn.jsdelivr.net/npm/markmap-view"></script>
-<script src="https://cdn.jsdelivr.net/npm/markmap-lib"></script>
+{_mindmap_scripts}
 <script>
 const markdown = {md_json};
 const transformer = new markmap.Transformer();
@@ -152,11 +193,13 @@ def export_mindmap(markdown_path: str | os.PathLike[str], output_dir: str | os.P
     opts = (cfg or {}).get("mindmap", {}) if isinstance(cfg, dict) else {}
     out_dir = Path(output_dir or opts.get("output_dir") or DEFAULT_OUTPUT_DIR)
     if not out_dir.is_absolute():
-        out_dir = BASE_DIR / out_dir
+        # Frozen releases run from a read-only _internal directory.
+        out_dir = MINDMAPS_DIR if getattr(sys, "frozen", False) else BASE_DIR / out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     markdown = path.read_text(encoding="utf-8", errors="replace")
-    # 可选 AI 大纲增强（受 mindmap.prompt 驱动）
-    markdown = _maybe_ai_outline(markdown, opts.get("prompt"))
+    # 可选/强制 AI 大纲增强（受 mindmap.prompt / mindmap.require_ai 驱动）
+    markdown = _maybe_ai_outline(markdown, opts.get("prompt"), bool(opts.get("require_ai", False)))
+
     title = path.stem
     theme = opts.get("theme", "default")
     max_depth = int(opts.get("max_depth", 3) or 3)

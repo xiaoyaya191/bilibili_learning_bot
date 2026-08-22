@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # cli/app.py — 命令行界面：菜单 + 配置 + V/W/P/U 命令
-# pyright: reportImplicitRelativeImport=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnknownArgumentType=false, reportUnknownParameterType=false, reportMissingParameterType=false, reportPrivateUsage=false, reportPrivateLocalImportUsage=false, reportUnusedCallResult=false, reportDeprecated=false, reportMissingTypeStubs=false, reportMissingImports=false
+# pyright: reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnknownArgumentType=false, reportUnknownParameterType=false, reportMissingParameterType=false, reportPrivateUsage=false, reportPrivateLocalImportUsage=false, reportUnusedCallResult=false, reportDeprecated=false, reportMissingTypeStubs=false, reportMissingImports=false
 import asyncio
 import json
 import random
@@ -18,7 +18,6 @@ import httpx
 import uuid
 from datetime import datetime, timedelta
 from io import BytesIO
-from openai import OpenAI
 import colorama
 from colorama import Fore, Style
 
@@ -67,13 +66,20 @@ def _disclaimer_confirm():
     import os as _os
     # 通过环境变量跳过交互（Web面板启动子进程时使用）
     if _os.getenv('BILI_DISCLAIMER_SKIP'):
-        print("⚠ Web面板模式：已跳过免责声明确认")
+        print("Web面板模式：已跳过免责声明确认")
         return True
 
     _TARGET = "我同意"
+    # 不同语言下的"我同意"均可通过确认（中/英/俄及常见变体，忽略大小写）
+    _AGREE = {
+        "我同意", "同意", "我同意继续",
+        "i agree", "agree", "i accept", "accept", "ok", "yes",
+        "согласен", "я согласен", "согласна", "да",
+    }
+    _agree_lc = {a.lower() for a in _AGREE}
     banner = f"""
 {Fore.RED}{'='*60}
-  ⚠  免责声明 / DISCLAIMER
+   免责声明 / DISCLAIMER
 {'='*60}
   本项目仅供学习参考，
   若因使用本项目产生任何后果，本人概不负责。
@@ -84,14 +90,25 @@ def _disclaimer_confirm():
 """
     print(banner)
     user_input = input(f"{Fore.YELLOW}请输入 '{_TARGET}' 以继续:{Style.RESET_ALL}").strip()
-    if user_input != _TARGET:
-        print(f"{Fore.RED}✗ 输入不匹配，程序退出。{Style.RESET_ALL}")
+    if user_input.lower() not in _agree_lc:
+        print(f"{Fore.RED}输入不匹配，程序退出。{Style.RESET_ALL}")
         sys.exit(1)
-    print(f"{Fore.GREEN}✓ 已确认，欢迎使用...{Style.RESET_ALL}\n")
+    print(f"{Fore.GREEN}已确认，欢迎使用...{Style.RESET_ALL}\n")
     return True
 
 # [PSYCHO] 智能分析引擎
-from utils.storage import get_backup_dir, sanitize_config_for_export
+from utils.storage import get_backup_dir, sanitize_config_for_export, strip_hidden_placeholders
+from core.user_data import (
+    DATA_DIR as _SHARED_DATA_DIR,
+    HIGHLIGHTS_DIR as _SHARED_HIGHLIGHTS_DIR,
+    HTML_EXPORTS_DIR as _SHARED_HTML_EXPORTS_DIR,
+    MINDMAPS_DIR as _SHARED_MINDMAPS_DIR,
+    QR_CODES_DIR as _SHARED_QR_CODES_DIR,
+    USER_DATA_DIR as _SHARED_USER_DATA_DIR,
+    WORD_DIR as _SHARED_WORD_DIR,
+)
+from core.config import resolve_knowledge_base_dir
+from core.factory_reset import DEFAULT_RESET_GROUP_IDS, RESET_GROUPS, erase_all_user_data, preview_reset_targets
 from persona.psycho import (
     PsychoProfile, RecommendationEngine,
     get_mode_emoji, get_mode_label,
@@ -138,11 +155,11 @@ except ImportError as e:
 
 
 # ==============================================================================
-# 🎛️ 核心配置
+# 核心配置
 # ==============================================================================
 # 配置文件路径（cli/app.py 在子目录，需向上一级到项目根）
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_DIR = os.path.join(BASE_DIR, "Data")
+DATA_DIR = str(_SHARED_DATA_DIR)
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 BOT_LOCK_FILE = os.path.join(DATA_DIR, "bot.lock")  # 单实例锁文件
 # 一键备份目录：平台自适应路径，与项目文件分离
@@ -169,6 +186,8 @@ os.makedirs(DATA_DIR, exist_ok=True)
 DEFAULT_CONFIG = {
     "api": {
         "unified_api_key": "",
+        "max_retries": 3,
+        "fallback_retries": 2,
         "unified_base_url": "",
         "model_brain": "",
         "model_vision": "",
@@ -189,6 +208,7 @@ DEFAULT_CONFIG = {
         "prob_fav": 0.8,
         "prob_like_solo": 0.5,
         "prob_comment_others": 0.3,  # 评论他人评论的概率
+        "prob_reply_comment_like": 0.25,  # 回复评论后点赞的概率
         "comment_check_interval": 300,  # 检查新评论的间隔（秒），默认5分钟
         "max_replies_per_check": 3,  # 每次检查最多回复几条评论
         "random_enabled": True  # 随机数限制开关：True=启用随机检定(更自然), False=关闭随机(只看分数阈值)
@@ -222,7 +242,13 @@ DEFAULT_CONFIG = {
         "download_interest_threshold": 7.0,
         "download_dir": "",
         "delete_video_after_understand": True,
-        "filter_mode": "cover_and_title"
+        "filter_mode": "cover_and_title",
+        "frame_note_mode": "visual_note",
+        "candidate_pool_size": 20,
+        "visual_note_frame_interval": 6,
+        "visual_note_max_frames": 240,
+        "visual_note_grid_cols": 3,
+        "visual_note_grid_rows": 3,
     },
     "vision": {
         "_comment": "视觉理解: 视频抽帧+评论图片AI分析",
@@ -317,10 +343,15 @@ DEFAULT_CONFIG = {
         "per_video_cooldown_minutes": 240
     },
     "active_chat": {
-        "enabled": True,
+        "enabled": False,
         "prob_initiate": 0.06,
         "cooldown_minutes": 45,
-        "max_initiate_per_session": 3
+        "max_initiate_per_session": 3,
+        "quiet_hours_enabled": True,
+        "quiet_start_hour": 22,
+        "quiet_end_hour": 8,
+        "whitelist_enabled": False,
+        "whitelist_uids": []
     },
     "up_follow": {
         "enabled": True,
@@ -383,6 +414,10 @@ DEFAULT_CONFIG = {
         "min_score": 7.5,
         "folder_name": "highlights"
     },
+    "web": {
+        "username": "",
+        "password": ""
+    },
     "platform_adapter": {
         "enabled": True,
         "ui_platforms": ["bilibili", "youtube", "douyin", "kuaishou", "web", "local"],
@@ -424,40 +459,65 @@ DEFAULT_CONFIG = {
         "aversion_auto_blacklist_threshold": 3,
         "aversion_score_block_threshold": 0.7,
         "aversion_score_warn_threshold": 0.4
+    },
+    "ob": {
+        "enabled": False,
+        "base_url": "http://127.0.0.1:8420",
+        "auto_launch": False,
+        "launch_command": "openbiliclaw serve",
+        "launch_cwd": "",
+        "health_check_timeout_seconds": 5,
+        "recommendation_fetch_limit": 20,
+        "feedback_enabled": True,
+        "event_report_enabled": True,
+        "profile_sync_enabled": True,
+        "explore_mode_fallback": True,
+        "explore_pools": ["科技", "编程", "物理", "数学", "历史", "哲学"],
+        "curiosity_keyword_ttl_hours": 24,
+        "audit_enabled": True,
+        "ab_test_enabled": True,
+        "ab_window_size": 200
     }
 }
 
-# 加载配置
+# 配置读写必须与网页端共用 core.config：它负责默认值、敏感词加密和原子写入。
+# 保留本模块的函数名，避免改动各个旧菜单的调用点。
+def _run_with_shared_config_path(operation):
+    """Run a core.config operation against CLI's overridden test path when needed.
+
+    Production CLI and Web UI both point at the same Data/config.json.  Tests and
+    embedding callers can override ``CONFIG_FILE`` though, so keep that override
+    scoped to this call instead of accidentally writing user data to the real
+    shared location.
+    """
+    import core.config as shared_config
+
+    cli_path = os.path.abspath(CONFIG_FILE)
+    shared_path = os.path.abspath(shared_config.CONFIG_FILE)
+    if cli_path == shared_path:
+        return operation(shared_config)
+
+    original_config_file = shared_config.CONFIG_FILE
+    original_data_dir = shared_config.DATA_DIR
+    shared_config.CONFIG_FILE = CONFIG_FILE
+    shared_config.DATA_DIR = os.path.dirname(CONFIG_FILE)
+    try:
+        return operation(shared_config)
+    finally:
+        shared_config.CONFIG_FILE = original_config_file
+        shared_config.DATA_DIR = original_data_dir
+
+
 def load_config():
-    """加载配置文件"""
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-                config = json.load(f)
-            # 合并默认配置和新配置
-            for key in DEFAULT_CONFIG:
-                if key not in config:
-                    config[key] = DEFAULT_CONFIG[key]
-                elif isinstance(config[key], dict):
-                    for sub_key in DEFAULT_CONFIG[key]:
-                        if sub_key not in config[key]:
-                            config[key][sub_key] = DEFAULT_CONFIG[key][sub_key]
-            return config
-        except (OSError, json.JSONDecodeError) as e:
-            log(f'加载JSON文件失败: {e}', 'DEBUG')
-    # 如果配置文件不存在或损坏，使用默认配置
-    save_config(DEFAULT_CONFIG)
-    return DEFAULT_CONFIG.copy()
+    """Load the single shared configuration used by Web UI and CLI."""
+    return _run_with_shared_config_path(lambda shared_config: shared_config.load_config())
+
 
 def save_config(config):
-    """保存配置文件"""
-    try:
-        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-            json.dump(config, f, ensure_ascii=False, indent=4)
-        return True
-    except Exception as e:
-        print(f"{Fore.RED}[ERROR] 保存配置文件失败: {e}{Style.RESET_ALL}")
-        return False
+    """Save through the shared configuration layer used by the Web UI."""
+    return _run_with_shared_config_path(
+        lambda shared_config: shared_config.save_config(config)
+    )
 
 # 加载当前配置
 config = load_config()
@@ -478,9 +538,8 @@ def get_config_or_env(section, key, env_name):
 
 
 
-def configure_openai_client():
-    """新版 openai>=1.0.0 不再使用全局 api_key/api_base。
-    每个调用处自行创建 OpenAI(api_key=..., base_url=...) 客户端实例。
+def configure_ai_client():
+    """AI 客户端配置检查（已统一走 httpx 直连，不依赖 openai 库）。
     此函数仅保留用于向后兼容检查（无实际操作）。"""
     pass
 
@@ -494,7 +553,10 @@ def is_api_configured():
 
 def get_vision_api_key():
     """获取视觉模型 API Key（独立配置优先，否则回退统一配置）"""
-    return config["api"].get("vision_api_key") or UNIFIED_API_KEY
+    val = config["api"].get("vision_api_key")
+    if val == "[已隐藏]":
+        val = ""
+    return val or UNIFIED_API_KEY
 
 def get_vision_base_url():
     """获取视觉模型 API URL（独立配置优先，否则回退统一配置）"""
@@ -508,8 +570,9 @@ MODEL_BRAIN = get_config_or_env("api", "model_brain", "BILI_AI_MODEL_BRAIN")
 MODEL_VISION = get_config_or_env("api", "model_vision", "BILI_AI_MODEL_VISION")
 MODEL_HTML = get_config_or_env("api", "model_html", "BILI_AI_MODEL_HTML") or MODEL_BRAIN
 
-# 🔑 视觉模型独立 API 配置（未设置时回退到统一配置）
-VISION_API_KEY = config["api"].get("vision_api_key") or UNIFIED_API_KEY
+# 视觉模型独立 API 配置（未设置时回退到统一配置；脱敏占位符视为未设置）
+_VISION_KEY_RAW = config["api"].get("vision_api_key")
+VISION_API_KEY = ("" if _VISION_KEY_RAW == "[已隐藏]" else _VISION_KEY_RAW) or UNIFIED_API_KEY
 VISION_BASE_URL = config["api"].get("vision_base_url") or UNIFIED_BASE_URL
 
 # [REFRESH] 备用模型（同一API提供商内的模型级降级）
@@ -526,7 +589,7 @@ FALLBACK_PROVIDER_API_KEY = _FBP.get("api_key", "") or os.getenv("BILI_AI_FALLBA
 FALLBACK_PROVIDER_BASE_URL = _FBP.get("base_url", "") or os.getenv("BILI_AI_FALLBACK_BASE_URL", "")
 FALLBACK_PROVIDER_MODELS = _FBP.get("models", {})
 
-configure_openai_client()
+configure_ai_client()
 
 COIN_THRESHOLD = config["interaction"]["coin_threshold"]
 FAV_THRESHOLD = config["interaction"]["fav_threshold"]
@@ -645,9 +708,11 @@ COMMENT_MODE = config.get("behavior", {}).get("comment_mode", "real")  # "real"=
 
 # 会话限制定时/计数（0=不限制）
 SESSION_MAX_VIDEOS = config.get("session", {}).get("max_videos", 0)
+SESSION_MAX_LEARNED_VIDEOS = config.get("session", {}).get("max_learned_videos", 0)
 SESSION_MAX_DURATION_MINUTES = config.get("session", {}).get("max_duration_minutes", 0)
+SESSION_COMPLETION_ACTION = config.get("session", {}).get("completion_action", "stop")
 
-# 🔁 Revisit review (learn & reinforce)
+# Revisit review (learn & reinforce)
 REVISIT_ENABLED = config.get("revisit", {}).get("enabled", True)
 PROB_REVISIT = config.get("revisit", {}).get("prob_revisit", 0.25)
 REVISIT_COOLDOWN_MINUTES = config.get("revisit", {}).get("revisit_cooldown_minutes", 15)
@@ -655,13 +720,13 @@ REVISIT_MIN_SCORE = config.get("revisit", {}).get("min_score", 7.5)  # only qual
 REVISIT_MAX_PER_VIDEO = config.get("revisit", {}).get("max_per_video", 2)  # max revisits per video
 REVISIT_PER_VIDEO_COOLDOWN_MINUTES = config.get("revisit", {}).get("per_video_cooldown_minutes", 240)  # per-video cooldown
 
-# 🔍 知识验证（复习时联网核实知识真实性）
+# 知识验证（复习时联网核实知识真实性）
 KNOWLEDGE_VERIFY_ENABLED = config.get("knowledge_verify", {}).get("enabled", True)
 KNOWLEDGE_VERIFY_USE_WEB = config.get("knowledge_verify", {}).get("use_web_search", True)
 KNOWLEDGE_VERIFY_MIN_SCORE = config.get("knowledge_verify", {}).get("min_reliability_score", 0.7)
 KNOWLEDGE_VERIFY_AUTO_FIX = config.get("knowledge_verify", {}).get("auto_fix", True)
 
-# 🧭 好奇心驱动深度搜索（遇到不懂/感兴趣的，B站搜索深入学习）
+# 好奇心驱动深度搜索（遇到不懂/感兴趣的，B站搜索深入学习）
 CURIOSITY_DEEP_DIVE_ENABLED = config.get("curiosity_search", {}).get("enabled", True)
 CURIOSITY_DEEP_DIVE_MAX_VIDEOS = config.get("curiosity_search", {}).get("max_videos_per_dive", 10)
 CURIOSITY_DEEP_DIVE_DEFAULT_VIDEOS = config.get("curiosity_search", {}).get("dive_videos_default", 3)
@@ -671,13 +736,13 @@ CURIOSITY_DEEP_DIVE_MIN_SCORE = config.get("curiosity_search", {}).get("trigger_
 CURIOSITY_DEEP_DIVE_PROB = config.get("curiosity_search", {}).get("prob_trigger", 0.3)
 CURIOSITY_DEEP_DIVE_COOLDOWN_MINUTES = config.get("curiosity_search", {}).get("cooldown_minutes", 120)
 
-# 📦 Highlights archive (high-quality content saved separately)
+# Highlights archive (high-quality content saved separately)
 DRY_GOODS_ENABLED = config.get("dry_goods", {}).get("enabled", False)
 DRY_GOODS_MIN_SCORE = config.get("dry_goods", {}).get("min_score", 7.5)
 DRY_GOODS_FOLDER_NAME = config.get("dry_goods", {}).get("folder_name", "highlights")
 
 # [MSG] 主动找人聊天
-ACTIVE_CHAT_ENABLED = config.get("active_chat", {}).get("enabled", True)
+ACTIVE_CHAT_ENABLED = config.get("active_chat", {}).get("enabled", False)
 PROB_INITIATE_CHAT = config.get("active_chat", {}).get("prob_initiate", 0.06)
 ACTIVE_CHAT_COOLDOWN_MINUTES = config.get("active_chat", {}).get("cooldown_minutes", 45)
 ACTIVE_CHAT_MAX_PER_SESSION = config.get("active_chat", {}).get("max_initiate_per_session", 3)
@@ -762,17 +827,17 @@ def _save_json_file(path, data):
 
 
 
-# ── 🔒 B站 API 节流器已移至 bili/throttle.py，通过 import 引入 ──
+# ── B站 API 节流器已移至 bili/throttle.py，通过 import 引入 ──
 
 # --- 路径配置 ---
-JOURNAL_FILE = os.path.join(BASE_DIR, "bot_journal.md")
-MEMORY_FILE = os.path.join(BASE_DIR, "bot_memory.json")
+JOURNAL_FILE = os.path.join(str(_SHARED_USER_DATA_DIR), "bot_journal.md")
+MEMORY_FILE = os.path.join(str(_SHARED_USER_DATA_DIR), "bot_memory.json")
 HISTORY_VIDEOS_FILE = os.path.join(DATA_DIR, "history_videos.json")  # 互动过的视频（点赞/收藏），用于回顾复习
-KNOWLEDGE_BASE_DIR = os.path.join(BASE_DIR, "KnowledgeBase")
-DRY_GOODS_DIR = os.path.join(BASE_DIR, "highlights")
-LEARNING_LOG_FILE = os.path.join(BASE_DIR, "learning_log.md")
-KB_METADATA_FILE = os.path.join(BASE_DIR, "knowledge_metadata.json")
-CIPHER_KEY_FILE = os.path.join(BASE_DIR, ".cipher_key")  # XOR加密密钥
+KNOWLEDGE_BASE_DIR = str(resolve_knowledge_base_dir(config))
+DRY_GOODS_DIR = str(_SHARED_HIGHLIGHTS_DIR)
+LEARNING_LOG_FILE = os.path.join(str(_SHARED_USER_DATA_DIR), "learning_log.md")
+KB_METADATA_FILE = os.path.join(str(_SHARED_USER_DATA_DIR), "knowledge_metadata.json")
+from core.config import CIPHER_KEY_FILE
 
 
 # ==============================================================================
@@ -781,6 +846,384 @@ CIPHER_KEY_FILE = os.path.join(BASE_DIR, ".cipher_key")  # XOR加密密钥
 # ==============================================================================
 # [brain/comment.py] CommentInteractionManager
 # [brain/private_msg.py] PrivateMessageManager
+
+def show_quick_toggles_menu():
+    """快捷开关面板 — 集中管理所有开关"""
+    global NO_HUMAN_DELAY, QUIET_MODE, ASR_ENABLED, VISION_COVER_ENABLED, REPLY_SAFETY_ENABLED
+
+    while True:
+        qm = "已开启 (跳过延迟)" if NO_HUMAN_DELAY else "已关闭 (模拟真人)"
+        zm = "已开启 (精简日志)" if QUIET_MODE else "已关闭 (完整日志)"
+        am = "已开启" if ASR_ENABLED else "已关闭"
+        cm = "已开启" if VISION_COVER_ENABLED else "已关闭"
+        sm = "已启用" if REPLY_SAFETY_ENABLED else "已关闭"
+
+        print(f"""
+    ╔══════════════════════════════════════════════════════════╗
+    ║                    快捷开关面板                        ║
+    ╠══════════════════════════════════════════════════════════╣
+    ║  {Fore.GREEN}1.{Style.RESET_ALL} 快速模式: {Fore.GREEN if NO_HUMAN_DELAY else Fore.YELLOW}{qm}{' ' * (30 - len(qm.replace(chr(27), '').replace('▎','')))}{Style.RESET_ALL}║
+    ║  {Fore.GREEN}2.{Style.RESET_ALL} 安静模式: {Fore.GREEN if QUIET_MODE else Fore.YELLOW}{zm}{' ' * (30 - len(zm.replace(chr(27), '').replace('▎','')))}{Style.RESET_ALL}║
+    ║  {Fore.GREEN}3.{Style.RESET_ALL} ASR语音: {Fore.GREEN if ASR_ENABLED else Fore.YELLOW}{am}{' ' * (34 - len(am.replace(chr(27), '').replace('▎','')))}{Style.RESET_ALL}║
+    ║  {Fore.GREEN}4.{Style.RESET_ALL} 封面分析: {Fore.GREEN if VISION_COVER_ENABLED else Fore.YELLOW}{cm}{' ' * (34 - len(cm.replace(chr(27), '').replace('▎','')))}{Style.RESET_ALL}║
+    ║  {Fore.GREEN}5.{Style.RESET_ALL} 关键词审查: {Fore.GREEN if REPLY_SAFETY_ENABLED else Fore.YELLOW}{sm}{' ' * (30 - len(sm.replace(chr(27), '').replace('▎','')))}{Style.RESET_ALL}║
+    ╚══════════════════════════════════════════════════════════╝
+    {Fore.CYAN}输入 1-5 切换对应开关，0 返回{Style.RESET_ALL}
+        """)
+
+        choice = input(f"{Fore.CYAN}请选择 (1-5/0): {Style.RESET_ALL}").strip()
+
+        if choice == "0":
+            break
+        elif choice == "1":
+            NO_HUMAN_DELAY = not NO_HUMAN_DELAY
+            config.setdefault("speed", {})["no_human_delay"] = NO_HUMAN_DELAY
+            save_config(config)
+            _reload_all_globals(config)
+            print(f"{Fore.GREEN}[OK] 快速模式: {'已开启' if NO_HUMAN_DELAY else '已关闭'}{Style.RESET_ALL}")
+        elif choice == "2":
+            QUIET_MODE = not QUIET_MODE
+            config.setdefault("system", {})["quiet_mode"] = QUIET_MODE
+            save_config(config)
+            _reload_all_globals(config)
+            print(f"{Fore.GREEN}[OK] 安静模式: {'已开启' if QUIET_MODE else '已关闭'}{Style.RESET_ALL}")
+        elif choice == "3":
+            ASR_ENABLED = not ASR_ENABLED
+            config.setdefault("asr", {})["enabled"] = ASR_ENABLED
+            save_config(config)
+            _reload_all_globals(config)
+            print(f"{Fore.GREEN}[OK] ASR语音识别: {'已开启' if ASR_ENABLED else '已关闭'}{Style.RESET_ALL}")
+        elif choice == "4":
+            VISION_COVER_ENABLED = not VISION_COVER_ENABLED
+            config.setdefault("vision", {})["cover_enabled"] = VISION_COVER_ENABLED
+            save_config(config)
+            _reload_all_globals(config)
+            print(f"{Fore.GREEN}[OK] 封面分析: {'已开启' if VISION_COVER_ENABLED else '已关闭'}{Style.RESET_ALL}")
+        elif choice == "5":
+            REPLY_SAFETY_ENABLED = not REPLY_SAFETY_ENABLED
+            config.setdefault("reply_safety", {})["enabled"] = REPLY_SAFETY_ENABLED
+            save_config(config)
+            _reload_all_globals(config)
+            print(f"{Fore.GREEN}[OK] 关键词审查: {'已启用' if REPLY_SAFETY_ENABLED else '已关闭'}{Style.RESET_ALL}")
+        else:
+            print(f"{Fore.YELLOW}[INFO] 无效选项{Style.RESET_ALL}")
+
+
+def _flatten_shared_settings(value, path=()):
+    """Return editable configuration leaves while keeping lists as one value."""
+    if isinstance(value, dict):
+        items = []
+        for key in sorted(value):
+            items.extend(_flatten_shared_settings(value[key], path + (str(key),)))
+        return items
+    return [(path, value)]
+
+
+def _shared_setting_is_sensitive(path):
+    label = ".".join(path).lower()
+    return any(token in label for token in ("password", "api_key", "cookie", "sessdata", "bili_jct", "access_token"))
+
+
+def _shared_setting_display(path, value):
+    if _shared_setting_is_sensitive(path) and value:
+        return "<已设置，已隐藏>"
+    rendered = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return rendered if len(rendered) <= 96 else rendered[:93] + "..."
+
+
+def _parse_shared_setting_value(raw, current):
+    """Accept friendly scalar input and JSON for structured settings."""
+    text = raw.strip()
+    if isinstance(current, bool):
+        values = {"true": True, "1": True, "yes": True, "y": True, "是": True,
+                  "false": False, "0": False, "no": False, "n": False, "否": False}
+        if text.lower() in values:
+            return values[text.lower()]
+        raise ValueError("布尔值请输入 true/false 或 是/否")
+    if isinstance(current, (int, float)) and not isinstance(current, bool):
+        parsed = json.loads(text)
+        if isinstance(parsed, bool) or not isinstance(parsed, (int, float)):
+            raise ValueError("请输入数值")
+        return type(current)(parsed)
+    if isinstance(current, (list, dict)):
+        parsed = json.loads(text)
+        if not isinstance(parsed, type(current)):
+            raise ValueError("数据类型不匹配，请使用 JSON")
+        return parsed
+    return text
+
+
+def show_shared_settings_menu():
+    """Edit every shared config field from the CLI without duplicating Web UI settings."""
+    global config
+
+    while True:
+        latest = load_config()
+        config.clear()
+        config.update(latest)
+        sections = [(key, key) for key, value in sorted(config.items()) if isinstance(value, dict)]
+        if any(not isinstance(value, dict) for value in config.values()):
+            sections.insert(0, ("根级设置", None))
+        print(f"\n{Fore.CYAN}━━━ 全部设置（与网页端实时共用 config.json）━━━{Style.RESET_ALL}")
+        for index, (label, _) in enumerate(sections, 1):
+            print(f"  {index:>2}. {label}")
+        print("   0. 返回主菜单")
+        choice = input(f"{Fore.CYAN}选择分区: {Style.RESET_ALL}").strip()
+        if choice == "0":
+            return
+        try:
+            section_label, section_key = sections[int(choice) - 1]
+        except (ValueError, IndexError):
+            print(f"{Fore.YELLOW}[INFO] 无效分区{Style.RESET_ALL}")
+            continue
+
+        while True:
+            if section_key is None:
+                leaves = _flatten_shared_settings({key: value for key, value in config.items() if not isinstance(value, dict)})
+            else:
+                leaves = _flatten_shared_settings(config[section_key], (section_key,))
+            print(f"\n{Fore.CYAN}━━━ {section_label} ━━━{Style.RESET_ALL}")
+            for index, (path, value) in enumerate(leaves, 1):
+                print(f"  {index:>2}. {'.'.join(path)} = {_shared_setting_display(path, value)}")
+            print("   0. 返回分区列表")
+            item = input(f"{Fore.CYAN}选择要修改的设置: {Style.RESET_ALL}").strip()
+            if item == "0":
+                break
+            try:
+                path, current = leaves[int(item) - 1]
+            except (ValueError, IndexError):
+                print(f"{Fore.YELLOW}[INFO] 无效设置项{Style.RESET_ALL}")
+                continue
+            prompt = "输入新值（数组/对象使用 JSON，直接回车取消）"
+            raw = input(f"{Fore.YELLOW}{'.'.join(path)} 当前 {_shared_setting_display(path, current)}\n{prompt}: {Style.RESET_ALL}")
+            if not raw.strip():
+                continue
+            try:
+                value = _parse_shared_setting_value(raw, current)
+            except (ValueError, json.JSONDecodeError) as exc:
+                print(f"{Fore.RED}[ERROR] 值无效: {exc}{Style.RESET_ALL}")
+                continue
+            target = config
+            for key in path[:-1]:
+                target = target[key]
+            target[path[-1]] = value
+            if save_config(config):
+                refreshed = load_config()
+                config.clear()
+                config.update(refreshed)
+                _reload_all_globals(config)
+                print(f"{Fore.GREEN}[OK] 已保存，网页端与命令端均会使用新值{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.RED}[ERROR] 保存失败，未应用修改{Style.RESET_ALL}")
+
+def show_watch_later_menu():
+    """稍后再看：查看/加入/移除/清空（与网页端共用 social_center）"""
+    while True:
+        print(f"""
+    ╔══════════════════════════════════════════════════════════╗
+    ║                    稍后再看管理                        ║
+    ╠══════════════════════════════════════════════════════════╣
+    {Fore.GREEN}1.{Style.RESET_ALL} 查看稍后再看列表
+    {Fore.GREEN}2.{Style.RESET_ALL} 添加视频到稍后再看 (输入BV号)
+    {Fore.GREEN}3.{Style.RESET_ALL} 从稍后再看移除 (输入BV号)
+    {Fore.GREEN}4.{Style.RESET_ALL} {Fore.RED}清空稍后再看列表{Style.RESET_ALL}
+    {Fore.RED}0.{Style.RESET_ALL} ↩ 返回主菜单
+    ╚══════════════════════════════════════════════════════════╝
+        """)
+        choice = input(f"{Fore.CYAN}请选择 (0-4): {Style.RESET_ALL}").strip()
+        if choice == "0":
+            break
+        elif choice == "1":
+            try:
+                from services import social_center
+                items = social_center.list_watch_later()
+                if not items:
+                    print(f"{Fore.YELLOW}[INFO] 稍后再看列表为空{Style.RESET_ALL}")
+                else:
+                    print(f"{Fore.CYAN}稍后再看共 {len(items)} 个视频:{Style.RESET_ALL}")
+                    for idx, it in enumerate(items, 1):
+                        title = it.get("title") or "(无标题)"
+                        up = it.get("up") or "未知UP"
+                        dur = it.get("duration") or 0
+                        dur_s = f"{dur // 60}分{dur % 60}秒" if dur else "--"
+                        print(f"  {idx}. {title}  |  UP: {up}  |  时长: {dur_s}  |  {it.get('bvid')}")
+            except Exception as e:
+                print(f"{Fore.RED}[ERROR] 获取稍后再看失败: {e}{Style.RESET_ALL}")
+        elif choice == "2":
+            bvid = input(f"{Fore.CYAN}请输入BV号: {Style.RESET_ALL}").strip()
+            if not bvid:
+                continue
+            try:
+                from services import social_center
+                social_center.add_watch_later(bvid)
+                print(f"{Fore.GREEN}[OK] 已添加 {bvid} 到稍后再看{Style.RESET_ALL}")
+            except Exception as e:
+                print(f"{Fore.RED}[ERROR] 添加失败: {e}{Style.RESET_ALL}")
+        elif choice == "3":
+            bvid = input(f"{Fore.CYAN}请输入要移除的BV号: {Style.RESET_ALL}").strip()
+            if not bvid:
+                continue
+            try:
+                from services import social_center
+                social_center.remove_watch_later(bvid)
+                print(f"{Fore.GREEN}[OK] 已从稍后再看移除 {bvid}{Style.RESET_ALL}")
+            except Exception as e:
+                print(f"{Fore.RED}[ERROR] 移除失败: {e}{Style.RESET_ALL}")
+        elif choice == "4":
+            confirm = input(f"{Fore.RED}确认清空稍后再看列表? 输入 YES 确认: {Style.RESET_ALL}").strip()
+            if confirm.upper() != "YES":
+                print(f"{Fore.YELLOW}[INFO] 已取消{Style.RESET_ALL}")
+                continue
+            try:
+                from services import social_center
+                social_center.clear_watch_later()
+                print(f"{Fore.GREEN}[OK] 稍后再看列表已清空{Style.RESET_ALL}")
+            except Exception as e:
+                print(f"{Fore.RED}[ERROR] 清空失败: {e}{Style.RESET_ALL}")
+        else:
+            print(f"{Fore.YELLOW}[INFO] 无效选项{Style.RESET_ALL}")
+
+
+def show_reminders_menu():
+    """待办与提醒：列出/添加/删除（与网页端共用 services.reminders）"""
+    while True:
+        print(f"""
+    ╔══════════════════════════════════════════════════════════╗
+    ║                    待办与提醒管理                      ║
+    ╠══════════════════════════════════════════════════════════╣
+    {Fore.GREEN}1.{Style.RESET_ALL} 查看待办列表
+    {Fore.GREEN}2.{Style.RESET_ALL} 添加待办
+    {Fore.GREEN}3.{Style.RESET_ALL} 删除待办
+    {Fore.RED}0.{Style.RESET_ALL} ↩ 返回主菜单
+    ╚══════════════════════════════════════════════════════════╝
+        """)
+        choice = input(f"{Fore.CYAN}请选择 (0-3): {Style.RESET_ALL}").strip()
+        if choice == "0":
+            break
+        elif choice == "1":
+            try:
+                from services import reminders
+                items = reminders.list_reminders()
+                if not items:
+                    print(f"{Fore.YELLOW}[INFO] 暂无待办{Style.RESET_ALL}")
+                else:
+                    print(f"{Fore.CYAN}待办共 {len(items)} 条:{Style.RESET_ALL}")
+                    for it in items:
+                        rid = it.get("id") or "?"
+                        content = it.get("content") or ""
+                        due = it.get("due_at") or it.get("due") or ""
+                        done = "已完成" if it.get("done") else "待处理"
+                        print(f"  [{rid}] {content}  |  时间: {due}  |  {done}")
+            except Exception as e:
+                print(f"{Fore.RED}[ERROR] 获取待办失败: {e}{Style.RESET_ALL}")
+        elif choice == "2":
+            content = input(f"{Fore.CYAN}待办内容: {Style.RESET_ALL}").strip()
+            if not content:
+                print(f"{Fore.YELLOW}[INFO] 内容不能为空{Style.RESET_ALL}")
+                continue
+            due = input(f"{Fore.CYAN}提醒时间 (格式 YYYY-MM-DD HH:MM，可回车跳过): {Style.RESET_ALL}").strip()
+            try:
+                from services import reminders
+                reminders.create_reminder(content, due, owner_uid="manual")
+                print(f"{Fore.GREEN}[OK] 待办已添加{Style.RESET_ALL}")
+            except ValueError as e:
+                print(f"{Fore.RED}[ERROR] {e}{Style.RESET_ALL}")
+            except Exception as e:
+                print(f"{Fore.RED}[ERROR] 添加失败: {e}{Style.RESET_ALL}")
+        elif choice == "3":
+            rid = input(f"{Fore.CYAN}请输入要删除的待办ID: {Style.RESET_ALL}").strip()
+            try:
+                from services import reminders
+                deleted = reminders.remove_reminder(rid)
+                if deleted:
+                    print(f"{Fore.GREEN}[OK] 待办已删除{Style.RESET_ALL}")
+                else:
+                    print(f"{Fore.YELLOW}[INFO] 没有找到该待办{Style.RESET_ALL}")
+            except Exception as e:
+                print(f"{Fore.RED}[ERROR] 删除失败: {e}{Style.RESET_ALL}")
+        else:
+            print(f"{Fore.YELLOW}[INFO] 无效选项{Style.RESET_ALL}")
+
+
+def show_interaction_switches_menu():
+    """功能开关：查看/切换互动开关（与网页端共用 config interaction 段）"""
+    defaults = {"enable_comment": "是否评论", "enable_reply_comment": "是否回复评论", "enable_reply_dm": "是否回复私信",
+                "enable_active_dm": "主动私信", "enable_like": "是否点赞", "enable_coin": "是否投币",
+                "enable_favorite": "是否收藏", "enable_follow": "是否关注", "enable_watch_later": "稍后再看",
+                "enable_owner_share": "主人分享", "enable_dynamic_draft": "动态草稿", "enable_dynamic_publish": "动态发布",
+                "enable_asr": "ASR语音识别", "enable_monitor": "实时监听"}
+    _default_vals = {"enable_comment": True, "enable_reply_comment": True, "enable_reply_dm": True, "enable_active_dm": True,
+                     "enable_like": True, "enable_coin": True, "enable_favorite": True, "enable_follow": True,
+                     "enable_watch_later": True, "enable_owner_share": True, "enable_dynamic_draft": True,
+                     "enable_dynamic_publish": False, "enable_asr": False, "enable_monitor": False}
+    while True:
+        switches = config.get("interaction", {})
+        print(f"""
+    ╔══════════════════════════════════════════════════════════╗
+    ║                    功能开关管理                        ║
+    ╠══════════════════════════════════════════════════════════╣""")
+        idx = 1
+        for key, label in defaults.items():
+            cur = bool(switches.get(key, _default_vals.get(key, True)))
+            status = f"{Fore.GREEN}开启{Style.RESET_ALL}" if cur else f"{Fore.RED}关闭{Style.RESET_ALL}"
+            print(f"    {Fore.GREEN}{idx}.{Style.RESET_ALL} {label}: {status}")
+            idx += 1
+        print(f"""    {Fore.RED}0.{Style.RESET_ALL} ↩ 返回主菜单
+    ╚══════════════════════════════════════════════════════════╝
+    {Fore.CYAN}输入数字切换对应开关，0 返回{Style.RESET_ALL}
+        """)
+        choice = input(f"{Fore.CYAN}请选择 (1-{len(defaults)}/0): {Style.RESET_ALL}").strip()
+        if choice == "0":
+            break
+        try:
+            n = int(choice)
+            if 1 <= n <= len(defaults):
+                key = list(defaults.keys())[n - 1]
+                new_val = not bool(switches.get(key, _default_vals.get(key, True)))
+                config.setdefault("interaction", {})[key] = new_val
+                save_config(config)
+                _reload_all_globals(config)
+                print(f"{Fore.GREEN}[OK] {defaults[key]}: {'已开启' if new_val else '已关闭'}{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.YELLOW}[INFO] 无效选项{Style.RESET_ALL}")
+        except ValueError:
+            print(f"{Fore.YELLOW}[INFO] 无效选项{Style.RESET_ALL}")
+
+
+def show_watch_history_menu():
+    """观看历史：查看历史记录列表（读本地 history_videos.json）"""
+    from core.config import DATA_DIR
+    history_path = os.path.join(DATA_DIR, "history_videos.json")
+    if not os.path.exists(history_path):
+        print(f"{Fore.YELLOW}[INFO] 暂无观看历史记录文件{Style.RESET_ALL}")
+        return
+    try:
+        import json as _json
+        source = _json.loads(open(history_path, "r", encoding="utf-8", errors="replace").read())
+        entries = source.get("videos", []) if isinstance(source, dict) else []
+        if not entries:
+            print(f"{Fore.YELLOW}[INFO] 观看历史为空{Style.RESET_ALL}")
+            return
+        print(f"{Fore.CYAN}观看历史共 {len(entries)} 条记录 (最近在前):{Style.RESET_ALL}")
+        for idx, raw in enumerate(entries[:50], 1):
+            if not isinstance(raw, dict):
+                continue
+            bvid = raw.get("bvid") or "?"
+            title = str(raw.get("title") or "(无标题)")[:40]
+            up = str(raw.get("up") or "未知UP")[:20]
+            action = str(raw.get("action") or "view")
+            act_map = {"view": "浏览", "like": "点赞", "fav": "收藏", "coin": "投币"}
+            act = act_map.get(action, action)
+            score = raw.get("score") or 0
+            print(f"  {idx}. {title}  |  UP: {up}  |  {bvid}  |  {act}  |  评分 {score}")
+        if len(entries) > 50:
+            print(f"{Fore.YELLOW}[INFO] 仅显示前 50 条，共 {len(entries)} 条{Style.RESET_ALL}")
+    except Exception as e:
+        print(f"{Fore.RED}[ERROR] 读取观看历史失败: {e}{Style.RESET_ALL}")
+
+
+
+
 def show_main_menu():
     """显示主菜单"""
     global COMMENT_MODE
@@ -789,104 +1232,128 @@ def show_main_menu():
     interest_count = len(interest_mgr.get_interests())
     
     comment_mode_text = "真实评论" if COMMENT_MODE == "real" else "模拟评论"
+    session_parts = []
+    if SESSION_MAX_DURATION_MINUTES > 0:
+        session_parts.append(f"{SESSION_MAX_DURATION_MINUTES}分钟")
+    if SESSION_MAX_VIDEOS > 0:
+        session_parts.append(f"处理{SESSION_MAX_VIDEOS}个")
+    if SESSION_MAX_LEARNED_VIDEOS > 0:
+        session_parts.append(f"学习{SESSION_MAX_LEARNED_VIDEOS}个")
+    session_summary = " / ".join(session_parts) if session_parts else "不限"
+    if session_parts and SESSION_COMPLETION_ACTION == "monitor":
+        session_summary += " → 实时监听"
     print(f"""
     ╔══════════════════════════════════════════════════════════╗
     ║           bilibili_learning_bot - B站学习互动机器人     ║
-    ║               版本: v3.0.2 B站视频学习版                ║
+    ║               版本: v3.1.3 B站视频学习版                ║
     ║  特性: B站视频分析+智能兴趣引擎+投币管控+19种风格+知识库   ║
     ╠══════════════════════════════════════════════════════════╣
     ╚══════════════════════════════════════════════════════════╝
 
     {Fore.CYAN}请选择操作:{Style.RESET_ALL}
     {Fore.GREEN}1.{Style.RESET_ALL} [START] 启动机器人
-    {Fore.YELLOW}2.{Style.RESET_ALL} ⚙️  配置AI参数
-    {Fore.BLUE}3.{Style.RESET_ALL} 🔑 配置登录
-    {Fore.MAGENTA}4.{Style.RESET_ALL} 📚 管理知识库
+    {Fore.YELLOW}2.{Style.RESET_ALL}  配置AI参数
+    {Fore.BLUE}3.{Style.RESET_ALL} 配置登录
+    {Fore.MAGENTA}4.{Style.RESET_ALL} 管理知识库
     {Fore.LIGHTYELLOW_EX}5.{Style.RESET_ALL} [TARGET] 管理兴趣爱好
     {Fore.LIGHTCYAN_EX}6.{Style.RESET_ALL} [MSG] 评论互动设置
-    {Fore.LIGHTGREEN_EX}7.{Style.RESET_ALL} 📩 私信设置
-    {Fore.LIGHTMAGENTA_EX}8.{Style.RESET_ALL} 🧬 日记/自我进化
-    {Fore.LIGHTBLUE_EX}9.{Style.RESET_ALL} 🛠️  Agent技能
+    {Fore.LIGHTGREEN_EX}7.{Style.RESET_ALL} 私信设置
+    {Fore.LIGHTBLUE_EX}9.{Style.RESET_ALL} 视频探索 (搜索→观看→总结 / 自动刷视频)
     {Fore.LIGHTBLUE_EX}F.{Style.RESET_ALL} [*][MSG] UP主关注/弹幕设置
     {Fore.LIGHTYELLOW_EX}G.{Style.RESET_ALL} [ASR]  ASR语音识别设置
-    {Fore.LIGHTCYAN_EX}A.{Style.RESET_ALL} 🔊 ASR开关快速切换 (当前: {'开启' if ASR_ENABLED else '关闭'})
-    {Fore.MAGENTA}M.{Style.RESET_ALL} 😊 AI心情管理
+    {Fore.LIGHTCYAN_EX}A.{Style.RESET_ALL} ASR开关快速切换 (当前: {'开启' if ASR_ENABLED else '关闭'})
+    {Fore.MAGENTA}M.{Style.RESET_ALL} AI心情管理
     {Fore.LIGHTCYAN_EX}D.{Style.RESET_ALL} [GOLD] 干货归档 (高分内容单独保存)
-    {Fore.LIGHTCYAN_EX}V.{Style.RESET_ALL} 📹 手动视频分析 (B站 BV号/链接/标题/UP主 · 可导出 Word/PDF/PPT)
-    {Fore.LIGHTMAGENTA_EX}K.{Style.RESET_ALL} 🔄 知识库重温 (选择已学视频，重新看/优化)
-    {Fore.LIGHTCYAN_EX}T.{Style.RESET_ALL} 🎓 知识辅导 (讲解/问答/二次创作/生成HTML)
-    {Fore.LIGHTCYAN_EX}U.{Style.RESET_ALL} 📚 UP主主页批量学习 (获取UP主主页视频, AI逐个学习)
-    {Fore.LIGHTCYAN_EX}W.{Style.RESET_ALL} 🎨 视频->网页/导出 (指定视频生成HTML，并可导出 Word/PDF/PPT)
-    {Fore.CYAN}H.{Style.RESET_ALL} 🔍 搜索历史 (查看B站搜索记录)
-    {Fore.CYAN}B.{Style.RESET_ALL} 📊 后台任务 (查看后台异步任务状态)
-    {Fore.RED}R.{Style.RESET_ALL} 🔄 恢复出厂设置 (清除所有配置/登录/数据/web导出)
-    {Fore.YELLOW}S.{Style.RESET_ALL} 🛡️ 关键词审查开关 (当前: {'开启' if REPLY_SAFETY_ENABLED else '关闭'})
-    {Fore.LIGHTCYAN_EX}Q.{Style.RESET_ALL} ⚡ 快速模式 (跳过真人延迟): {Fore.GREEN + '已开启' + Style.RESET_ALL if NO_HUMAN_DELAY else Fore.YELLOW + '已关闭 (模拟真人)' + Style.RESET_ALL}
-    {Fore.LIGHTCYAN_EX}Z.{Style.RESET_ALL} 🔇 安静模式 (精简日志): {Fore.GREEN + '已开启' + Style.RESET_ALL if QUIET_MODE else Fore.YELLOW + '已关闭' + Style.RESET_ALL}
-    {Fore.GREEN}E.{Style.RESET_ALL} 📤 导出配置 (备份所有设置到一个文件)
-    {Fore.BLUE}I.{Style.RESET_ALL} 📥 导入配置 (从备份文件一键恢复所有设置)
-    {Fore.LIGHTYELLOW_EX}O.{Style.RESET_ALL} 📂 一键整理知识库 (非3层文件→AI自动归类到3层)
-    {Fore.LIGHTGREEN_EX}N.{Style.RESET_ALL} 📝 自定义知识管理 (增删改查自定义知识条目)
-    {Fore.CYAN}C.{Style.RESET_ALL} 👁️ 封面分析开关 (当前: {'开启' if VISION_COVER_ENABLED else '关闭(刷视频更快)'})
-    {Fore.MAGENTA}L.{Style.RESET_ALL} 🛋️ 待机模式设置 (@触发总结/ASR/评论区/PPT等)
-    {Fore.YELLOW}Y.{Style.RESET_ALL} ⏱️ 视频间隔设置 (当前: {VIDEO_INTERVAL_MIN}-{VIDEO_INTERVAL_MAX}秒)
-    {Fore.LIGHTCYAN_EX}P.{Style.RESET_ALL} 🎯 兴趣偏好设置 (智能引擎 v2.0)
-    {Fore.YELLOW}X.{Style.RESET_ALL} 🪙 投币限制设置 (每日上限/评分阈值/概率/冷却)
-    {Fore.CYAN}J.{Style.RESET_ALL} 🛠️ 学习工具 (📝 出题考试 | 🔬 深入了解)
-    {Fore.MAGENTA}MM.{Style.RESET_ALL} 🧠 思维导图 (知识库/单视频 → 交互HTML)
-    {Fore.GREEN}WB.{Style.RESET_ALL} 🌐 打开网页端 (自动启动并打开浏览器)
-    {Fore.RED}0.{Style.RESET_ALL} ❌ 退出程序
+    {Fore.LIGHTCYAN_EX}V.{Style.RESET_ALL} 手动视频分析 (B站 BV号/链接/标题/UP主 · 可导出 Word/PDF/PPT)
+    {Fore.LIGHTGREEN_EX}BN.{Style.RESET_ALL} 图文学习笔记 (BV/链接 → 目录+AI配图全过程讲解)
+    {Fore.LIGHTMAGENTA_EX}K.{Style.RESET_ALL} 知识库重温 (选择已学视频，重新看/优化)
+    {Fore.LIGHTCYAN_EX}T.{Style.RESET_ALL} 知识辅导 (讲解/问答/二次创作/生成HTML)
+    {Fore.LIGHTCYAN_EX}U.{Style.RESET_ALL} UP主主页批量学习 (获取UP主主页视频, AI逐个学习)
+    {Fore.LIGHTCYAN_EX}W.{Style.RESET_ALL} 视频->网页/导出 (指定视频生成HTML，并可导出 Word/PDF/PPT)
+    {Fore.CYAN}H.{Style.RESET_ALL} 搜索历史 (查看B站搜索记录)
+    {Fore.CYAN}B.{Style.RESET_ALL} 后台任务 (查看后台异步任务状态)
+    {Fore.RED}R.{Style.RESET_ALL} 恢复出厂设置 (输入 RESET 一次确认，清除全部用户数据)
+    {Fore.YELLOW}S.{Style.RESET_ALL} 关键词审查开关 (当前: {'开启' if REPLY_SAFETY_ENABLED else '关闭'})
+    {Fore.LIGHTMAGENTA_EX}ALL.{Style.RESET_ALL} 全部设置（网页端和命令端共用）
+    {Fore.LIGHTCYAN_EX}Q.{Style.RESET_ALL} 快速模式 (跳过真人延迟): {Fore.GREEN + '已开启' + Style.RESET_ALL if NO_HUMAN_DELAY else Fore.YELLOW + '已关闭 (模拟真人)' + Style.RESET_ALL}
+    {Fore.LIGHTCYAN_EX}Z.{Style.RESET_ALL} 安静模式 (精简日志): {Fore.GREEN + '已开启' + Style.RESET_ALL if QUIET_MODE else Fore.YELLOW + '已关闭' + Style.RESET_ALL}
+    {Fore.GREEN}E.{Style.RESET_ALL} 导出配置 (备份所有设置到一个文件)
+    {Fore.BLUE}I.{Style.RESET_ALL} 导入配置 (从备份文件一键恢复所有设置)
+    {Fore.LIGHTYELLOW_EX}O.{Style.RESET_ALL} 一键整理知识库 (非3层文件→AI自动归类到3层)
+    {Fore.LIGHTGREEN_EX}N.{Style.RESET_ALL} 自定义知识管理 (增删改查自定义知识条目)
+    {Fore.CYAN}C.{Style.RESET_ALL} 封面分析开关 (当前: {'开启' if VISION_COVER_ENABLED else '关闭(刷视频更快)'})
+    {Fore.MAGENTA}L.{Style.RESET_ALL} 待机模式设置 (@触发总结/ASR/评论区/PPT等)
+    {Fore.LIGHTGREEN_EX}RT.{Style.RESET_ALL} 实时监听设置 (私信 + 全站@我 + 视频问答)
+    {Fore.LIGHTMAGENTA_EX}WL.{Style.RESET_ALL} 稍后再看管理 (查看/添加/移除/清空)
+    {Fore.LIGHTYELLOW_EX}RM.{Style.RESET_ALL} 待办与提醒 (列表/添加/删除)
+    {Fore.LIGHTCYAN_EX}SW.{Style.RESET_ALL} 功能开关 (评论/回复/点赞/投币/收藏/关注等14项)
+    {Fore.LIGHTGREEN_EX}WH.{Style.RESET_ALL} 观看历史 (本地历史记录列表)
+    {Fore.YELLOW}Y.{Style.RESET_ALL} 视频间隔设置 (当前: {VIDEO_INTERVAL_MIN}-{VIDEO_INTERVAL_MAX}秒)
+    {Fore.LIGHTCYAN_EX}P.{Style.RESET_ALL} 兴趣偏好设置 (智能引擎 v2.0)
+    {Fore.YELLOW}X.{Style.RESET_ALL} 投币限制设置 (每日上限/评分阈值/概率/冷却)
+    {Fore.CYAN}J.{Style.RESET_ALL} 学习工具 (出题考试 | 深入了解 | Agent | 多Agent协调)
+    {Fore.MAGENTA}MM.{Style.RESET_ALL} 思维导图 (知识库/单视频 → 交互HTML)
+    {Fore.GREEN}WB.{Style.RESET_ALL} 打开网页端 (自动启动并打开浏览器)
+    {Fore.RED}0.{Style.RESET_ALL} 退出程序
 
     {Fore.CYAN}当前配置状态:{Style.RESET_ALL}
-    • API状态: {Fore.GREEN + "✓ 已配置" + Style.RESET_ALL if is_api_configured() else Fore.YELLOW + "[WARN] 未完整配置" + Style.RESET_ALL}
-    • 登录状态: {Fore.GREEN + "✓ 已登录" + Style.RESET_ALL if is_bili_logged_in() else Fore.RED + "✗ 未登录" + Style.RESET_ALL}
-    • 知识库: {Fore.GREEN + "✓ 已启用" + Style.RESET_ALL if os.path.exists(KNOWLEDGE_BASE_DIR) else Fore.YELLOW + "[FILE] 待创建" + Style.RESET_ALL}
-    • 干货归档: {Fore.GREEN + f"✓ 已启用 (≥{DRY_GOODS_MIN_SCORE}分)" + Style.RESET_ALL if DRY_GOODS_ENABLED else Fore.YELLOW + "💤 未启用" + Style.RESET_ALL}
-    • 兴趣爱好: {Fore.GREEN + f"✓ {interest_count}个" + Style.RESET_ALL if interest_count > 0 else Fore.YELLOW + "[WARN] 未设置" + Style.RESET_ALL}
-    • 评论互动: {Fore.GREEN + "✓ " + comment_mode_text + Style.RESET_ALL if PROB_COMMENT_OTHERS > 0 else Fore.YELLOW + "[WARN] 未启用" + Style.RESET_ALL}
-    • 私信处理: {Fore.GREEN + ("✓ 自动回复" if PRIVATE_MESSAGE_AUTO_REPLY else "✓ 只拟回复") + Style.RESET_ALL if PRIVATE_MESSAGE_ENABLED else Fore.YELLOW + "[WARN] 未启用" + Style.RESET_ALL}
-    • 日记/进化: {Fore.GREEN + "✓ 已启用" + Style.RESET_ALL if DIARY_ENABLED or EVOLUTION_ENABLED else Fore.YELLOW + "[WARN] 未启用" + Style.RESET_ALL}
-    • Agent技能: {Fore.GREEN + ("✓ 自动" if AGENT_AUTO_ENABLED else "✓ 手动") + Style.RESET_ALL if AGENT_ENABLED else Fore.YELLOW + "[WARN] 未启用" + Style.RESET_ALL}
-    • Agent深度搜索: {Fore.GREEN + "🤖 集成刷视频" + Style.RESET_ALL if AGENT_ENABLED and AGENT_DIVE_ENABLED else Fore.YELLOW + "💤 未开启" + Style.RESET_ALL}
-    • 语音识别(ASR): {Fore.GREEN + f"[ASR] {ASR_BACKEND.upper()}" + Style.RESET_ALL if ASR_ENABLED else Fore.YELLOW + "🔇 未启用" + Style.RESET_ALL}
-    • 封面分析: {Fore.GREEN + "✓ 已开启" + Style.RESET_ALL if VISION_COVER_ENABLED else Fore.YELLOW + "⏸️ 已关闭(刷视频更快)" + Style.RESET_ALL}
-    • 复习回顾: {Fore.GREEN + f"📖 已启用 (≥{REVISIT_MIN_SCORE}分)" + Style.RESET_ALL if REVISIT_ENABLED else Fore.YELLOW + "💤 未开启" + Style.RESET_ALL}
-    • 会话限制: {Fore.GREEN + ("不限" if SESSION_MAX_VIDEOS <= 0 and SESSION_MAX_DURATION_MINUTES <= 0 else (f"{SESSION_MAX_VIDEOS}个视频" if SESSION_MAX_VIDEOS > 0 else "") + (" / " if SESSION_MAX_VIDEOS > 0 and SESSION_MAX_DURATION_MINUTES > 0 else "") + (f"{SESSION_MAX_DURATION_MINUTES}分钟" if SESSION_MAX_DURATION_MINUTES > 0 else "")) + Style.RESET_ALL}
-    • UP主关注: {Fore.GREEN + "[*] 已开启" + Style.RESET_ALL if UP_FOLLOW_ENABLED else Fore.YELLOW + "💤 未开启" + Style.RESET_ALL}
-    • 弹幕互动: {Fore.GREEN + "[MSG] 已开启" + Style.RESET_ALL if DANMAKU_ENABLED else Fore.YELLOW + "💤 未开启" + Style.RESET_ALL}
-    • 关键词审查: {Fore.GREEN + "🛡 已启用" + Style.RESET_ALL if REPLY_SAFETY_ENABLED else Fore.YELLOW + "⚠ 已关闭" + Style.RESET_ALL}
-    • 快速模式: {Fore.GREEN + "⚡ 已开启 (跳过延迟)" + Style.RESET_ALL if NO_HUMAN_DELAY else Fore.YELLOW + "🐢 已关闭 (模拟真人)" + Style.RESET_ALL}
-    • 备用API: {Fore.GREEN + "[REFRESH] " + FALLBACK_PROVIDER_NAME + "(" + (FALLBACK_PROVIDER_MODELS.get('chat','') or '?') + "/" + (FALLBACK_PROVIDER_MODELS.get('vision','') or '?') + ")" + Style.RESET_ALL if FALLBACK_PROVIDER_ENABLED else Fore.YELLOW + "💤 未启用" + Style.RESET_ALL}
-    • 随机数限制: {Fore.GREEN + "🎲 已开启 (随机检定)" + Style.RESET_ALL if RANDOM_ENABLED else Fore.YELLOW + "🔒 已关闭 (纯分数)" + Style.RESET_ALL}
+    • API状态: {Fore.GREEN + "已配置" + Style.RESET_ALL if is_api_configured() else Fore.YELLOW + "[WARN] 未完整配置" + Style.RESET_ALL}
+    • 登录状态: {Fore.GREEN + "已登录" + Style.RESET_ALL if is_bili_logged_in() else Fore.RED + "未登录" + Style.RESET_ALL}
+    • 知识库: {Fore.GREEN + "已启用" + Style.RESET_ALL if os.path.exists(KNOWLEDGE_BASE_DIR) else Fore.YELLOW + "[FILE] 待创建" + Style.RESET_ALL}
+    • 干货归档: {Fore.GREEN + f"已启用 (≥{DRY_GOODS_MIN_SCORE}分)" + Style.RESET_ALL if DRY_GOODS_ENABLED else Fore.YELLOW + "未启用" + Style.RESET_ALL}
+    • 兴趣爱好: {Fore.GREEN + f"{interest_count}个" + Style.RESET_ALL if interest_count > 0 else Fore.YELLOW + "[WARN] 未设置" + Style.RESET_ALL}
+    • 评论互动: {Fore.GREEN + "" + comment_mode_text + Style.RESET_ALL if PROB_COMMENT_OTHERS > 0 else Fore.YELLOW + "[WARN] 未启用" + Style.RESET_ALL}
+    • 私信处理: {Fore.GREEN + ("自动回复" if PRIVATE_MESSAGE_AUTO_REPLY else "只拟回复") + Style.RESET_ALL if PRIVATE_MESSAGE_ENABLED else Fore.YELLOW + "[WARN] 未启用" + Style.RESET_ALL}
+    • 视频探索: {Fore.GREEN + ("自动" if AGENT_AUTO_ENABLED else "手动") + Style.RESET_ALL if AGENT_ENABLED else Fore.YELLOW + "[WARN] 未启用" + Style.RESET_ALL}
+    • Agent深度搜索: {Fore.GREEN + "集成刷视频" + Style.RESET_ALL if AGENT_ENABLED and AGENT_DIVE_ENABLED else Fore.YELLOW + "未开启" + Style.RESET_ALL}
+    • 语音识别(ASR): {Fore.GREEN + f"[ASR] {ASR_BACKEND.upper()}" + Style.RESET_ALL if ASR_ENABLED else Fore.YELLOW + "未启用" + Style.RESET_ALL}
+    • 封面分析: {Fore.GREEN + "已开启" + Style.RESET_ALL if VISION_COVER_ENABLED else Fore.YELLOW + "已关闭(刷视频更快)" + Style.RESET_ALL}
+    • 复习回顾: {Fore.GREEN + f"已启用 (≥{REVISIT_MIN_SCORE}分)" + Style.RESET_ALL if REVISIT_ENABLED else Fore.YELLOW + "未开启" + Style.RESET_ALL}
+    • 会话限制: {Fore.GREEN + session_summary + Style.RESET_ALL}
+    • UP主关注: {Fore.GREEN + "[*] 已开启" + Style.RESET_ALL if UP_FOLLOW_ENABLED else Fore.YELLOW + "未开启" + Style.RESET_ALL}
+    • 弹幕互动: {Fore.GREEN + "[MSG] 已开启" + Style.RESET_ALL if DANMAKU_ENABLED else Fore.YELLOW + "未开启" + Style.RESET_ALL}
+    • 关键词审查: {Fore.GREEN + "已启用" + Style.RESET_ALL if REPLY_SAFETY_ENABLED else Fore.YELLOW + "已关闭" + Style.RESET_ALL}
+    • 快速模式: {Fore.GREEN + "已开启 (跳过延迟)" + Style.RESET_ALL if NO_HUMAN_DELAY else Fore.YELLOW + "已关闭 (模拟真人)" + Style.RESET_ALL}
+    • 备用API: {Fore.GREEN + "[REFRESH] " + FALLBACK_PROVIDER_NAME + "(" + (FALLBACK_PROVIDER_MODELS.get('chat','') or '?') + "/" + (FALLBACK_PROVIDER_MODELS.get('vision','') or '?') + ")" + Style.RESET_ALL if FALLBACK_PROVIDER_ENABLED else Fore.YELLOW + "未启用" + Style.RESET_ALL}
+    • 随机数限制: {Fore.GREEN + "已开启 (随机检定)" + Style.RESET_ALL if RANDOM_ENABLED else Fore.YELLOW + "已关闭 (纯分数)" + Style.RESET_ALL}
     • 投币限制: {Fore.GREEN}上限{MAX_COINS_DAILY}枚/天 | 阈值≥{COIN_THRESHOLD}分 | 概率{int(PROB_COIN*100)}%{(" | 冷却" + str(int(config.get("interaction", {}).get("coin_cooldown_minutes", 0))) + "分" if config.get("interaction", {}).get("coin_cooldown_minutes", 0) > 0 else "")}{(" | ≤" + str(int(config.get("interaction", {}).get("coin_max_per_hour", 0))) + "枚/时" if config.get("interaction", {}).get("coin_max_per_hour", 0) > 0 else "")}{Style.RESET_ALL}
-    • AI心情: {Fore.GREEN + ("🤖 随机心情" if MOOD_RANDOM_ENABLED else ("✏️ 自定义: " + MOOD_CUSTOM_VALUE if MOOD_CUSTOM_ENABLED and MOOD_CUSTOM_VALUE else "⚙️ 默认")) + Style.RESET_ALL}
+    • AI心情: {Fore.GREEN + ("随机心情" if MOOD_RANDOM_ENABLED else ("自定义: " + MOOD_CUSTOM_VALUE if MOOD_CUSTOM_ENABLED and MOOD_CUSTOM_VALUE else "默认")) + Style.RESET_ALL}
 
-    {Fore.CYAN}• 字幕严格校验:{Style.RESET_ALL} {Fore.GREEN + "✓ 已启用" + Style.RESET_ALL if SUBTITLE_STRICT_CHECK else Fore.LIGHTBLACK_EX + "💤 已关闭(默认)" + Style.RESET_ALL}
-    {Fore.CYAN}• 安静模式:{Style.RESET_ALL} {Fore.GREEN + "✓ 已开启" + Style.RESET_ALL if QUIET_MODE else Fore.LIGHTBLACK_EX + "💤 已关闭" + Style.RESET_ALL}
-    {Fore.CYAN}• 省token模式:{Style.RESET_ALL} {Fore.GREEN + "💡 智能省token" + Style.RESET_ALL if config.get("system", {}).get("smart_token_mode", False) else Fore.YELLOW + "💤 未启用 (当前模式)" + Style.RESET_ALL}
+    {Fore.CYAN}• 字幕严格校验:{Style.RESET_ALL} {Fore.GREEN + "已启用" + Style.RESET_ALL if SUBTITLE_STRICT_CHECK else Fore.LIGHTBLACK_EX + "已关闭(默认)" + Style.RESET_ALL}
+    {Fore.CYAN}• 安静模式:{Style.RESET_ALL} {Fore.GREEN + "已开启" + Style.RESET_ALL if QUIET_MODE else Fore.LIGHTBLACK_EX + "已关闭" + Style.RESET_ALL}
+    {Fore.CYAN}• 省token模式:{Style.RESET_ALL} {Fore.GREEN + "智能省token" + Style.RESET_ALL if config.get("system", {}).get("smart_token_mode", False) else Fore.YELLOW + "未启用 (当前模式)" + Style.RESET_ALL}
     """)
+    print(f"    {Fore.LIGHTMAGENTA_EX}AR.{Style.RESET_ALL} AI behavior review settings (including desktop notifications)")
 
 
 def open_web_panel():
     """打开网页端：若未运行则后台启动 web_panel.py，再打开浏览器。"""
-    import socket
     import subprocess
     import webbrowser
+    from utils.web_launcher import (
+        find_available_port,
+        get_web_port,
+        is_our_panel,
+        is_port_open,
+        panel_url,
+    )
 
-    port = int(os.getenv('WEB_PORT', '8080'))
-    url = f"http://127.0.0.1:{port}/"
-
-    def _port_open(host, p):
-        try:
-            with socket.create_connection((host, p), timeout=1.5):
-                return True
-        except OSError:
-            return False
+    port = get_web_port()
+    url = panel_url(port)
 
     # 1) 若已在运行，直接打开浏览器
-    if _port_open('127.0.0.1', port):
+    if is_our_panel(port):
         print(f"{Fore.GREEN}[OK] 网页端已在运行: {url}{Style.RESET_ALL}")
     else:
+        if is_port_open(port):
+            old_port = port
+            try:
+                port = find_available_port(port + 1)
+            except RuntimeError as e:
+                print(f"{Fore.RED}[ERROR] {e}{Style.RESET_ALL}")
+                return
+            url = panel_url(port)
+            print(f"{Fore.YELLOW}[WARN] 端口 {old_port} 已被其他程序占用，网页端改用 {port}{Style.RESET_ALL}")
         # 2) 后台启动 web_panel.py（跳过终端免责确认）
         print(f"{Fore.CYAN}[INFO] 网页端未运行，正在后台启动...{Style.RESET_ALL}")
         base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -896,14 +1363,20 @@ def open_web_panel():
             return
         env = dict(os.environ)
         env['BILI_DISCLAIMER_SKIP'] = '1'
+        env['BILI_WEB_AUTO_OPEN'] = '0'
+        env['BILI_BOT_AUTO_START'] = '0'
+        if env.get('BILI_PARENT_TRAY') == '1':
+            env['BILI_TRAY_DISABLED'] = '1'
+        env['WEB_PORT'] = str(port)
         log_path = os.path.join(base, 'web_panel_stdout.log')
         try:
             with open(log_path, 'ab') as lf:
                 if os.name == 'nt':
+                    flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
                     proc = subprocess.Popen(
                         [sys.executable, script],
                         env=env, stdout=lf, stderr=subprocess.STDOUT,
-                        creationflags=subprocess.CREATE_NO_WINDOW,
+                        creationflags=flags,
                     )
                 else:
                     proc = subprocess.Popen(
@@ -920,7 +1393,7 @@ def open_web_panel():
         ok = False
         for _ in range(40):
             time.sleep(0.5)
-            if _port_open('127.0.0.1', port):
+            if is_our_panel(port):
                 ok = True
                 break
         if not ok:
@@ -940,11 +1413,11 @@ def show_mood_menu():
     global MOOD_CUSTOM_ENABLED, MOOD_CUSTOM_VALUE
     
     while True:
-        random_text = "🤖 随机心情 (已开启)" if MOOD_RANDOM_ENABLED else "🤖 随机心情 (已关闭)"
-        custom_text = f"✏️  自定义心情 ({MOOD_CUSTOM_VALUE})" if MOOD_CUSTOM_ENABLED and MOOD_CUSTOM_VALUE else ("✏️  自定义心情 (已开启)" if MOOD_CUSTOM_ENABLED else "✏️  自定义心情 (已关闭)")
+        random_text = "随机心情 (已开启)" if MOOD_RANDOM_ENABLED else "随机心情 (已关闭)"
+        custom_text = f" 自定义心情 ({MOOD_CUSTOM_VALUE})" if MOOD_CUSTOM_ENABLED and MOOD_CUSTOM_VALUE else (" 自定义心情 (已开启)" if MOOD_CUSTOM_ENABLED else " 自定义心情 (已关闭)")
         print(f"""
     ╔══════════════════════════════════════════════════════════╗
-    ║                😊 AI心情管理设置                          ║
+    ║                AI心情管理设置                          ║
     ╚══════════════════════════════════════════════════════════╝
 
     {Fore.CYAN}当前心情模式:{Style.RESET_ALL}
@@ -1026,7 +1499,7 @@ def show_mood_menu():
             save_config(config)
 
 async def _mindmap_from_video_input(cfg):
-    """🧠 思维导图：输入视频(链接/BV/标题/UP主) → 抓取字幕 → 生成思维导图。
+    """思维导图：输入视频(链接/BV/标题/UP主) → 抓取字幕 → 生成思维导图。
     复用手动视频分析的解析与字幕获取逻辑，而非只从已有知识库导出。"""
     try:
         from brain.video_analysis import AgentBrain, _extract_bvid, _resolve_b23_short
@@ -1038,7 +1511,7 @@ async def _mindmap_from_video_input(cfg):
         return
 
     print(f"\n{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
-    print(f"{Fore.CYAN}|               🧠 思维导图 - 输入视频生成                       |{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}|               思维导图 - 输入视频生成                       |{Style.RESET_ALL}")
     print(f"{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
     print(f"{Fore.YELLOW}[INFO] 支持: B站视频链接 | BV号 | 视频标题 | UP主名字{Style.RESET_ALL}")
     print(f"{Fore.YELLOW}[INFO] 此模式会抓取视频字幕并直接生成思维导图（不写入知识库）{Style.RESET_ALL}")
@@ -1158,35 +1631,15 @@ async def _mindmap_from_video_input(cfg):
 
     # ── 尝试用 AI 把字幕/简介归纳为结构化大纲 ──
     print(f"{Fore.CYAN}[AI] 正在用 AI 归纳思维导图大纲...{Style.RESET_ALL}")
-    outline = await asyncio.get_event_loop().run_in_executor(
-        None, lambda: _ai_summarize_subs_to_outline(title, up_name, desc, subs, cfg)
-    )
+    outline = await _ai_summarize_subs_to_outline(title, up_name, desc, subs, cfg)
     if outline:
         md += "\n" + outline + "\n"
     else:
-        # 回退：简介 + 字幕平铺
-        md += f"\n## 视频简介\n"
-        _has_desc = False
-        for line in (desc or '').splitlines():
-            if line.strip():
-                md += f"- {line.strip()}\n"
-                _has_desc = True
-        if not _has_desc:
-            md += "- (无简介)\n"
-        md += f"\n## 字幕要点\n"
-        _n = 0
-        for line in (subs or '').splitlines():
-            s = line.strip()
-            if not s:
-                continue
-            md += f"- {s[:400]}\n"
-            _n += 1
-            if _n >= 400:
-                break
-        if _n == 0:
-            md += "- (无字幕内容)\n"
+        print(f"{Fore.RED}[ERROR] AI 未成功生成大纲，已停止生成思维导图。请先配置可用的 AI 密钥/地址/模型。{Style.RESET_ALL}")
+        return
 
     # ── 写入临时 md 并导出思维导图 ──
+
     fd, tmp = tempfile.mkstemp(suffix='.md', prefix='mm_video_')
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
@@ -1200,16 +1653,19 @@ async def _mindmap_from_video_input(cfg):
             pass
 
 
-def _ai_summarize_subs_to_outline(title, up_name, desc, subs, cfg):
-    """用本项目 OpenAI 客户端把字幕/简介归纳为结构化思维导图大纲（## 主分支 / ### 子分支 / - 要点）。
-    失败或未配置 AI 时返回 None，调用方回退到字幕平铺。"""
+async def _ai_summarize_subs_to_outline(title, up_name, desc, subs, cfg):
+    """用本项目统一 AI 通道把字幕/简介归纳为结构化思维导图大纲（## 主分支 / ### 子分支 / - 要点）。
+    失败或未配置 AI 时返回 None，调用方停止生成。"""
+
+    from services._services_ai import call_ai
     api_cfg = cfg.get("api", {}) if isinstance(cfg, dict) else {}
     api_key = (api_cfg.get("unified_api_key") or "").strip() or UNIFIED_API_KEY
     base_url = (api_cfg.get("unified_base_url") or "").strip() or UNIFIED_BASE_URL
     model = (api_cfg.get("model_brain") or "").strip() or MODEL_BRAIN
     if not (api_key and base_url and model):
-        print(f"  {Fore.YELLOW}[WARN] 未配置 AI（密钥/地址/模型缺失），回退字幕平铺{Style.RESET_ALL}")
+        print(f"  {Fore.YELLOW}[WARN] 未配置 AI（密钥/地址/模型缺失），无法生成思维导图{Style.RESET_ALL}")
         return None
+
     parts = []
     if desc and desc.strip():
         parts.append("【视频简介】\n" + desc.strip())
@@ -1231,25 +1687,26 @@ def _ai_summarize_subs_to_outline(title, up_name, desc, subs, cfg):
     )
     user = f"视频标题：{title}\nUP主：{up_name or '未知'}\n\n{material}"
     try:
-        client = OpenAI(api_key=api_key, base_url=base_url, timeout=120.0)
-        resp = client.chat.completions.create(
-            model=model,
+        out = await call_ai(
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
+            model=model,
             temperature=0.3,
+            timeout=120.0,
+            verbose=False,
         )
-        out = resp.choices[0].message.content
         if out and out.strip():
             return out.strip()
     except Exception as e:
-        print(f"  {Fore.YELLOW}[WARN] AI 大纲归纳失败，回退字幕平铺: {e}{Style.RESET_ALL}")
+        print(f"  {Fore.YELLOW}[WARN] AI 大纲归纳失败，已停止生成: {e}{Style.RESET_ALL}")
     return None
 
 
+
 def show_mindmap_menu():
-    """🧠 思维导图：把已学知识（单个视频 / 整个知识库）或输入视频导出为可交互 HTML 思维导图。"""
+    """思维导图：把已学知识（单个视频 / 整个知识库）或输入视频导出为可交互 HTML 思维导图。"""
     try:
         from services.mindmap_export import export_mindmap
     except Exception as e:
@@ -1260,13 +1717,13 @@ def show_mindmap_menu():
     while True:
         print(f"""
     ╔══════════════════════════════════════════════════════════╗
-    ║                🧠 思维导图导出                            ║
+    ║                思维导图导出                            ║
     ╚══════════════════════════════════════════════════════════╝
 
     {Fore.CYAN}把已学知识/输入视频导出为可交互思维导图（浏览器打开，可折叠/缩放）{Style.RESET_ALL}
     {Fore.GREEN}1.{Style.RESET_ALL} 整个知识库 → 批量思维导图 (全部 .md)
     {Fore.GREEN}2.{Style.RESET_ALL} 选择单个已学视频 → 导出该视频思维导图
-    {Fore.GREEN}3.{Style.RESET_ALL} 🆕 输入视频 (链接/BV/标题/UP主) → 抓取字幕并生成思维导图
+    {Fore.GREEN}3.{Style.RESET_ALL} 输入视频 (链接/BV/标题/UP主) → 抓取字幕并生成思维导图
     {Fore.RED}0.{Style.RESET_ALL} 返回主菜单
         """)
         sub = input(f"{Fore.CYAN}请选择: {Style.RESET_ALL}").strip()
@@ -1285,10 +1742,10 @@ def show_mindmap_menu():
                 try:
                     out = export_mindmap(p, cfg=cfg)
                     ok += 1
-                    print(f"  {Fore.GREEN}✓{Style.RESET_ALL} {out}")
+                    print(f"  {Fore.GREEN}{Style.RESET_ALL} {out}")
                 except Exception as e:
                     fail += 1
-                    print(f"  {Fore.RED}✗{Style.RESET_ALL} {p}: {e}")
+                    print(f"  {Fore.RED}{Style.RESET_ALL} {p}: {e}")
             print(f"{Fore.GREEN}[OK] 批量思维导图完成：成功 {ok}，失败 {fail}{Style.RESET_ALL}")
             input("按回车返回...")
         elif sub == "2":
@@ -1360,24 +1817,25 @@ def show_config_menu():
     • 视觉API地址: {vision_url_display}
 
     {Fore.CYAN}请选择要配置的项目:{Style.RESET_ALL}
-    {Fore.GREEN}1.{Style.RESET_ALL} 🔑 修改统一API密钥
+    {Fore.GREEN}1.{Style.RESET_ALL} 修改统一API密钥
     {Fore.GREEN}2.{Style.RESET_ALL} [NET] 修改统一API地址
-    {Fore.GREEN}3.{Style.RESET_ALL} 🤖 修改思考模型
-    {Fore.GREEN}4.{Style.RESET_ALL} 👁️  修改视觉模型
-    {Fore.YELLOW}E.{Style.RESET_ALL} 📄 修改HTML生成模型（默认=思考模型）
-    {Fore.MAGENTA}A.{Style.RESET_ALL} 🔑👁️ 设置视觉模型独立API密钥
-    {Fore.MAGENTA}B.{Style.RESET_ALL} [NET]👁️ 设置视觉模型独立API地址
+    {Fore.GREEN}3.{Style.RESET_ALL} 修改思考模型
+    {Fore.GREEN}4.{Style.RESET_ALL}  修改视觉模型
+    {Fore.YELLOW}E.{Style.RESET_ALL} 修改HTML生成模型（默认=思考模型）
+    {Fore.MAGENTA}A.{Style.RESET_ALL} 设置视觉模型独立API密钥
+    {Fore.MAGENTA}B.{Style.RESET_ALL} [NET]设置视觉模型独立API地址
     {Fore.MAGENTA}C.{Style.RESET_ALL} [REFRESH] 清除视觉模型独立配置(恢复共用)
-    {Fore.YELLOW}5.{Style.RESET_ALL} ⚙️  配置互动参数
+    {Fore.YELLOW}5.{Style.RESET_ALL}  配置互动参数
     {Fore.YELLOW}6.{Style.RESET_ALL} [FAST] 配置精力系统
-    {Fore.BLUE}7.{Style.RESET_ALL} 💾 保存当前配置
-    {Fore.BLUE}8.{Style.RESET_ALL} 📋 显示当前配置
+    {Fore.BLUE}7.{Style.RESET_ALL} 保存当前配置
+    {Fore.BLUE}8.{Style.RESET_ALL} 显示当前配置
     {Fore.YELLOW}9.{Style.RESET_ALL} [VIDEO] 视频下载/抽帧设置
-    {Fore.MAGENTA}10.{Style.RESET_ALL} [TIME]  会话限制（定时/计数停止）
+    {Fore.MAGENTA}10.{Style.RESET_ALL} [TIME]  会话限制（定时/学习数量/完成后监听）
     {Fore.MAGENTA}D.{Style.RESET_ALL} [REFRESH] 备用API提供商（跨服务降级）
     {Fore.LIGHTCYAN_EX}M.{Style.RESET_ALL} [LIST] 获取可用模型列表
-    {Fore.GREEN}P.{Style.RESET_ALL} 🏭 选择厂商预设 (内置官方格式，自动填地址/模型)
-    {Fore.RED}0.{Style.RESET_ALL} ↩️  返回主菜单
+    {Fore.GREEN}P.{Style.RESET_ALL} 选择厂商预设 (内置官方格式，自动填地址/模型)
+    {Fore.YELLOW}O.{Style.RESET_ALL} OpenBiliClaw 推荐引擎集成
+    {Fore.RED}0.{Style.RESET_ALL} ↩ 返回主菜单
         """)
 
         choice = input(f"{Fore.CYAN}请输入选项 (0-10/A/B/C/D/E/M): {Style.RESET_ALL}").strip()
@@ -1414,7 +1872,7 @@ def show_config_menu():
                 MODEL_HTML = config["api"].get("model_html") or MODEL_BRAIN
                 VISION_API_KEY = config["api"].get("vision_api_key") or UNIFIED_API_KEY
                 VISION_BASE_URL = config["api"].get("vision_base_url") or UNIFIED_BASE_URL
-                configure_openai_client()
+                configure_ai_client()
                 print(f"{Fore.GREEN}[OK] 配置保存成功！{Style.RESET_ALL}")
             else:
                 print(f"{Fore.RED}[ERROR] 配置保存失败！{Style.RESET_ALL}")
@@ -1430,6 +1888,8 @@ def show_config_menu():
             _fetch_available_models()
         elif choice.upper() == "P":
             configure_provider_preset()
+        elif choice.upper() == "O":
+            configure_ob_settings()
         else:
             print(f"{Fore.RED}[ERROR] 无效选项，请重新选择！{Style.RESET_ALL}")
 
@@ -1481,38 +1941,44 @@ def _fetch_available_models():
         # 去重排序
         model_ids = sorted(set(model_ids))
 
-        # 分类展示
+        # 分类展示（注意：vision=图像理解，image/dall*/stable/flux/sd-/midjourney=图像生成）
         chat_models = [m for m in model_ids if any(k in m.lower() for k in ("chat", "gpt", "claude", "gemini", "qwen", "deepseek", "glm", "moonshot", "kimi", "yi-", "mistral", "llama", "command"))]
         embed_models = [m for m in model_ids if "embed" in m.lower()]
-        image_models = [m for m in model_ids if any(k in m.lower() for k in ("vision", "image", "dall", "stable", "flux", "sd-", "midjourney"))]
-        other_models = [m for m in model_ids if m not in chat_models and m not in embed_models and m not in image_models]
+        vision_models = [m for m in model_ids if "vision" in m.lower() and "image" not in m.lower()]
+        gen_models = [m for m in model_ids if any(k in m.lower() for k in ("dall", "stable", "flux", "sd-", "midjourney")) or ("image" in m.lower() and "vision" not in m.lower())]
+        other_models = [m for m in model_ids if m not in chat_models and m not in embed_models and m not in vision_models and m not in gen_models]
 
-        print(f"\n{Fore.GREEN}✅ 共获取到 {len(model_ids)} 个模型:{Style.RESET_ALL}")
+        print(f"\n{Fore.GREEN}共获取到 {len(model_ids)} 个模型:{Style.RESET_ALL}")
 
         if chat_models:
-            print(f"\n{Fore.CYAN}📝 对话/思考模型 ({len(chat_models)}):{Style.RESET_ALL}")
+            print(f"\n{Fore.CYAN}对话/思考模型 ({len(chat_models)}):{Style.RESET_ALL}")
             for m in chat_models:
                 marker = " ← 当前思考模型" if m == MODEL_BRAIN else (" ← 当前视觉模型" if m == MODEL_VISION else "")
                 print(f"  {Fore.GREEN}{m}{Style.RESET_ALL}{Fore.YELLOW}{marker}{Style.RESET_ALL}")
 
-        if image_models:
-            print(f"\n{Fore.MAGENTA}🖼️ 视觉/图片模型 ({len(image_models)}):{Style.RESET_ALL}")
-            for m in image_models:
+        if vision_models:
+            print(f"\n{Fore.MAGENTA}视觉模型 ({len(vision_models)}):{Style.RESET_ALL}")
+            for m in vision_models:
                 marker = " ← 当前视觉模型" if m == MODEL_VISION else ""
                 print(f"  {Fore.GREEN}{m}{Style.RESET_ALL}{Fore.YELLOW}{marker}{Style.RESET_ALL}")
 
+        if gen_models:
+            print(f"\n{Fore.LIGHTYELLOW_EX}图片生成模型 ({len(gen_models)}):{Style.RESET_ALL}")
+            for m in gen_models:
+                print(f"  {Fore.GREEN}{m}{Style.RESET_ALL}")
+
         if embed_models:
-            print(f"\n{Fore.BLUE}📊 嵌入模型 ({len(embed_models)}):{Style.RESET_ALL}")
+            print(f"\n{Fore.BLUE}嵌入模型 ({len(embed_models)}):{Style.RESET_ALL}")
             for m in embed_models:
                 print(f"  {Fore.GREEN}{m}{Style.RESET_ALL}")
 
-        all_displayed = chat_models + image_models + embed_models
+        all_displayed = chat_models + vision_models + gen_models + embed_models
         if other_models:
-            print(f"\n{Fore.LIGHTBLACK_EX}📦 其他模型 ({len(other_models)}):{Style.RESET_ALL}")
+            print(f"\n{Fore.LIGHTBLACK_EX}其他模型 ({len(other_models)}):{Style.RESET_ALL}")
             for m in other_models:
                 print(f"  {Fore.LIGHTBLACK_EX}{m}{Style.RESET_ALL}")
 
-        print(f"\n{Fore.CYAN}💡 提示: 输入选项 3 或 4 修改模型名，复制上面的模型ID即可{Style.RESET_ALL}")
+        print(f"\n{Fore.CYAN}提示: 输入选项 3 或 4 修改模型名，复制上面的模型ID即可{Style.RESET_ALL}")
 
     except httpx.ConnectError:
         print(f"{Fore.RED}[ERROR] 连接失败: 无法访问 {base}，请检查API地址和网络{Style.RESET_ALL}")
@@ -1546,19 +2012,19 @@ def configure_fallback_provider():
     • API密钥: {mask_secret(FALLBACK_PROVIDER_API_KEY)}
     • API地址: {FALLBACK_PROVIDER_BASE_URL}
     • [BRAIN] 思考模型: {FALLBACK_PROVIDER_MODELS.get('chat', '') or '(未设置)'}
-    • 👁️  视觉模型: {FALLBACK_PROVIDER_MODELS.get('vision', '') or '(未设置)'}
+    •  视觉模型: {FALLBACK_PROVIDER_MODELS.get('vision', '') or '(未设置)'}
 
     {Fore.CYAN}提示:{Style.RESET_ALL}
     备用提供商会使用同一个API地址/密钥，但分别指定思考模型和视觉模型名称。
     主API连续失败3次后自动切换，10分钟后自动尝试恢复主API。
 
-    {Fore.YELLOW}1.{Style.RESET_ALL} 🔁 {'关闭' if FALLBACK_PROVIDER_ENABLED else '开启'}备用提供商
-    {Fore.YELLOW}2.{Style.RESET_ALL} 🔑 设置API密钥
+    {Fore.YELLOW}1.{Style.RESET_ALL} {'关闭' if FALLBACK_PROVIDER_ENABLED else '开启'}备用提供商
+    {Fore.YELLOW}2.{Style.RESET_ALL} 设置API密钥
     {Fore.YELLOW}3.{Style.RESET_ALL} [NET] 设置API地址
     {Fore.YELLOW}4.{Style.RESET_ALL} [BRAIN] 设置思考模型名称
-    {Fore.YELLOW}5.{Style.RESET_ALL} 👁️  设置视觉模型名称
-    {Fore.YELLOW}6.{Style.RESET_ALL} ✏️  修改名称
-    {Fore.RED}0.{Style.RESET_ALL} ↩️  返回上级
+    {Fore.YELLOW}5.{Style.RESET_ALL}  设置视觉模型名称
+    {Fore.YELLOW}6.{Style.RESET_ALL}  修改名称
+    {Fore.RED}0.{Style.RESET_ALL} ↩ 返回上级
         """)
 
         choice = input(f"{Fore.CYAN}请输入选项 (0-6): {Style.RESET_ALL}").strip()
@@ -1607,6 +2073,124 @@ def configure_fallback_provider():
         else:
             print(f"{Fore.RED}[ERROR] 无效选项{Style.RESET_ALL}")
 
+def configure_ob_settings():
+    """配置 OpenBiliClaw 推荐引擎集成"""
+    ob_cfg = config.setdefault("ob", {})
+    ob_cfg.setdefault("enabled", False)
+    ob_cfg.setdefault("base_url", "http://127.0.0.1:8420")
+    ob_cfg.setdefault("auto_launch", False)
+    ob_cfg.setdefault("launch_command", "openbiliclaw serve")
+    ob_cfg.setdefault("launch_cwd", "")
+    ob_cfg.setdefault("health_check_timeout_seconds", 5)
+    ob_cfg.setdefault("recommendation_fetch_limit", 20)
+    ob_cfg.setdefault("feedback_enabled", True)
+    ob_cfg.setdefault("event_report_enabled", True)
+    ob_cfg.setdefault("profile_sync_enabled", True)
+    ob_cfg.setdefault("explore_mode_fallback", True)
+    ob_cfg.setdefault("curiosity_keyword_ttl_hours", 24)
+    ob_cfg.setdefault("audit_enabled", True)
+    ob_cfg.setdefault("ab_test_enabled", True)
+    ob_cfg.setdefault("ab_window_size", 200)
+
+    while True:
+        en_label = f"{Fore.GREEN}启用{Style.RESET_ALL}" if ob_cfg.get("enabled") else f"{Fore.RED}停用{Style.RESET_ALL}"
+        auto_label = f"{Fore.GREEN}是{Style.RESET_ALL}" if ob_cfg.get("auto_launch") else f"{Fore.RED}否{Style.RESET_ALL}"
+        print(f"""
+    {Fore.CYAN}━━━ OpenBiliClaw 推荐引擎集成 ━━━{Style.RESET_ALL}
+
+    {Fore.CYAN}当前设置:{Style.RESET_ALL}
+    • 总开关: {en_label}
+    • 服务地址: {ob_cfg.get('base_url', '')}
+    • 自动拉起: {auto_label}
+    • 启动命令: {ob_cfg.get('launch_command', '')}
+    • OB项目目录: {ob_cfg.get('launch_cwd', '') or '(默认)'}
+    • 推荐数量: {ob_cfg.get('recommendation_fetch_limit', 20)}条
+    • 反馈回传: {'' if ob_cfg.get('feedback_enabled') else ''}
+    • 事件回传: {'' if ob_cfg.get('event_report_enabled') else ''}
+    • 探索模式: {'自动' if ob_cfg.get('explore_mode_fallback') else '仅精准模式'}
+    • 效能审计: {'' if ob_cfg.get('audit_enabled') else ''}
+    • AB对比测试: {'' if ob_cfg.get('ab_test_enabled') else ''}
+    • 好奇心关键词有效期: {ob_cfg.get('curiosity_keyword_ttl_hours', 24)}小时
+    • AB对比窗口: {ob_cfg.get('ab_window_size', 200)}条
+
+    {Fore.CYAN}说明:{Style.RESET_ALL}
+    OpenBiliClaw 是一个本地推荐引擎，帮助从B站海量视频中筛选你感兴趣的内容。
+    启用后，机器人不再用B站原始推荐流，而是从OB获取更精准的推荐。
+    有画像时走精准模式，没画像时自动走探索模式。
+
+    {Fore.YELLOW}1.{Style.RESET_ALL} {'关闭' if ob_cfg.get('enabled') else '开启'}集成
+    {Fore.YELLOW}2.{Style.RESET_ALL} [NET] 修改服务地址
+    {Fore.YELLOW}3.{Style.RESET_ALL} {'关闭' if ob_cfg.get('auto_launch') else '开启'}自动拉起
+    {Fore.YELLOW}4.{Style.RESET_ALL} 修改启动命令
+    {Fore.YELLOW}5.{Style.RESET_ALL} 修改OB项目目录
+    {Fore.YELLOW}6.{Style.RESET_ALL} 修改推荐数量 (1-50)
+    {Fore.YELLOW}7.{Style.RESET_ALL} {'关闭' if ob_cfg.get('explore_mode_fallback') else '开启'}探索模式自动切换
+    {Fore.YELLOW}8.{Style.RESET_ALL} {'关闭' if ob_cfg.get('audit_enabled') else '开启'}效能审计
+    {Fore.YELLOW}9.{Style.RESET_ALL} {'关闭' if ob_cfg.get('ab_test_enabled') else '开启'}AB对比测试
+    {Fore.YELLOW}A.{Style.RESET_ALL} 好奇心关键词有效期 ({ob_cfg.get('curiosity_keyword_ttl_hours', 24)}h)
+    {Fore.RED}0.{Style.RESET_ALL} ↩ 返回上级
+        """)
+
+        choice = input(f"{Fore.CYAN}请输入选项 (0-9,A): {Style.RESET_ALL}").strip()
+        if choice == "0":
+            break
+        elif choice == "1":
+            ob_cfg["enabled"] = not ob_cfg.get("enabled", False)
+            save_config(config)
+            print(f"{Fore.GREEN}[OK] OpenBiliClaw 集成已{'启用' if ob_cfg['enabled'] else '停用'}{Style.RESET_ALL}")
+        elif choice == "2":
+            url = input(f"{Fore.YELLOW}输入服务地址 (默认 http://127.0.0.1:8420): {Style.RESET_ALL}").strip()
+            if url:
+                ob_cfg["base_url"] = url
+                save_config(config)
+                print(f"{Fore.GREEN}[OK] 地址已更新: {url}{Style.RESET_ALL}")
+        elif choice == "3":
+            ob_cfg["auto_launch"] = not ob_cfg.get("auto_launch", False)
+            save_config(config)
+            print(f"{Fore.GREEN}[OK] 自动拉起已{'开启' if ob_cfg['auto_launch'] else '关闭'}{Style.RESET_ALL}")
+        elif choice == "4":
+            cmd = input(f"{Fore.YELLOW}输入启动命令 (默认 openbiliclaw serve): {Style.RESET_ALL}").strip()
+            if cmd:
+                ob_cfg["launch_command"] = cmd
+                save_config(config)
+                print(f"{Fore.GREEN}[OK] 启动命令已更新: {cmd}{Style.RESET_ALL}")
+        elif choice == "5":
+            cwd = input(f"{Fore.YELLOW}输入OB项目目录 (绝对路径或相对路径): {Style.RESET_ALL}").strip()
+            ob_cfg["launch_cwd"] = cwd
+            save_config(config)
+            print(f"{Fore.GREEN}[OK] 目录已更新: {cwd or '(默认)'}{Style.RESET_ALL}")
+        elif choice == "6":
+            try:
+                n = int(input(f"{Fore.YELLOW}输入推荐数量 (1-50): {Style.RESET_ALL}").strip())
+                ob_cfg["recommendation_fetch_limit"] = max(1, min(50, n))
+                save_config(config)
+                print(f"{Fore.GREEN}[OK] 推荐数量已更新: {ob_cfg['recommendation_fetch_limit']}{Style.RESET_ALL}")
+            except ValueError:
+                print(f"{Fore.RED}[ERROR] 请输入有效数字{Style.RESET_ALL}")
+        elif choice == "7":
+            ob_cfg["explore_mode_fallback"] = not ob_cfg.get("explore_mode_fallback", True)
+            save_config(config)
+            status = "自动切换" if ob_cfg["explore_mode_fallback"] else "仅精准模式"
+            print(f"{Fore.GREEN}[OK] 探索模式: {status}{Style.RESET_ALL}")
+        elif choice == "8":
+            ob_cfg["audit_enabled"] = not ob_cfg.get("audit_enabled", True)
+            save_config(config)
+            print(f"{Fore.GREEN}[OK] 效能审计已{'开启' if ob_cfg['audit_enabled'] else '关闭'}（每小时输出OB推荐质量报告）{Style.RESET_ALL}")
+        elif choice == "9":
+            ob_cfg["ab_test_enabled"] = not ob_cfg.get("ab_test_enabled", True)
+            save_config(config)
+            print(f"{Fore.GREEN}[OK] AB对比测试已{'开启' if ob_cfg['ab_test_enabled'] else '关闭'}（对比OB vs 原生B站推荐质量）{Style.RESET_ALL}")
+        elif choice.lower() == "a":
+            try:
+                h = int(input(f"{Fore.YELLOW}输入好奇心关键词有效期小时数 (1-168): {Style.RESET_ALL}").strip())
+                ob_cfg["curiosity_keyword_ttl_hours"] = max(1, min(168, h))
+                save_config(config)
+                print(f"{Fore.GREEN}[OK] 有效期已更新: {ob_cfg['curiosity_keyword_ttl_hours']}小时{Style.RESET_ALL}")
+            except ValueError:
+                print(f"{Fore.RED}[ERROR] 请输入有效数字{Style.RESET_ALL}")
+        else:
+            print(f"{Fore.RED}[ERROR] 无效选项{Style.RESET_ALL}")
+
 def configure_api_key():
     global UNIFIED_API_KEY, openai
     print(f"\n{Fore.CYAN}当前API密钥: {mask_secret(UNIFIED_API_KEY)}{Style.RESET_ALL}")
@@ -1614,7 +2198,7 @@ def configure_api_key():
     if new_key:
         config["api"]["unified_api_key"] = new_key
         UNIFIED_API_KEY = new_key
-        configure_openai_client()
+        configure_ai_client()
         save_config(config)
         print(f"{Fore.GREEN}[OK] API密钥已更新并自动保存！{Style.RESET_ALL}")
 
@@ -1625,7 +2209,7 @@ def configure_api_url():
     if new_url:
         config["api"]["unified_base_url"] = new_url
         UNIFIED_BASE_URL = new_url
-        # 🔧 同步更新 core.config 和 core.globals 中的模块级变量
+        # 同步更新 core.config 和 core.globals 中的模块级变量
         try:
             import core.config as _cfg
             import core.globals as _glo
@@ -1633,7 +2217,7 @@ def configure_api_url():
             _glo.UNIFIED_BASE_URL = new_url
         except Exception:
             pass
-        configure_openai_client()
+        configure_ai_client()
         save_config(config)
         print(f"{Fore.GREEN}[OK] API地址已更新并自动保存！{Style.RESET_ALL}")
 
@@ -1685,10 +2269,10 @@ def configure_provider_preset():
     keys = list(PROVIDER_PRESETS.keys())
     for i, k in enumerate(keys, 1):
         p = PROVIDER_PRESETS[k]
-        cur = " ✓当前" if config.get("active_preset") == k else ""
+        cur = " 当前" if config.get("active_preset") == k else ""
         print(f"  {Fore.GREEN}{i}.{Style.RESET_ALL} {p['name']}{cur}")
         print(f"     地址: {p['base_url']}  思考: {p['chat']}  视觉: {p['vision']}")
-    print(f"  {Fore.YELLOW}0.{Style.RESET_ALL} ↩️  取消")
+    print(f"  {Fore.YELLOW}0.{Style.RESET_ALL} ↩ 取消")
     sel = input(f"{Fore.CYAN}选择厂商 (序号, 回车取消): {Style.RESET_ALL}").strip()
     if not sel:
         return
@@ -1721,7 +2305,7 @@ def configure_provider_preset():
         _glo.UNIFIED_BASE_URL = UNIFIED_BASE_URL
     except Exception:
         pass
-    configure_openai_client()
+    configure_ai_client()
     save_config(config)
     print(f"{Fore.GREEN}[OK] 已应用预设: {p['name']}{Style.RESET_ALL}")
     print(f"  Base URL : {p['base_url']}")
@@ -1796,7 +2380,7 @@ def clear_vision_independent_config():
 def configure_video_settings():
     global VIDEO_UNDERSTANDING_MODE, VIDEO_MAX_DURATION_SECONDS, VIDEO_FRAME_COUNT
     global VIDEO_DOWNLOAD_INTEREST_THRESHOLD, VIDEO_DOWNLOAD_DIR
-    global VIDEO_FILTER_MODE
+    global VIDEO_FILTER_MODE, VIDEO_QUALITY
     global SMART_FRAME_ENABLED, SMART_FRAME_MIN, SMART_FRAME_MAX, VISION_FRAME_COUNT
     global VISION_COVER_ENABLED
 
@@ -1805,15 +2389,15 @@ def configure_video_settings():
     print(f"\n{Fore.CYAN}视频下载/抽帧设置{Style.RESET_ALL}")
     print(f"当前理解模式: {VIDEO_UNDERSTANDING_MODE} (subtitle/frames/hybrid/smart)")
     print(f"当前视频过滤: {VIDEO_FILTER_MODE} (watch_all=全看/cover_and_title=封面+标题判断)")
-    print(f"当前封面分析: {'[OK] 开启' if VISION_COVER_ENABLED else '⏸️ 已关闭(刷视频更快)'}")
+    print(f"当前封面分析: {'[OK] 开启' if VISION_COVER_ENABLED else '已关闭(刷视频更快)'}")
     print(f"当前下载时长上限: {VIDEO_MAX_DURATION_SECONDS} 秒")
     print(f"当前固定抽帧数量: {VIDEO_FRAME_COUNT} 张")
     print(f"当前视觉抽帧数量: {VISION_FRAME_COUNT} 张")
     print(f"当前下载画质: {VIDEO_QUALITY} (best=自动最高/1080p/720p/480p/360p)")
     print(f"当前智能下载阈值: {VIDEO_DOWNLOAD_INTEREST_THRESHOLD}")
-    print(f"当前下载路径: {VIDEO_DOWNLOAD_DIR or '默认 Data/video_cache'}")
+    print(f"当前下载路径: {VIDEO_DOWNLOAD_DIR or os.path.join(DATA_DIR, 'video_cache')}")
     print(f"\n{Fore.MAGENTA}[SMART_FRAME] AI智能抽帧:{Style.RESET_ALL}")
-    print(f"  • 智能抽帧开关: {'[OK] 开启' if SMART_FRAME_ENABLED else '⏸️ 关闭'} (AI自行决定是否抽帧+数量)")
+    print(f"  • 智能抽帧开关: {'[OK] 开启' if SMART_FRAME_ENABLED else '关闭'} (AI自行决定是否抽帧+数量)")
     print(f"  • 最小抽帧数: {SMART_FRAME_MIN} 张")
     print(f"  • 最大抽帧数: {SMART_FRAME_MAX} 张")
 
@@ -1947,14 +2531,50 @@ def configure_video_settings():
         VIDEO_DOWNLOAD_DIR = new_path
         print(f"{Fore.GREEN}[OK] 视频下载路径已更新: {new_path}{Style.RESET_ALL}")
 
-    cur_anchor = (config.get("video", {}) or {}).get("frame_anchor_mode", "bilinote")
-    anchor_input = input(f"{Fore.YELLOW}图文笔记模式 (bilinote=图文+目录 / legacy=经典仅理解, 当前: {cur_anchor}, 回车保持): {Style.RESET_ALL}").strip().lower()
+    cur_anchor = (config.get("video", {}) or {}).get("frame_note_mode", "visual_note")
+    anchor_input = input(f"{Fore.YELLOW}图文笔记模式 (visual_note=图文+目录 / classic=经典仅理解, 当前: {cur_anchor}, 回车保持): {Style.RESET_ALL}").strip().lower()
     if anchor_input:
-        if anchor_input in {"bilinote", "legacy"}:
-            video_cfg["frame_anchor_mode"] = anchor_input
+        if anchor_input in {"visual_note", "classic"}:
+            video_cfg["frame_note_mode"] = anchor_input
             print(f"{Fore.GREEN}[OK] 图文笔记模式已更新为 {anchor_input}{Style.RESET_ALL}")
         else:
-            print(f"{Fore.YELLOW}[WARN] 仅支持 bilinote / legacy，已保持原样{Style.RESET_ALL}")
+            print(f"{Fore.YELLOW}[WARN] 仅支持 visual_note / classic，已保持原样{Style.RESET_ALL}")
+
+    if (video_cfg.get("frame_note_mode") or cur_anchor) == "visual_note":
+        print(f"\n{Fore.MAGENTA}--- 图文学习笔记抽帧设置 ---{Style.RESET_ALL}")
+        for key, label, minimum, maximum, default in (
+            ("visual_note_frame_interval", "抽帧间隔(秒)", 1, 60, 6),
+            ("visual_note_max_frames", "最多抽帧数", 9, 360, 240),
+            ("visual_note_grid_cols", "网格列数", 1, 4, 3),
+            ("visual_note_grid_rows", "网格行数", 1, 4, 3),
+        ):
+            current = video_cfg.get(key, default)
+            raw = input(f"{Fore.YELLOW}{label} ({minimum}-{maximum}, 当前: {current}, 回车保持): {Style.RESET_ALL}").strip()
+            if not raw:
+                continue
+            try:
+                value = int(raw)
+                if minimum <= value <= maximum:
+                    video_cfg[key] = value
+                    print(f"{Fore.GREEN}[OK] {label}已更新为 {value}{Style.RESET_ALL}")
+                else:
+                    print(f"{Fore.YELLOW}[WARN] 超出范围，已保持原样{Style.RESET_ALL}")
+            except ValueError:
+                print(f"{Fore.YELLOW}[WARN] 不是整数，已保持原样{Style.RESET_ALL}")
+
+    cur_custom_prompt = (config.get("video", {}) or {}).get("custom_video_prompt", "")
+    prompt_input = input(f"{Fore.YELLOW}自定义视频笔记提示词 (当前: {cur_custom_prompt or '无'}, 回车保持, 留空清空): {Style.RESET_ALL}").strip()
+    if prompt_input:
+        video_cfg["custom_video_prompt"] = prompt_input
+        print(f"{Fore.GREEN}[OK] 自定义提示词已更新{Style.RESET_ALL}")
+    elif prompt_input == "" and cur_custom_prompt:
+        # 用户输入了回车 → 保持原样（不变）
+        pass
+    else:
+        # 用户明确输入了空（按退格或删光）→ 清空
+        if "custom_video_prompt" in video_cfg:
+            video_cfg["custom_video_prompt"] = ""
+            print(f"{Fore.GREEN}[OK] 自定义提示词已清空{Style.RESET_ALL}")
 
     if save_config(config):
         print(f"{Fore.GREEN}[OK] 视频设置已保存{Style.RESET_ALL}")
@@ -1968,7 +2588,7 @@ def _configure_video_interval_settings():
     while True:
         print(f"""
     ╔══════════════════════════════════════════════════════════╗
-    ║                ⏱️ 视频间隔设置                            ║
+    ║                视频间隔设置                            ║
     ╚══════════════════════════════════════════════════════════╝
 
     {Fore.CYAN}当前设置:{Style.RESET_ALL}
@@ -1982,7 +2602,7 @@ def _configure_video_interval_settings():
     {Fore.YELLOW}3.{Style.RESET_ALL} 快速预设: 慢速 (60-120秒, 模拟真人)
     {Fore.YELLOW}4.{Style.RESET_ALL} 快速预设: 中速 (20-50秒)
     {Fore.YELLOW}5.{Style.RESET_ALL} 快速预设: 快速 (5-15秒, 激进)
-    {Fore.YELLOW}6.{Style.RESET_ALL} 快速预设: 极速 (1-3秒, 刷屏)\n    {Fore.GREEN}   ★ 当前默认: 极速 (1-5秒){Style.RESET_ALL}
+    {Fore.YELLOW}6.{Style.RESET_ALL} 快速预设: 极速 (1-3秒, 刷屏)\n    {Fore.GREEN}   当前默认: 极速 (1-5秒){Style.RESET_ALL}
     {Fore.RED}0.{Style.RESET_ALL} 返回主菜单
     """)
         choice = input(f"{Fore.CYAN}请输入选项: {Style.RESET_ALL}").strip()
@@ -2026,6 +2646,22 @@ def _configure_video_interval_settings():
             VIDEO_INTERVAL_MIN, VIDEO_INTERVAL_MAX = 5, 15
         elif choice == "6":
             VIDEO_INTERVAL_MIN, VIDEO_INTERVAL_MAX = 1, 3
+        elif choice == "7":
+            video_cfg = config.setdefault("video", {})
+            current = video_cfg.get("browse_mode", "candidate_review")
+            print("1. 推荐流随机选择")
+            print("2. AI 候选筛选（建议，默认：先给 AI 一批视频）")
+            mode = input(f"选择刷视频模式 (1/2, 当前: {current}): ").strip()
+            if mode in {"1", "2"}:
+                video_cfg["browse_mode"] = "candidate_review" if mode == "2" else "direct"
+                if mode == "2":
+                    raw = input(f"候选视频数量 (5-100, 回车=保持 {video_cfg.get('candidate_pool_size', 20)}): ").strip()
+                    if raw:
+                        video_cfg["candidate_pool_size"] = max(5, min(100, int(raw)))
+                if save_config(config):
+                    _reload_all_globals(config)
+                    print(f"{Fore.GREEN}[OK] 刷视频模式已保存{Style.RESET_ALL}")
+            continue
         else:
             print(f"{Fore.RED}[ERROR] 无效选项{Style.RESET_ALL}")
             continue
@@ -2064,9 +2700,9 @@ def _configure_asr_settings():
     if ASR_BACKEND == "funasr":
         print(f"\n  {Fore.CYAN}── FunASR (Paraformer) 配置 ──{Style.RESET_ALL}")
         print(f"  模型目录: {ASR_FUNASR_MODEL_DIR or '(自动检测)'}")
-        print(f"  VAD语音检测: {'✓ 启用' if ASR_FUNASR_VAD_ENABLED else '✗ 关闭'}")
-        print(f"  自动标点: {'✓ 启用' if ASR_FUNASR_PUNC_ENABLED else '✗ 关闭'}")
-        print(f"  说话人分离(cam++): {'✓ 启用' if ASR_FUNASR_SPK_ENABLED else '✗ 关闭'}")
+        print(f"  VAD语音检测: {'启用' if ASR_FUNASR_VAD_ENABLED else '关闭'}")
+        print(f"  自动标点: {'启用' if ASR_FUNASR_PUNC_ENABLED else '关闭'}")
+        print(f"  说话人分离(cam++): {'启用' if ASR_FUNASR_SPK_ENABLED else '关闭'}")
         print(f"  批处理时长: {ASR_FUNASR_BATCH_SIZE_S}s")
         print(f"  热词: {ASR_FUNASR_HOTWORD or '(无)'}")
 
@@ -2118,12 +2754,12 @@ def _configure_asr_settings():
 
     # ═══ 通用配置 ═══
     print(f"\n  {Fore.CYAN}── 通用配置 ──{Style.RESET_ALL}")
-    print(f"  总开关: {'✓ 启用' if ASR_ENABLED else '✗ 关闭'}")
+    print(f"  总开关: {'启用' if ASR_ENABLED else '关闭'}")
     print(f"  识别语言: {ASR_LANGUAGE} (zh=中文/en=英文/auto=自动)")
     print(f"  音频时长上限: {ASR_MAX_AUDIO_DURATION}s")
     print(f"  最低置信度: {ASR_MIN_CONFIDENCE}")
-    print(f"  跳过音乐类: {'✓ 是' if ASR_SKIP_MUSIC else '✗ 否'}")
-    print(f"  保留音频文件: {'✓ 是' if ASR_KEEP_AUDIO else '✗ 否'}")
+    print(f"  跳过音乐类: {'是' if ASR_SKIP_MUSIC else '否'}")
+    print(f"  保留音频文件: {'是' if ASR_KEEP_AUDIO else '否'}")
     print(f"  运行设备: {ASR_DEVICE} (cpu/cuda)")
 
     toggle = input(f"{Fore.YELLOW}切换ASR总开关？(y/N): {Style.RESET_ALL}").strip().lower()
@@ -2206,7 +2842,7 @@ def _configure_dry_goods_settings():
     dg.setdefault("folder_name", "highlights")
 
     while True:
-        status = Fore.GREEN + "✓ Enabled" + Style.RESET_ALL if DRY_GOODS_ENABLED else Fore.YELLOW + "💤 Disabled" + Style.RESET_ALL
+        status = Fore.GREEN + "Enabled" + Style.RESET_ALL if DRY_GOODS_ENABLED else Fore.YELLOW + "Disabled" + Style.RESET_ALL
         print(f"""
     ╔══════════════════════════════════════════════════════════╗
     ║              [GOLD] 干货归档设置                            ║
@@ -2222,9 +2858,9 @@ def _configure_dry_goods_settings():
     不影响常规知识库归档。
 
     {Fore.CYAN}请选择:{Style.RESET_ALL}
-    {Fore.GREEN}1.{Style.RESET_ALL} 🔄 切换 ({'关闭' if DRY_GOODS_ENABLED else '开启'})
-    {Fore.YELLOW}2.{Style.RESET_ALL} ⚙️  修改最低评分门槛
-    {Fore.RED}0.{Style.RESET_ALL} ↩️  返回主菜单
+    {Fore.GREEN}1.{Style.RESET_ALL} 切换 ({'关闭' if DRY_GOODS_ENABLED else '开启'})
+    {Fore.YELLOW}2.{Style.RESET_ALL}  修改最低评分门槛
+    {Fore.RED}0.{Style.RESET_ALL} ↩ 返回主菜单
         """)
 
         choice = input(f"{Fore.CYAN}Enter option (0-2): {Style.RESET_ALL}").strip()
@@ -2250,14 +2886,17 @@ def _configure_dry_goods_settings():
             print(f"{Fore.RED}[ERROR] Invalid option{Style.RESET_ALL}")
 
 def configure_session_params():
-    """配置会话限制（定时/计数停止）"""
-    global SESSION_MAX_VIDEOS, SESSION_MAX_DURATION_MINUTES
+    """配置会话限制和完成后的运行方式。"""
+    global SESSION_MAX_VIDEOS, SESSION_MAX_LEARNED_VIDEOS
+    global SESSION_MAX_DURATION_MINUTES, SESSION_COMPLETION_ACTION
 
     session_cfg = config.setdefault("session", {})
     print(f"\n{Fore.CYAN}[TIME]  会话限制设置{Style.RESET_ALL}")
     print(f"当前最多处理视频: {'不限' if SESSION_MAX_VIDEOS <= 0 else f'{SESSION_MAX_VIDEOS}个'}")
+    print(f"当前最多成功学习: {'不限' if SESSION_MAX_LEARNED_VIDEOS <= 0 else f'{SESSION_MAX_LEARNED_VIDEOS}个'}")
     print(f"当前最长运行时间: {'不限' if SESSION_MAX_DURATION_MINUTES <= 0 else f'{SESSION_MAX_DURATION_MINUTES}分钟'}")
-    print(f"{Fore.YELLOW}（设为0表示不限制，两个条件任一触发即停止）{Style.RESET_ALL}")
+    print(f"达到限制后: {'启动实时监听' if SESSION_COMPLETION_ACTION == 'monitor' else '停止机器人'}")
+    print(f"{Fore.YELLOW}（设为0表示不限制，任一启用的条件触发即结束刷视频）{Style.RESET_ALL}")
 
     raw_videos = input(f"{Fore.YELLOW}请输入最多处理视频数 (0=不限, 回车保持): {Style.RESET_ALL}").strip()
     if raw_videos:
@@ -2267,6 +2906,19 @@ def configure_session_params():
                 session_cfg["max_videos"] = value
                 SESSION_MAX_VIDEOS = value
                 print(f"{Fore.GREEN}[OK] 最多处理视频数已更新为 {'不限' if value <= 0 else f'{value}个'}{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.YELLOW}[WARN] 数值无效，已保持原样{Style.RESET_ALL}")
+        except ValueError:
+            print(f"{Fore.YELLOW}[WARN] 不是整数，已保持原样{Style.RESET_ALL}")
+
+    raw_learned = input(f"{Fore.YELLOW}请输入最多成功学习数 (0=不限, 回车保持): {Style.RESET_ALL}").strip()
+    if raw_learned:
+        try:
+            value = int(raw_learned)
+            if value >= 0:
+                session_cfg["max_learned_videos"] = value
+                SESSION_MAX_LEARNED_VIDEOS = value
+                print(f"{Fore.GREEN}[OK] 成功学习数量已更新为 {'不限' if value <= 0 else f'{value}个'}{Style.RESET_ALL}")
             else:
                 print(f"{Fore.YELLOW}[WARN] 数值无效，已保持原样{Style.RESET_ALL}")
         except ValueError:
@@ -2284,6 +2936,13 @@ def configure_session_params():
                 print(f"{Fore.YELLOW}[WARN] 数值无效，已保持原样{Style.RESET_ALL}")
         except ValueError:
             print(f"{Fore.YELLOW}[WARN] 不是整数，已保持原样{Style.RESET_ALL}")
+
+    raw_action = input(
+        f"{Fore.YELLOW}达到限制后的动作 (1=停止, 2=启动实时监听, 回车保持): {Style.RESET_ALL}"
+    ).strip()
+    if raw_action in {"1", "2"}:
+        SESSION_COMPLETION_ACTION = "monitor" if raw_action == "2" else "stop"
+        session_cfg["completion_action"] = SESSION_COMPLETION_ACTION
 
     if save_config(config):
         print(f"{Fore.GREEN}[OK] 会话限制设置已保存{Style.RESET_ALL}")
@@ -2359,14 +3018,14 @@ def configure_interaction_params():
     except (ValueError, TypeError) as e:
         log(f'类型转换失败: {e}', 'DEBUG')
 
-    print(f"\n当前评论检查总开关: {'[OK] 启用' if COMMENT_CHECK_ENABLED else '⏸️ 关闭'}")
+    print(f"\n当前评论检查总开关: {'[OK] 启用' if COMMENT_CHECK_ENABLED else '关闭'}")
     toggle = input(f"{Fore.YELLOW}切换？(y=切换, 直接回车保持): {Style.RESET_ALL}").strip().lower()
     if toggle == 'y':
         COMMENT_CHECK_ENABLED = not COMMENT_CHECK_ENABLED
         config["interaction"]["comment_check_enabled"] = COMMENT_CHECK_ENABLED
         print(f"{Fore.GREEN}[OK] 评论检查已{'启用' if COMMENT_CHECK_ENABLED else '关闭'}!{Style.RESET_ALL}")
 
-    print(f"\n当前随机数限制: {'🎲 已开启' if RANDOM_ENABLED else '🔒 已关闭'}")
+    print(f"\n当前随机数限制: {'已开启' if RANDOM_ENABLED else '已关闭'}")
     print(f"  {'开启时：AI意图需通过随机概率检定才执行（更自然、更像真人）' if RANDOM_ENABLED else '关闭时：只看AI意图和分数阈值，跳过随机检定（更激进）'}")
     toggle_rand = input(f"{Fore.YELLOW}切换？(y=切换, 直接回车保持): {Style.RESET_ALL}").strip().lower()
     if toggle_rand == 'y':
@@ -2374,7 +3033,7 @@ def configure_interaction_params():
         config["interaction"]["random_enabled"] = RANDOM_ENABLED
         print(f"{Fore.GREEN}[OK] 随机数限制已{'开启 (随机检定)' if RANDOM_ENABLED else '关闭 (纯分数)'}!{Style.RESET_ALL}")
 
-    print(f"\n当前私信互动总开关: {'[OK] 启用' if PRIVATE_MESSAGE_ENABLED else '⏸️ 关闭'}")
+    print(f"\n当前私信互动总开关: {'[OK] 启用' if PRIVATE_MESSAGE_ENABLED else '关闭'}")
     toggle_pm = input(f"{Fore.YELLOW}切换？(y=切换, 直接回车保持): {Style.RESET_ALL}").strip().lower()
     if toggle_pm == 'y':
         PRIVATE_MESSAGE_ENABLED = not PRIVATE_MESSAGE_ENABLED
@@ -2400,7 +3059,7 @@ def show_coin_settings_menu():
         
         print(f"""
     ╔══════════════════════════════════════════════════════════╗
-    ║                🪙 投币限制设置                            ║
+    ║                投币限制设置                            ║
     ╚══════════════════════════════════════════════════════════╝
 
     {Fore.CYAN}当前投币配置:{Style.RESET_ALL}
@@ -2409,8 +3068,8 @@ def show_coin_settings_menu():
     {Fore.YELLOW}3.{Style.RESET_ALL} 投币概率检定: {Fore.GREEN}{int(prob*100)}%{Style.RESET_ALL} (随机数通过才投币)
     {Fore.YELLOW}4.{Style.RESET_ALL} 投币冷却时间: {Fore.GREEN}{cooldown_mins} 分钟{Style.RESET_ALL}{' (无冷却)' if cooldown_mins <= 0 else ''}
     {Fore.YELLOW}5.{Style.RESET_ALL} 每小时投币上限: {Fore.GREEN}{max_per_hour} 枚/小时{Style.RESET_ALL}{' (不限)' if max_per_hour <= 0 else ''}
-    {Fore.YELLOW}6.{Style.RESET_ALL} ✨ 恢复默认值
-    {Fore.RED}0.{Style.RESET_ALL} ↩️ 返回上级菜单
+    {Fore.YELLOW}6.{Style.RESET_ALL} 恢复默认值
+    {Fore.RED}0.{Style.RESET_ALL} ↩返回上级菜单
     """)
         
         choice = input(f"{Fore.CYAN}请选择 (0-6): {Style.RESET_ALL}").strip()
@@ -2489,35 +3148,44 @@ def show_coin_settings_menu():
 
 
 def show_learning_tools_menu():
-    """学习工具子菜单 — 出题考试 + 深入了解"""
+    """学习工具子菜单 — 出题考试 + 深入了解（均支持一次性/Agent模式）"""
     while True:
         print(f"\n{Fore.CYAN}{'='*50}")
-        print("  🛠️ 学习工具")
+        print("  学习工具")
         print(f"{'='*50}{Style.RESET_ALL}")
-        print(f"  {Fore.GREEN}1.{Style.RESET_ALL} 📝 出题考试 — 从视频/知识库生成考题")
-        print(f"  {Fore.GREEN}2.{Style.RESET_ALL} 🔬 深入了解 — AI 深度学习指定主题")
-        print(f"  {Fore.RED}0.{Style.RESET_ALL} ↩️ 返回主菜单")
+        print(f"  {Fore.GREEN}1.{Style.RESET_ALL} 出题考试 — 从视频/知识库生成考题（一次性 / Agent多轮对话）")
+        print(f"  {Fore.GREEN}2.{Style.RESET_ALL} 深入了解 — AI深度学习指定主题（一次性 / Agent / 多Agent / 深研计划）")
+        print(f"  {Fore.GREEN}3.{Style.RESET_ALL} 已学深入报告再导出 — HTML/Word/PDF/PPT/思维导图")
+        print(f"  {Fore.RED}0.{Style.RESET_ALL} ↩返回主菜单")
         
-        choice = input(f"{Fore.CYAN}请选择 (1/2/0): {Style.RESET_ALL}").strip()
+        choice = input(f"{Fore.CYAN}请选择 (1-3/0): {Style.RESET_ALL}").strip()
         
         if choice == "0":
             break
         elif choice == "1":
             try:
-                from services.quiz_generator import quiz_menu_cli
+                from services.learning_agent import quiz_with_mode
                 import asyncio
-                asyncio.run(quiz_menu_cli())
+                asyncio.run(quiz_with_mode())
             except Exception as e:
                 print(f"{Fore.RED}[ERROR] 出题异常: {e}{Style.RESET_ALL}")
                 import traceback
                 traceback.print_exc()
         elif choice == "2":
             try:
-                from services.deep_dive import deep_dive_menu_cli
+                from services.learning_agent import deep_dive_with_mode
                 import asyncio
-                asyncio.run(deep_dive_menu_cli())
+                asyncio.run(deep_dive_with_mode())
             except Exception as e:
                 print(f"{Fore.RED}[ERROR] 深入了解异常: {e}{Style.RESET_ALL}")
+                import traceback
+                traceback.print_exc()
+        elif choice == "3":
+            try:
+                from services.deep_dive import export_deep_dive_menu_cli
+                export_deep_dive_menu_cli()
+            except Exception as e:
+                print(f"{Fore.RED}[ERROR] 深入报告导出异常: {e}{Style.RESET_ALL}")
                 import traceback
                 traceback.print_exc()
         else:
@@ -2546,7 +3214,7 @@ def show_current_config():
     print(f"{Fore.CYAN}                     当前配置详情{Style.RESET_ALL}")
     print(f"{Fore.CYAN}════════════════════════════════════════════════════════════{Style.RESET_ALL}")
 
-    print(f"\n{Fore.YELLOW}📡 API配置:{Style.RESET_ALL}")
+    print(f"\n{Fore.YELLOW}API配置:{Style.RESET_ALL}")
     print(f"  • API密钥: {mask_secret(UNIFIED_API_KEY)}")
     print(f"  • API地址: {UNIFIED_BASE_URL}")
     print(f"  • 思考模型: {MODEL_BRAIN}")
@@ -2561,9 +3229,9 @@ def show_current_config():
     print(f"  • 每日最大投币: {MAX_COINS_DAILY}")
     print(f"  • 回复触发概率: {PROB_REPLY_TRIGGER*100}%")
     print(f"  • 评论他人概率: {PROB_COMMENT_OTHERS*100}%")
-    print(f"  • 评论检查: {'[OK] 启用' if COMMENT_CHECK_ENABLED else '⏸️ 关闭'} | 间隔: {COMMENT_CHECK_INTERVAL}秒")
-    print(f"  • 随机数限制: {'🎲 开启' if RANDOM_ENABLED else '🔒 关闭'} | 关闭时跳过随机检定，只看分数阈值")
-    print(f"  • 私信互动: {'[OK] 启用' if PRIVATE_MESSAGE_ENABLED else '⏸️ 关闭'} | {'自动发送' if PRIVATE_MESSAGE_AUTO_REPLY else '仅拟不发送'} | 间隔: {PRIVATE_MESSAGE_CHECK_INTERVAL}秒")
+    print(f"  • 评论检查: {'[OK] 启用' if COMMENT_CHECK_ENABLED else '关闭'} | 间隔: {COMMENT_CHECK_INTERVAL}秒")
+    print(f"  • 随机数限制: {'开启' if RANDOM_ENABLED else '关闭'} | 关闭时跳过随机检定，只看分数阈值")
+    print(f"  • 私信互动: {'[OK] 启用' if PRIVATE_MESSAGE_ENABLED else '关闭'} | {'自动发送' if PRIVATE_MESSAGE_AUTO_REPLY else '仅拟不发送'} | 间隔: {PRIVATE_MESSAGE_CHECK_INTERVAL}秒")
 
     print(f"\n{Fore.YELLOW}[FAST] 精力系统:{Style.RESET_ALL}")
     print(f"  • 最大精力值: {MAX_ENERGY}")
@@ -2583,18 +3251,20 @@ def show_current_config():
     print(f"  • 下载时长上限: {VIDEO_MAX_DURATION_SECONDS}秒")
     print(f"  • 固定抽帧数量: {VIDEO_FRAME_COUNT}张")
     print(f"  • 智能下载阈值: {VIDEO_DOWNLOAD_INTEREST_THRESHOLD}")
-    print(f"  • 下载路径: {VIDEO_DOWNLOAD_DIR or '默认 Data/video_cache'}")
-    print(f"  • 封面分析: {'[OK] 开启' if VISION_COVER_ENABLED else '⏸️ 关闭(刷视频更快)'}")
-    print(f"  • AI智能抽帧: {'[OK] 开启' if SMART_FRAME_ENABLED else '⏸️ 关闭'} | 范围: {SMART_FRAME_MIN}-{SMART_FRAME_MAX}帧 | 兜底: {VISION_FRAME_COUNT}帧")
+    print(f"  • 下载路径: {VIDEO_DOWNLOAD_DIR or os.path.join(DATA_DIR, 'video_cache')}")
+    print(f"  • 封面分析: {'[OK] 开启' if VISION_COVER_ENABLED else '关闭(刷视频更快)'}")
+    print(f"  • AI智能抽帧: {'[OK] 开启' if SMART_FRAME_ENABLED else '关闭'} | 范围: {SMART_FRAME_MIN}-{SMART_FRAME_MAX}帧 | 兜底: {VISION_FRAME_COUNT}帧")
 
     print(f"\n{Fore.YELLOW}[GOLD] 干货归档:{Style.RESET_ALL}")
     print(f"  • 干货归档: {'[OK] 已启用' if DRY_GOODS_ENABLED else '未启用'} | 最低评分: {DRY_GOODS_MIN_SCORE}")
     print(f"  • 深度看视频: 初始{CURIOSITY_DEEP_DIVE_DEFAULT_VIDEOS}个 | 中等{CURIOSITY_DEEP_DIVE_MID_VIDEOS}个 | 丰富{CURIOSITY_DEEP_DIVE_HIGH_VIDEOS}个")
-    print(f"  • 深度看触发: {'[OK] 启用' if CURIOSITY_DEEP_DIVE_ENABLED else '⏸️ 关闭'} | 最低: {CURIOSITY_DEEP_DIVE_MIN_SCORE}分 | 概率: {CURIOSITY_DEEP_DIVE_PROB*100}%")
+    print(f"  • 深度看触发: {'[OK] 启用' if CURIOSITY_DEEP_DIVE_ENABLED else '关闭'} | 最低: {CURIOSITY_DEEP_DIVE_MIN_SCORE}分 | 概率: {CURIOSITY_DEEP_DIVE_PROB*100}%")
 
     print(f"\n{Fore.YELLOW}[TIME]  会话限制:{Style.RESET_ALL}")
     print(f"  • 最多处理视频: {'不限' if SESSION_MAX_VIDEOS <= 0 else f'{SESSION_MAX_VIDEOS}个'}")
+    print(f"  • 最多成功学习: {'不限' if SESSION_MAX_LEARNED_VIDEOS <= 0 else f'{SESSION_MAX_LEARNED_VIDEOS}个'}")
     print(f"  • 最长运行时间: {'不限' if SESSION_MAX_DURATION_MINUTES <= 0 else f'{SESSION_MAX_DURATION_MINUTES}分钟'}")
+    print(f"  • 达到限制后: {'启动实时监听' if SESSION_COMPLETION_ACTION == 'monitor' else '停止机器人'}")
 
     print(f"\n{Fore.CYAN}════════════════════════════════════════════════════════════{Style.RESET_ALL}")
 
@@ -2607,13 +3277,13 @@ def show_login_menu():
     ╚══════════════════════════════════════════════════════════╝
 
     {Fore.CYAN}当前状态:{Style.RESET_ALL}
-    • Cookie文件: {Fore.GREEN + "✓ 有效" + Style.RESET_ALL if is_bili_logged_in() else (Fore.YELLOW + "⚠ 存在但无效" + Style.RESET_ALL if os.path.exists(COOKIE_FILE) else Fore.RED + "✗ 不存在" + Style.RESET_ALL)}
+    • Cookie文件: {Fore.GREEN + "有效" + Style.RESET_ALL if is_bili_logged_in() else (Fore.YELLOW + "存在但无效" + Style.RESET_ALL if os.path.exists(COOKIE_FILE) else Fore.RED + "不存在" + Style.RESET_ALL)}
 
     {Fore.CYAN}请选择操作:{Style.RESET_ALL}
-    {Fore.GREEN}1.{Style.RESET_ALL} 🔑 重新登录（扫码）
-    {Fore.YELLOW}2.{Style.RESET_ALL} 🗑️  清除登录信息
-    {Fore.BLUE}3.{Style.RESET_ALL} 📋 检查登录状态
-    {Fore.RED}0.{Style.RESET_ALL} ↩️  返回主菜单
+    {Fore.GREEN}1.{Style.RESET_ALL} 重新登录（扫码）
+    {Fore.YELLOW}2.{Style.RESET_ALL}  清除登录信息
+    {Fore.BLUE}3.{Style.RESET_ALL} 检查登录状态
+    {Fore.RED}0.{Style.RESET_ALL} ↩ 返回主菜单
         """)
 
         choice = input(f"{Fore.CYAN}请输入选项 (0-3): {Style.RESET_ALL}").strip()
@@ -2658,10 +3328,10 @@ def show_interest_menu():
         
         print(f"""
     {Fore.CYAN}请选择操作:{Style.RESET_ALL}
-    {Fore.GREEN}1.{Style.RESET_ALL} ➕ 添加兴趣关键词
-    {Fore.YELLOW}2.{Style.RESET_ALL} ➖ 移除兴趣关键词
-    {Fore.BLUE}3.{Style.RESET_ALL} 📋 清空所有兴趣
-    {Fore.RED}0.{Style.RESET_ALL} ↩️  返回主菜单
+    {Fore.GREEN}1.{Style.RESET_ALL} 添加兴趣关键词
+    {Fore.YELLOW}2.{Style.RESET_ALL} 移除兴趣关键词
+    {Fore.BLUE}3.{Style.RESET_ALL} 清空所有兴趣
+    {Fore.RED}0.{Style.RESET_ALL} ↩ 返回主菜单
         """)
         
         choice = input(f"{Fore.CYAN}请输入选项 (0-3): {Style.RESET_ALL}").strip()
@@ -2699,7 +3369,7 @@ def show_interest_menu():
 #  兴趣偏好设置菜单 (引擎 v2.0 — 整合方案A/B/C/D)
 # ═══════════════════════════════════════════════════════════
 def show_interest_prefs_menu():
-    """🎯 兴趣偏好设置 — 智能引擎 v2.0 全功能菜单"""
+    """兴趣偏好设置 — 智能引擎 v2.0 全功能菜单"""
     from services.interest_engine import get_engine, reset_engine
 
     engine = get_engine()
@@ -2708,20 +3378,20 @@ def show_interest_prefs_menu():
         engine.display_settings()
 
         print(f"""{Fore.CYAN}请选择操作:{Style.RESET_ALL}
-{Fore.GREEN}1.{Style.RESET_ALL} ➕ 添加兴趣关键词 (可带权重: 高/中/低)
-{Fore.YELLOW}2.{Style.RESET_ALL} ➖ 移除兴趣关键词
-{Fore.MAGENTA}3.{Style.RESET_ALL} 🏷️  管理兴趣权重
-{Fore.LIGHTCYAN_EX}4.{Style.RESET_ALL} 🔗 管理同义词 (为关键词添加近义词)
-{Fore.LIGHTRED_EX}5.{Style.RESET_ALL} 🚫 管理排除词 (不看包含这些词的内容)
-{Fore.CYAN}6.{Style.RESET_ALL} 🎲 灵光一闪设置 (随机探索率)
-{Fore.BLUE}7.{Style.RESET_ALL} 🔄 过滤模式切换
-{Fore.LIGHTGREEN_EX}8.{Style.RESET_ALL} 📊 评分引擎设置 (多维度权重/阈值)
-{Fore.LIGHTCYAN_EX}9.{Style.RESET_ALL} 🧠 PsychoProfile同步 (一键同步)
-{Fore.YELLOW}A.{Style.RESET_ALL} 🤖 AI关键词建议开关
-{Fore.YELLOW}B.{Style.RESET_ALL} 🔗 同义词扩展开关
-{Fore.GREEN}C.{Style.RESET_ALL} 📋 清空所有兴趣
-{Fore.RED}R.{Style.RESET_ALL} 🔄 重置为默认推荐配置
-{Fore.RED}0.{Style.RESET_ALL} ↩️  返回主菜单
+{Fore.GREEN}1.{Style.RESET_ALL} 添加兴趣关键词 (可带权重: 高/中/低)
+{Fore.YELLOW}2.{Style.RESET_ALL} 移除兴趣关键词
+{Fore.MAGENTA}3.{Style.RESET_ALL}  管理兴趣权重
+{Fore.LIGHTCYAN_EX}4.{Style.RESET_ALL} 管理同义词 (为关键词添加近义词)
+{Fore.LIGHTRED_EX}5.{Style.RESET_ALL} 管理排除词 (不看包含这些词的内容)
+{Fore.CYAN}6.{Style.RESET_ALL} 灵光一闪设置 (随机探索率)
+{Fore.BLUE}7.{Style.RESET_ALL} 过滤模式切换
+{Fore.LIGHTGREEN_EX}8.{Style.RESET_ALL} 评分引擎设置 (多维度权重/阈值)
+{Fore.LIGHTCYAN_EX}9.{Style.RESET_ALL} PsychoProfile同步 (一键同步)
+{Fore.YELLOW}A.{Style.RESET_ALL} AI关键词建议开关
+{Fore.YELLOW}B.{Style.RESET_ALL} 同义词扩展开关
+{Fore.GREEN}C.{Style.RESET_ALL} 清空所有兴趣
+{Fore.RED}R.{Style.RESET_ALL} 重置为默认推荐配置
+{Fore.RED}0.{Style.RESET_ALL} ↩ 返回主菜单
 """)
 
         choice = input(f"{Fore.CYAN}请输入选项: {Style.RESET_ALL}").strip()
@@ -2752,7 +3422,7 @@ def show_interest_prefs_menu():
             for i, kw in enumerate(keywords, 1):
                 item = engine.interests_list[i-1] if i <= len(engine.interests_list) else {}
                 w = item.get("weight", "?") if isinstance(item, dict) else "?"
-                auto = "🤖" if isinstance(item, dict) and item.get("auto_suggested") else ""
+                auto = "" if isinstance(item, dict) and item.get("auto_suggested") else ""
                 print(f"  {i}. {kw} ({w}){auto}")
             try:
                 idx = int(input(f"{Fore.YELLOW}请输入要移除的编号: {Style.RESET_ALL}").strip())
@@ -2865,9 +3535,9 @@ def show_interest_prefs_menu():
         elif choice == "8":
             sc = engine.settings.get("scoring", {})
             print(f"""{Fore.CYAN}【评分引擎设置】{Style.RESET_ALL}
-  当前: {'✓ 启用' if sc.get('enabled') else '✗ 关闭'}
+  当前: {'启用' if sc.get('enabled') else '关闭'}
   权重: 相关性{sc.get('weights',{}).get('relevance',0.4):.0%} | 新颖度{sc.get('weights',{}).get('novelty',0.2):.0%} | 多样性{sc.get('weights',{}).get('diversity',0.15):.0%} | 质量{sc.get('weights',{}).get('quality',0.25):.0%}
-  阈值: 基准{sc.get('threshold_base',6.0)} | 动态{'✓' if sc.get('dynamic_threshold') else '✗'}
+  阈值: 基准{sc.get('threshold_base',6.0)} | 动态{'' if sc.get('dynamic_threshold') else ''}
 
 {Fore.GREEN}1.{Style.RESET_ALL} 开启/关闭评分引擎
 {Fore.YELLOW}2.{Style.RESET_ALL} 调整权重 (相关性/新颖度/多样性/质量)
@@ -2877,7 +3547,7 @@ def show_interest_prefs_menu():
             if sub == "1":
                 sc["enabled"] = not sc.get("enabled", True)
                 engine.save()
-                print(f"{Fore.GREEN}[OK] 评分引擎: {'✓ 启用' if sc['enabled'] else '✗ 关闭'}{Style.RESET_ALL}")
+                print(f"{Fore.GREEN}[OK] 评分引擎: {'启用' if sc['enabled'] else '关闭'}{Style.RESET_ALL}")
             elif sub == "2":
                 for key, name in [("relevance", "相关性"), ("novelty", "新颖度"), ("diversity", "多样性"), ("quality", "质量")]:
                     try:
@@ -2898,7 +3568,7 @@ def show_interest_prefs_menu():
             elif sub == "4":
                 sc["dynamic_threshold"] = not sc.get("dynamic_threshold", True)
                 engine.save()
-                print(f"{Fore.GREEN}[OK] 动态阈值: {'✓' if sc['dynamic_threshold'] else '✗'}{Style.RESET_ALL}")
+                print(f"{Fore.GREEN}[OK] 动态阈值: {'' if sc['dynamic_threshold'] else ''}{Style.RESET_ALL}")
 
         elif choice == "9":
             print(f"{Fore.YELLOW}[INFO] 正在从PsychoProfile同步...{Style.RESET_ALL}")
@@ -2909,10 +3579,7 @@ def show_interest_prefs_menu():
                 # 从已缓存的brain实例获取
                 added = 0
                 # 尝试从全局配置读取已有的psycho数据
-                psycho_path = os.path.join(
-                    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                    "Data", "psycho_profile.json"
-                )
+                psycho_path = os.path.join(DATA_DIR, "psycho_profile.json")
                 if os.path.exists(psycho_path):
                     import json
                     with open(psycho_path, 'r', encoding='utf-8') as f:
@@ -2935,13 +3602,13 @@ def show_interest_prefs_menu():
             current = engine.settings.get("ai_suggest", True)
             engine.settings["ai_suggest"] = not current
             engine.save()
-            print(f"{Fore.GREEN}[OK] AI关键词建议: {'✓ 开启' if not current else '✗ 关闭'}{Style.RESET_ALL}")
+            print(f"{Fore.GREEN}[OK] AI关键词建议: {'开启' if not current else '关闭'}{Style.RESET_ALL}")
 
         elif choice.lower() == "b":
             current = engine.settings.get("use_synonyms", True)
             engine.settings["use_synonyms"] = not current
             engine.save()
-            print(f"{Fore.GREEN}[OK] 同义词扩展: {'✓ 开启' if not current else '✗ 关闭'}{Style.RESET_ALL}")
+            print(f"{Fore.GREEN}[OK] 同义词扩展: {'开启' if not current else '关闭'}{Style.RESET_ALL}")
 
         elif choice.lower() == "c":
             confirm = input(f"{Fore.RED}确认清空所有兴趣？(y/N): {Style.RESET_ALL}").strip().lower()
@@ -2971,10 +3638,10 @@ def show_comment_menu():
     global RANDOM_ENABLED
     
     while True:
-        mode_icon = "[NET]" if COMMENT_MODE == "real" else "🎭"
+        mode_icon = "[NET]" if COMMENT_MODE == "real" else ""
         mode_text = "真实评论（实际发送到B站）" if COMMENT_MODE == "real" else "模拟评论（仅日志记录，不真发）"
-        check_status = "[OK] 启用" if COMMENT_CHECK_ENABLED else "⏸️ 关闭"
-        random_status = "🎲 已开启 (随机检定)" if RANDOM_ENABLED else "🔒 已关闭 (纯分数)"
+        check_status = "[OK] 启用" if COMMENT_CHECK_ENABLED else "关闭"
+        random_status = "已开启 (随机检定)" if RANDOM_ENABLED else "已关闭 (纯分数)"
         print(f"""
     ╔══════════════════════════════════════════════════════════╗
     ║                  评论互动设置菜单                        ║
@@ -2990,15 +3657,15 @@ def show_comment_menu():
     • 回复审查: {'启用' if REPLY_SAFETY_ENABLED else '关闭'} | 敏感词 {len(REPLY_SAFETY_BLOCKED_KEYWORDS)} 个
 
     {Fore.CYAN}请选择操作:{Style.RESET_ALL}
-    {Fore.GREEN}0.{Style.RESET_ALL} 🔁 切换评论模式（真实/模拟）
-    {Fore.CYAN}7.{Style.RESET_ALL} 🔌 评论检查总开关（当前: {check_status}）
+    {Fore.GREEN}0.{Style.RESET_ALL} 切换评论模式（真实/模拟）
+    {Fore.CYAN}7.{Style.RESET_ALL} 评论检查总开关（当前: {check_status}）
     {Fore.GREEN}1.{Style.RESET_ALL} [STATS] 查看评论互动日志
-    {Fore.YELLOW}2.{Style.RESET_ALL} ⚙️  修改评论概率
-    {Fore.YELLOW}3.{Style.RESET_ALL} ⏰ 修改检查间隔
-    {Fore.YELLOW}4.{Style.RESET_ALL} 🔢 修改最大回复数
+    {Fore.YELLOW}2.{Style.RESET_ALL}  修改评论概率
+    {Fore.YELLOW}3.{Style.RESET_ALL} 修改检查间隔
+    {Fore.YELLOW}4.{Style.RESET_ALL} 修改最大回复数
     {Fore.YELLOW}5.{Style.RESET_ALL} [DEF]  回复审查设置
-    {Fore.MAGENTA}8.{Style.RESET_ALL} 🎲 切换随机数限制（当前: {random_status}）
-    {Fore.RED}9.{Style.RESET_ALL} ↩️  返回主菜单
+    {Fore.MAGENTA}8.{Style.RESET_ALL} 切换随机数限制（当前: {random_status}）
+    {Fore.RED}9.{Style.RESET_ALL} ↩ 返回主菜单
         """)
         
         choice = input(f"{Fore.CYAN}请输入选项 (0-5,7-9=返回): {Style.RESET_ALL}").strip()
@@ -3062,7 +3729,7 @@ def show_comment_menu():
             RANDOM_ENABLED = not RANDOM_ENABLED
             config["interaction"]["random_enabled"] = RANDOM_ENABLED
             save_config(config)
-            new_status = "🎲 已开启 (随机检定)" if RANDOM_ENABLED else "🔒 已关闭 (纯分数)"
+            new_status = "已开启 (随机检定)" if RANDOM_ENABLED else "已关闭 (纯分数)"
             print(f"{Fore.GREEN}[OK] 随机数限制已切换为: {new_status}{Style.RESET_ALL}")
             if RANDOM_ENABLED:
                 print(f"{Fore.CYAN}   AI意图需通过随机概率检定才执行 → 更自然、更像真人{Style.RESET_ALL}")
@@ -3100,7 +3767,7 @@ def show_comment_log():
             if action == "reply":
                 print(f"  {timestamp} [MSG] 回复 @{target}: {content}...")
             elif action == "like":
-                print(f"  {timestamp} ❤️ 点赞 @{target}")
+                print(f"  {timestamp} 点赞 @{target}")
             elif action == "blocked_reply":
                 hits = ", ".join(entry.get("hits", []))
                 print(f"  {timestamp} [DEF] 拦截 @{target}: {entry.get('reason', '')} ({hits})")
@@ -3133,13 +3800,13 @@ def show_reply_safety_menu():
     • 敏感词: {', '.join(REPLY_SAFETY_BLOCKED_KEYWORDS) if REPLY_SAFETY_BLOCKED_KEYWORDS else '(空)'}
 
     {Fore.CYAN}请选择操作:{Style.RESET_ALL}
-    {Fore.GREEN}1.{Style.RESET_ALL} 🔁 开关总审查
-    {Fore.GREEN}2.{Style.RESET_ALL} 📥 开关检查收到内容
-    {Fore.GREEN}3.{Style.RESET_ALL} 📤 开关检查拟发送回复
-    {Fore.YELLOW}4.{Style.RESET_ALL} ➕ 添加敏感词
-    {Fore.YELLOW}5.{Style.RESET_ALL} ➖ 删除敏感词
-    {Fore.BLUE}6.{Style.RESET_ALL} 🧪 测试一句话
-    {Fore.RED}0.{Style.RESET_ALL} ↩️  返回上级
+    {Fore.GREEN}1.{Style.RESET_ALL} 开关总审查
+    {Fore.GREEN}2.{Style.RESET_ALL} 开关检查收到内容
+    {Fore.GREEN}3.{Style.RESET_ALL} 开关检查拟发送回复
+    {Fore.YELLOW}4.{Style.RESET_ALL} 添加敏感词
+    {Fore.YELLOW}5.{Style.RESET_ALL} 删除敏感词
+    {Fore.BLUE}6.{Style.RESET_ALL} 测试一句话
+    {Fore.RED}0.{Style.RESET_ALL} ↩ 返回上级
         """)
 
         choice = input(f"{Fore.CYAN}请输入选项 (0-6): {Style.RESET_ALL}").strip()
@@ -3188,9 +3855,98 @@ def show_reply_safety_menu():
             print(f"{Fore.RED}[ERROR] 无效选项{Style.RESET_ALL}")
 
 
+def configure_owner_share():
+    """Configure opt-in learned-video sharing to the owner's Bilibili UID."""
+    from services.owner_share import OwnerShareService
+
+    while True:
+        share = config.setdefault("owner_share", {})
+        state = OwnerShareService().status()
+        print(f"""
+    ╔══════════════════════════════════════════════════════════╗
+    ║                    主人分享设置                          ║
+    ╚══════════════════════════════════════════════════════════╝
+    • 状态: {'启用' if share.get('enabled', False) else '关闭（不会发送）'}
+    • 主人 B 站 UID: {share.get('owner_bili_uid') or '未设置'}
+    • 分享类型: 学到知识={'开' if share.get('share_learned', True) else '关'} | 有趣视频={'开' if share.get('share_fun', True) else '关'}
+    • 触发: 评分≥{share.get('min_score', 7.5)} | 概率 {int(float(share.get('probability', .35)) * 100)}%
+    • 限制: 今日 {state['today_count']}/{share.get('daily_limit', 3)} | 冷却 {share.get('cooldown_minutes', 30)} 分钟
+    • 审核开启时，分享会进入原有 AI 行为审核，审核通过后才会真实发送。
+
+    1. 开关主人分享
+    2. 设置主人 B 站 UID
+    3. 开关分享学到的知识
+    4. 开关分享有趣视频
+    5. 设置评分阈值 / 触发概率
+    6. 设置每日上限 / 冷却时间
+    7. 设置附言概率 / 自定义提示词
+    8. 查看最近分享记录
+    0. 返回私信设置
+        """)
+        choice = input(f"{Fore.CYAN}请输入选项 (0-8): {Style.RESET_ALL}").strip()
+        if choice == "0":
+            return
+        if choice == "1":
+            share["enabled"] = not bool(share.get("enabled", False))
+        elif choice == "2":
+            uid = input(f"{Fore.YELLOW}请输入主人 B 站 UID（仅数字，回车取消）：{Style.RESET_ALL}").strip()
+            if not uid:
+                continue
+            if not uid.isdigit() or int(uid) <= 0:
+                print(f"{Fore.RED}[ERROR] UID 必须是正整数{Style.RESET_ALL}")
+                continue
+            share["owner_bili_uid"] = uid
+        elif choice == "3":
+            share["share_learned"] = not bool(share.get("share_learned", True))
+        elif choice == "4":
+            share["share_fun"] = not bool(share.get("share_fun", True))
+        elif choice == "5":
+            try:
+                score = float(input(f"{Fore.YELLOW}最低评分 (0-10)：{Style.RESET_ALL}").strip())
+                probability = float(input(f"{Fore.YELLOW}触发概率 (0-100%)：{Style.RESET_ALL}").strip()) / 100
+                share["min_score"] = min(10.0, max(0.0, score))
+                share["probability"] = min(1.0, max(0.0, probability))
+            except ValueError:
+                print(f"{Fore.RED}[ERROR] 请输入有效数字{Style.RESET_ALL}")
+                continue
+        elif choice == "6":
+            try:
+                limit = int(input(f"{Fore.YELLOW}每日上限 (1-50)：{Style.RESET_ALL}").strip())
+                cooldown = int(input(f"{Fore.YELLOW}冷却分钟 (0-1440)：{Style.RESET_ALL}").strip())
+                share["daily_limit"] = min(50, max(1, limit))
+                share["cooldown_minutes"] = min(1440, max(0, cooldown))
+            except ValueError:
+                print(f"{Fore.RED}[ERROR] 请输入有效整数{Style.RESET_ALL}")
+                continue
+        elif choice == "7":
+            try:
+                extra_probability = float(input(f"{Fore.YELLOW}附言生成概率 (0-100%)：{Style.RESET_ALL}").strip()) / 100
+                share["extra_message_probability"] = min(1.0, max(0.0, extra_probability))
+            except ValueError:
+                print(f"{Fore.RED}[ERROR] 请输入有效数字{Style.RESET_ALL}")
+                continue
+            prompt = input(f"{Fore.YELLOW}自定义提示词（回车保留当前）：{Style.RESET_ALL}").strip()
+            if prompt:
+                share["custom_prompt"] = prompt[:1000]
+        elif choice == "8":
+            recent = state.get("recent", [])
+            if not recent:
+                print(f"{Fore.YELLOW}[WARN] 暂无主人分享记录{Style.RESET_ALL}")
+            for item in recent:
+                print(f"  [{item.get('status', 'unknown')}] {item.get('at', '')} | {item.get('title', '')}")
+            input("按回车继续...")
+            continue
+        else:
+            print(f"{Fore.RED}[ERROR] 无效选项{Style.RESET_ALL}")
+            continue
+        save_config(config)
+        print(f"{Fore.GREEN}[OK] 主人分享设置已保存{Style.RESET_ALL}")
+
+
 def show_private_message_menu():
     """显示私信设置菜单"""
     global PRIVATE_MESSAGE_ENABLED, PRIVATE_MESSAGE_AUTO_REPLY, PRIVATE_MESSAGE_CHECK_INTERVAL, PRIVATE_MESSAGE_MAX_REPLIES
+    global ACTIVE_CHAT_ENABLED
 
     while True:
         print(f"""
@@ -3200,20 +3956,37 @@ def show_private_message_menu():
 
     {Fore.CYAN}当前设置:{Style.RESET_ALL}
     • 私信检查: {'启用' if PRIVATE_MESSAGE_ENABLED else '关闭'}
-    • 自动发送回复: {'[OK] 启用（AI拟好就发）' if PRIVATE_MESSAGE_AUTO_REPLY else '✗ 关闭（拟好但不发）'}
+    • 自动发送回复: {'[OK] 启用（仍受行为审核设置约束）' if PRIVATE_MESSAGE_AUTO_REPLY else '关闭（拟好但不发）'}
     • 检查间隔: {PRIVATE_MESSAGE_CHECK_INTERVAL}秒
     • 每次最大处理: {PRIVATE_MESSAGE_MAX_REPLIES}条
+    • 主动私信: {'启用' if config.get('active_chat', {}).get('enabled', ACTIVE_CHAT_ENABLED) else '关闭'}
+    • 免打扰: {config.get('active_chat', {}).get('quiet_start_hour', 22):02d}:00-{config.get('active_chat', {}).get('quiet_end_hour', 8):02d}:00
+    • 白名单: {'启用 (' + str(len(config.get('active_chat', {}).get('whitelist_uids', []))) + ' 人)' if config.get('active_chat', {}).get('whitelist_enabled', False) else '不限制'}
+    • 主人分享: {'启用' if config.get('owner_share', {}).get('enabled', False) else '关闭'}
+    • 增强私信 Agent: {'启用' if config.get('private_message', {}).get('agent', {}).get('enabled', True) else '关闭'}
+    • 主人视频互动: {'允许' if config.get('private_message', {}).get('agent', {}).get('allow_account_actions', True) else '禁止'}
+    • Agent 关注判断: {'允许' if config.get('private_message', {}).get('agent', {}).get('allow_social_follow_actions', True) else '禁止'}
+    • 聊得来时主动关注: {'允许' if config.get('private_message', {}).get('agent', {}).get('allow_proactive_social_follow', True) else '禁止'}
+    • 每日主动关注上限: {config.get('private_message', {}).get('agent', {}).get('social_follow_daily_limit', 2)} 人
+    • 私信用户公开资料: {'读取' if config.get('private_message', {}).get('agent', {}).get('sender_public_context_enabled', True) else '关闭'} / 动态: {'读取' if config.get('private_message', {}).get('agent', {}).get('sender_dynamics_enabled', True) else '关闭'} / 刷新: {config.get('private_message', {}).get('agent', {}).get('sender_public_context_refresh_hours', 12)}小时
+    • 短句连发合并: {'启用' if config.get('private_message', {}).get('agent', {}).get('burst_merge_enabled', True) else '关闭'} / 等待: {config.get('private_message', {}).get('agent', {}).get('burst_merge_window_seconds', 3)}秒
+    • 投币策略: 保留 {config.get('private_message', {}).get('agent', {}).get('coin_reserve', 5)} 枚 / 充足阈值 {config.get('private_message', {}).get('agent', {}).get('coin_abundant_threshold', 50)} 枚
 
     {Fore.CYAN}请选择操作:{Style.RESET_ALL}
-    {Fore.GREEN}1.{Style.RESET_ALL} 🔁 开关私信检查
+    {Fore.GREEN}1.{Style.RESET_ALL} 开关私信检查
     {Fore.YELLOW}2.{Style.RESET_ALL} [START] 开关自动发送回复
-    {Fore.YELLOW}3.{Style.RESET_ALL} ⏰ 修改检查间隔
-    {Fore.YELLOW}4.{Style.RESET_ALL} 🔢 修改最大处理数
-    {Fore.BLUE}5.{Style.RESET_ALL} 📋 查看私信日志
-    {Fore.RED}0.{Style.RESET_ALL} ↩️  返回主菜单
+    {Fore.YELLOW}3.{Style.RESET_ALL} 修改检查间隔
+    {Fore.YELLOW}4.{Style.RESET_ALL} 修改最大处理数
+    {Fore.BLUE}5.{Style.RESET_ALL} 查看私信日志
+    {Fore.YELLOW}6.{Style.RESET_ALL} [MSG] 开关主动私信
+    {Fore.YELLOW}7.{Style.RESET_ALL} 设置主动私信免打扰时段
+    {Fore.YELLOW}8.{Style.RESET_ALL} 管理主动私信白名单
+    {Fore.MAGENTA}9.{Style.RESET_ALL} 主人分享（学习视频私信）
+    {Fore.CYAN}10.{Style.RESET_ALL} 私信 Agent 感知与互动策略
+    {Fore.RED}0.{Style.RESET_ALL} ↩ 返回主菜单
         """)
 
-        choice = input(f"{Fore.CYAN}请输入选项 (0-5): {Style.RESET_ALL}").strip()
+        choice = input(f"{Fore.CYAN}请输入选项 (0-10): {Style.RESET_ALL}").strip()
         pm_config = config.setdefault("private_message", {})
 
         if choice == "0":
@@ -3250,6 +4023,83 @@ def show_private_message_menu():
                 print(f"{Fore.RED}[ERROR] 无效输入！{Style.RESET_ALL}")
         elif choice == "5":
             show_private_message_log()
+        elif choice == "6":
+            active_cfg = config.setdefault("active_chat", {})
+            ACTIVE_CHAT_ENABLED = not active_cfg.get("enabled", ACTIVE_CHAT_ENABLED)
+            active_cfg["enabled"] = ACTIVE_CHAT_ENABLED
+            save_config(config)
+            print(f"{Fore.GREEN}[OK] 主动私信已{'启用' if ACTIVE_CHAT_ENABLED else '关闭'}{Style.RESET_ALL}")
+        elif choice == "7":
+            value = input(f"{Fore.YELLOW}请输入免打扰时段 (如 22-8): {Style.RESET_ALL}").strip()
+            match = re.fullmatch(r"\s*(\d{1,2})\s*[-~至]\s*(\d{1,2})\s*", value)
+            if not match or not all(0 <= int(x) <= 23 for x in match.groups()):
+                print(f"{Fore.RED}[ERROR] 格式错误，请输入 0-23 小时，例如 22-8{Style.RESET_ALL}")
+                continue
+            active_cfg = config.setdefault("active_chat", {})
+            active_cfg["quiet_hours_enabled"] = True
+            active_cfg["quiet_start_hour"] = int(match.group(1))
+            active_cfg["quiet_end_hour"] = int(match.group(2))
+            save_config(config)
+            print(f"{Fore.GREEN}[OK] 主动私信免打扰时段已更新{Style.RESET_ALL}")
+        elif choice == "8":
+            active_cfg = config.setdefault("active_chat", {})
+            current_uids = active_cfg.get("whitelist_uids", [])
+            print(f"当前白名单: {', '.join(str(uid) for uid in current_uids) if current_uids else '空'}")
+            raw = input(f"{Fore.YELLOW}输入 UID（逗号分隔；回车清空）：{Style.RESET_ALL}").strip()
+            uids = [item.strip() for item in re.split(r"[,，\s]+", raw) if item.strip()]
+            if any(not uid.isdigit() for uid in uids):
+                print(f"{Fore.RED}[ERROR] UID 必须是数字{Style.RESET_ALL}")
+                continue
+            active_cfg["whitelist_uids"] = list(dict.fromkeys(uids))
+            active_cfg["whitelist_enabled"] = bool(uids)
+            save_config(config)
+            print(f"{Fore.GREEN}[OK] 主动私信白名单已{'启用' if uids else '清空并关闭'}{Style.RESET_ALL}")
+        elif choice == "9":
+            configure_owner_share()
+        elif choice == "10":
+            agent_cfg = pm_config.setdefault("agent", {})
+            enabled = input(f"{Fore.YELLOW}增强感知 Agent (1启用/0关闭，当前 {'1' if agent_cfg.get('enabled', True) else '0'}): {Style.RESET_ALL}").strip()
+            actions = input(f"{Fore.YELLOW}允许主人指定点赞/收藏/投币 (1允许/0禁止，当前 {'1' if agent_cfg.get('allow_account_actions', True) else '0'}): {Style.RESET_ALL}").strip()
+            social_actions = input(f"{Fore.YELLOW}允许 Agent 判断关注/取关请求 (1允许/0禁止，当前 {'1' if agent_cfg.get('allow_social_follow_actions', True) else '0'}): {Style.RESET_ALL}").strip()
+            proactive_follow = input(f"{Fore.YELLOW}允许 Agent 聊得来时主动关注 (1允许/0禁止，当前 {'1' if agent_cfg.get('allow_proactive_social_follow', True) else '0'}): {Style.RESET_ALL}").strip()
+            social_limit = input(f"{Fore.YELLOW}每日主动关注上限 0-20 (0 表示禁止，当前 {agent_cfg.get('social_follow_daily_limit', 2)}): {Style.RESET_ALL}").strip()
+            sender_context = input(f"{Fore.YELLOW}读取私信用户公开资料 (1读取/0关闭，当前 {'1' if agent_cfg.get('sender_public_context_enabled', True) else '0'}): {Style.RESET_ALL}").strip()
+            sender_dynamics = input(f"{Fore.YELLOW}读取私信用户公开动态 (1读取/0关闭，当前 {'1' if agent_cfg.get('sender_dynamics_enabled', True) else '0'}): {Style.RESET_ALL}").strip()
+            sender_refresh = input(f"{Fore.YELLOW}公开资料刷新周期小时 1-168 (当前 {agent_cfg.get('sender_public_context_refresh_hours', 12)}): {Style.RESET_ALL}").strip()
+            burst_merge = input(f"{Fore.YELLOW}合并无标点短句连发 (1启用/0关闭，当前 {'1' if agent_cfg.get('burst_merge_enabled', True) else '0'}): {Style.RESET_ALL}").strip()
+            burst_wait = input(f"{Fore.YELLOW}短句合并等待秒数 0-8 (当前 {agent_cfg.get('burst_merge_window_seconds', 3)}): {Style.RESET_ALL}").strip()
+            reserve = input(f"{Fore.YELLOW}硬币保留量 (当前 {agent_cfg.get('coin_reserve', 5)}): {Style.RESET_ALL}").strip()
+            abundant = input(f"{Fore.YELLOW}硬币充足阈值 (当前 {agent_cfg.get('coin_abundant_threshold', 50)}): {Style.RESET_ALL}").strip()
+            if enabled in {"0", "1"}:
+                agent_cfg["enabled"] = enabled == "1"
+            if actions in {"0", "1"}:
+                agent_cfg["allow_account_actions"] = actions == "1"
+            if social_actions in {"0", "1"}:
+                agent_cfg["allow_social_follow_actions"] = social_actions == "1"
+            if proactive_follow in {"0", "1"}:
+                agent_cfg["allow_proactive_social_follow"] = proactive_follow == "1"
+            if sender_context in {"0", "1"}:
+                agent_cfg["sender_public_context_enabled"] = sender_context == "1"
+            if sender_dynamics in {"0", "1"}:
+                agent_cfg["sender_dynamics_enabled"] = sender_dynamics == "1"
+            if burst_merge in {"0", "1"}:
+                agent_cfg["burst_merge_enabled"] = burst_merge == "1"
+            try:
+                if social_limit:
+                    agent_cfg["social_follow_daily_limit"] = max(0, min(20, int(social_limit)))
+                if sender_refresh:
+                    agent_cfg["sender_public_context_refresh_hours"] = max(1, min(168, int(sender_refresh)))
+                if burst_wait:
+                    agent_cfg["burst_merge_window_seconds"] = max(0, min(8, float(burst_wait)))
+                if reserve:
+                    agent_cfg["coin_reserve"] = max(0, int(reserve))
+                if abundant:
+                    agent_cfg["coin_abundant_threshold"] = max(agent_cfg.get("coin_reserve", 5) + 1, int(abundant))
+            except ValueError:
+                print(f"{Fore.RED}[ERROR] 硬币数量必须是整数，本次未保存{Style.RESET_ALL}")
+                continue
+            save_config(config)
+            print(f"{Fore.GREEN}[OK] 私信 Agent 策略已保存{Style.RESET_ALL}")
         else:
             print(f"{Fore.RED}[ERROR] 无效选项！{Style.RESET_ALL}")
 
@@ -3267,7 +4117,7 @@ def show_private_message_log():
             print(f"{Fore.YELLOW}[WARN] 暂无私信记录{Style.RESET_ALL}")
             return
 
-        print(f"\n{Fore.CYAN}📋 最近私信记录:{Style.RESET_ALL}")
+        print(f"\n{Fore.CYAN}最近私信记录:{Style.RESET_ALL}")
         for item in history[-10:]:
             if item.get("blocked"):
                 sent = "已拦截"
@@ -3415,14 +4265,14 @@ def show_diary_evolution_menu():
     • 进化触发: 每 {EVOLUTION_REFLECT_INTERVAL_EVENTS} 个事件检查一次，最少 {EVOLUTION_MIN_EVENTS_FOR_REFLECT} 个事件
 
     {Fore.CYAN}请选择操作:{Style.RESET_ALL}
-    {Fore.GREEN}1.{Style.RESET_ALL} ✍️  手动写日记
-    {Fore.GREEN}2.{Style.RESET_ALL} 📖 查看最近日记
-    {Fore.GREEN}3.{Style.RESET_ALL} 🔎 搜索日记
-    {Fore.YELLOW}4.{Style.RESET_ALL} 🤖 立即生成自动日记
-    {Fore.YELLOW}5.{Style.RESET_ALL} 🧬 立即自我进化
-    {Fore.BLUE}6.{Style.RESET_ALL} 📋 查看进化记录
-    {Fore.BLUE}7.{Style.RESET_ALL} ⚙️  修改自动设置
-    {Fore.RED}0.{Style.RESET_ALL} ↩️  返回主菜单
+    {Fore.GREEN}1.{Style.RESET_ALL}  手动写日记
+    {Fore.GREEN}2.{Style.RESET_ALL} 查看最近日记
+    {Fore.GREEN}3.{Style.RESET_ALL} 搜索日记
+    {Fore.YELLOW}4.{Style.RESET_ALL} 立即生成自动日记
+    {Fore.YELLOW}5.{Style.RESET_ALL} 立即自我进化
+    {Fore.BLUE}6.{Style.RESET_ALL} 查看进化记录
+    {Fore.BLUE}7.{Style.RESET_ALL}  修改自动设置
+    {Fore.RED}0.{Style.RESET_ALL} ↩ 返回主菜单
         """)
 
         choice = input(f"{Fore.CYAN}请输入选项 (0-9): {Style.RESET_ALL}").strip()
@@ -3529,13 +4379,13 @@ def show_agent_skill_menu():
     while True:
         print(f"""
     ╔══════════════════════════════════════════════════════════╗
-    ║                      Agent技能菜单                       ║
+    ║                    视频探索 (Agent)                    ║
     ╚══════════════════════════════════════════════════════════╝
 
     {Fore.CYAN}当前设置:{Style.RESET_ALL}
     • 总开关: {'启用' if AGENT_ENABLED else '关闭'}
     • 自动触发: {'启用' if AGENT_AUTO_ENABLED else '关闭'}
-    • 🤖 深度搜索(集成刷视频): {'启用' if AGENT_DIVE_ENABLED else '关闭'}
+    • 深度搜索(集成刷视频): {'启用' if AGENT_DIVE_ENABLED else '关闭'}
     • 每次最多步骤: {AGENT_MAX_STEPS_PER_PLAN}
     • 搜索结果上限: {AGENT_MAX_SEARCH_RESULTS}
     • 每次最多看视频: {AGENT_MAX_VIDEOS_PER_PLAN}
@@ -3551,9 +4401,9 @@ def show_agent_skill_menu():
 
     {Fore.CYAN}请选择操作:{Style.RESET_ALL}
     {Fore.GREEN}1.{Style.RESET_ALL} [START] 运行一个Agent目标
-    {Fore.BLUE}2.{Style.RESET_ALL} 📋 查看最近Agent记录
-    {Fore.YELLOW}3.{Style.RESET_ALL} ⚙️  修改限制/开关
-    {Fore.RED}0.{Style.RESET_ALL} ↩️  返回主菜单
+    {Fore.BLUE}2.{Style.RESET_ALL} 查看最近Agent记录
+    {Fore.YELLOW}3.{Style.RESET_ALL}  修改限制/开关
+    {Fore.RED}0.{Style.RESET_ALL} ↩ 返回主菜单
         """)
 
         choice = input(f"{Fore.CYAN}请输入选项 (0-3): {Style.RESET_ALL}").strip()
@@ -3649,8 +4499,8 @@ def show_up_danmaku_menu():
     global DANMAKU_SEND_PROB, DANMAKU_MAX_DAILY_SEND
     
     while True:
-        up_enabled_text = "[*] 已开启" if UP_FOLLOW_ENABLED else "💤 已关闭"
-        danmaku_enabled_text = "[MSG] 已开启" if DANMAKU_ENABLED else "💤 已关闭"
+        up_enabled_text = "[*] 已开启" if UP_FOLLOW_ENABLED else "已关闭"
+        danmaku_enabled_text = "[MSG] 已开启" if DANMAKU_ENABLED else "已关闭"
         
         print(f"""
     ╔══════════════════════════════════════════════════════════╗
@@ -3676,16 +4526,17 @@ def show_up_danmaku_menu():
     {Fore.BLUE}14.{Style.RESET_ALL} 每日点赞上限: {Fore.YELLOW}{DANMAKU_MAX_DAILY_LIKES}{Style.RESET_ALL}
     {Fore.BLUE}15.{Style.RESET_ALL} 发送弹幕概率: {Fore.YELLOW}{DANMAKU_SEND_PROB}{Style.RESET_ALL}
     {Fore.BLUE}16.{Style.RESET_ALL} 每日发送上限: {Fore.YELLOW}{DANMAKU_MAX_DAILY_SEND}{Style.RESET_ALL}
-    {Fore.MAGENTA}17.{Style.RESET_ALL} ✏️  手动发送弹幕 (输入BV号+内容)
+    {Fore.MAGENTA}17.{Style.RESET_ALL}  手动发送弹幕 (输入BV号+内容)
+    {Fore.LIGHTMAGENTA_EX}18.{Style.RESET_ALL} 学习流程与 Agent 深入设置
 
     {Fore.CYAN}▶ 查看:{Style.RESET_ALL}
     {Fore.LIGHTBLUE_EX}V.{Style.RESET_ALL} [PEOPLE] 查看AI已关注的UP主列表
 
-    {Fore.YELLOW}S.{Style.RESET_ALL} 💾 保存配置
-    {Fore.RED}0.{Style.RESET_ALL} ↩️  返回主菜单
+    {Fore.YELLOW}S.{Style.RESET_ALL} 保存配置
+    {Fore.RED}0.{Style.RESET_ALL} ↩ 返回主菜单
         """)
         
-        choice = input(f"{Fore.CYAN}请输入选项 (0-17/V/S): {Style.RESET_ALL}").strip()
+        choice = input(f"{Fore.CYAN}请输入选项 (0-18/V/S): {Style.RESET_ALL}").strip()
         
         if choice == "0":
             break
@@ -3821,17 +4672,74 @@ def show_up_danmaku_menu():
                             print(f"{Fore.RED}[ERROR] {result.get('msg')}{Style.RESET_ALL}")
                     except Exception as e:
                         print(f"{Fore.RED}[ERROR] 发送失败: {e}{Style.RESET_ALL}")
+        elif choice == "18":
+            show_learning_workflow_menu()
         elif choice.upper() == "V":
             _show_followed_ups()
         elif choice.upper() == "S":
             save_config(config)
             print(f"{Fore.GREEN}[OK] 配置已保存！{Style.RESET_ALL}")
+
+
+def show_learning_workflow_menu():
+    """Configure evidence collection and real Agent deep-learning work."""
+    while True:
+        workflow = config.setdefault("learning_workflow", {})
+        danmaku = config.setdefault("danmaku", {})
+        agent = config.setdefault("agent", {})
+        workflow.setdefault("read_comments", True)
+        workflow.setdefault("read_danmaku", True)
+        agent.setdefault("deep_learning_enabled", True)
+        agent.setdefault("deep_learning_max_videos", 2)
+        agent.setdefault("deep_learning_timeout_seconds", 180)
+        print(f"""
+    ╔══════════════════════════════════════════════════════════╗
+    ║                  学习流程与抽样设置                     ║
+    ╚══════════════════════════════════════════════════════════╝
+    {Fore.CYAN}1.{Style.RESET_ALL} {'关闭' if workflow['read_comments'] else '开启'}评论读取 → 当前: {workflow['read_comments']}
+    {Fore.CYAN}2.{Style.RESET_ALL} {'关闭' if workflow['read_danmaku'] else '开启'}弹幕读取 → 当前: {workflow['read_danmaku']}
+    {Fore.CYAN}3.{Style.RESET_ALL} 弹幕读取概率 → 当前: {float(danmaku.get('read_prob', .4)):.0%}
+    {Fore.CYAN}4.{Style.RESET_ALL} {'关闭' if agent['deep_learning_enabled'] else '开启'}Agent真实深入学习 → 当前: {agent['deep_learning_enabled']}
+    {Fore.CYAN}5.{Style.RESET_ALL} 每次真实学习视频数 → 当前: {agent['deep_learning_max_videos']}
+    {Fore.CYAN}6.{Style.RESET_ALL} 单视频深入学习超时(秒) → 当前: {agent['deep_learning_timeout_seconds']}
+    {Fore.YELLOW}S.{Style.RESET_ALL} 保存配置
+    {Fore.RED}0.{Style.RESET_ALL} 返回
+        """)
+        choice = input(f"{Fore.CYAN}请输入选项 (0-6/S): {Style.RESET_ALL}").strip().upper()
+        if choice == "0":
+            return
+        if choice == "1":
+            workflow["read_comments"] = not workflow["read_comments"]
+        elif choice == "2":
+            workflow["read_danmaku"] = not workflow["read_danmaku"]
+        elif choice == "3":
+            try:
+                danmaku["read_prob"] = max(0.0, min(1.0, float(input("弹幕读取概率 (0-1): "))))
+            except (TypeError, ValueError):
+                print(f"{Fore.RED}输入无效{Style.RESET_ALL}")
+        elif choice == "4":
+            agent["deep_learning_enabled"] = not agent["deep_learning_enabled"]
+        elif choice == "5":
+            try:
+                agent["deep_learning_max_videos"] = max(1, min(5, int(input("每次真实学习视频数 (1-5): "))))
+            except (TypeError, ValueError):
+                print(f"{Fore.RED}输入无效{Style.RESET_ALL}")
+        elif choice == "6":
+            try:
+                agent["deep_learning_timeout_seconds"] = max(30, min(1800, int(input("单视频超时秒数 (30-1800): "))))
+            except (TypeError, ValueError):
+                print(f"{Fore.RED}输入无效{Style.RESET_ALL}")
+        elif choice == "S":
+            if save_config(config):
+                print(f"{Fore.GREEN}[OK] 学习流程配置已保存{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.RED}[ERROR] 保存失败{Style.RESET_ALL}")
         else:
             print(f"{Fore.RED}[ERROR] 无效选项{Style.RESET_ALL}")
 
 def _show_followed_ups():
     """从 bot_memory.json 读取并显示 AI 已关注的UP主列表。"""
-    mem_file = os.path.join(BASE_DIR, "bot_memory.json")
+    mem_file = MEMORY_FILE
     if not os.path.exists(mem_file):
         print(f"{Fore.YELLOW}[WARN]  暂无关注记录（bot_memory.json 不存在）{Style.RESET_ALL}")
         return
@@ -3893,13 +4801,13 @@ def show_knowledge_base_menu():
 
     {Fore.CYAN}请选择操作:{Style.RESET_ALL}
     {Fore.GREEN}1.{Style.RESET_ALL} [STATS] 查看知识库统计
-    {Fore.GREEN}2.{Style.RESET_ALL} 📂 浏览知识库结构
-    {Fore.YELLOW}3.{Style.RESET_ALL} 🔍 搜索知识内容
-    {Fore.YELLOW}4.{Style.RESET_ALL} 🗑️  清理重复内容
+    {Fore.GREEN}2.{Style.RESET_ALL} 浏览知识库结构
+    {Fore.YELLOW}3.{Style.RESET_ALL} 搜索知识内容
+    {Fore.YELLOW}4.{Style.RESET_ALL}  清理重复内容
     {Fore.BLUE}5.{Style.RESET_ALL} [UP] 查看学习记录
-    {Fore.MAGENTA}6.{Style.RESET_ALL} 🤖 AI整理分类 (统一3层结构)
-    {Fore.LIGHTBLUE_EX}7.{Style.RESET_ALL} 🧠 重建向量索引 (语义搜索)
-    {Fore.RED}0.{Style.RESET_ALL} ↩️  返回主菜单
+    {Fore.MAGENTA}6.{Style.RESET_ALL} AI整理分类 (统一3层结构)
+    {Fore.LIGHTBLUE_EX}7.{Style.RESET_ALL} 重建向量索引 (语义搜索)
+    {Fore.RED}0.{Style.RESET_ALL} ↩ 返回主菜单
         """)
 
         choice = input(f"{Fore.CYAN}请输入选项 (0-7): {Style.RESET_ALL}").strip()
@@ -3917,7 +4825,7 @@ def show_knowledge_base_menu():
         elif choice == "5":
             show_learning_log()
         elif choice == "6":
-            print(f"\n{Fore.CYAN}🤖 正在调用AI重新规划知识库分类（统一3层）...{Style.RESET_ALL}")
+            print(f"\n{Fore.CYAN}正在调用AI重新规划知识库分类（统一3层）...{Style.RESET_ALL}")
             print(f"{Fore.YELLOW}[WARN] 这将重新组织所有文件的分类路径，可能需要1-2分钟{Style.RESET_ALL}")
             confirm = input(f"{Fore.CYAN}确认执行? (y/n): {Style.RESET_ALL}").strip().lower()
             if confirm == "y":
@@ -3930,7 +4838,7 @@ def show_knowledge_base_menu():
             else:
                 print(f"{Fore.YELLOW}已取消{Style.RESET_ALL}")
         elif choice == "7":
-            print(f"\n{Fore.CYAN}🧠 正在重建知识库向量索引...{Style.RESET_ALL}")
+            print(f"\n{Fore.CYAN}正在重建知识库向量索引...{Style.RESET_ALL}")
             try:
                 if KBSearchEngine:
                     from xingye_bot.settings import load_settings as _ls
@@ -3948,7 +4856,7 @@ def show_knowledge_base_menu():
             print(f"{Fore.RED}[ERROR] 无效选项，请重新选择！{Style.RESET_ALL}")
 
 # ═══════════════════════════════════════════════════════════════
-# 🎓 知识辅导菜单 (v2.0.3)
+# 知识辅导菜单 (v2.0.3)
 # ═══════════════════════════════════════════════════════════════
 def _parse_multi_choice(choice_str: str, max_idx: int) -> list[int]:
     """解析多选输入，支持: 单个(5), 逗号(1,3,7), 范围(1-5), 混合(1-3,7,9-11), all"""
@@ -3985,7 +4893,7 @@ def _parse_multi_choice(choice_str: str, max_idx: int) -> list[int]:
 async def show_knowledge_tutor_menu():
     """知识辅导菜单：选择知识文件 → 讲解/问答/二次创作/生成HTML"""
     print(f"\n{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
-    print(f"{Fore.CYAN}|        🎓 知识辅导 - AI讲解/问答/二次创作                    |{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}|        知识辅导 - AI讲解/问答/二次创作                    |{Style.RESET_ALL}")
     print(f"{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
 
     # 扫描知识库
@@ -4070,11 +4978,11 @@ async def _tutor_session(files: list[tuple[str, str]]):
 
     print(f"\n{Fore.CYAN}╔══════════════════════════════════════════════════════════╗{Style.RESET_ALL}")
     if is_multi:
-        print(f"{Fore.CYAN}║  📚 多文件辅导 ({len(files)}个文件)".ljust(59) + "║")
+        print(f"{Fore.CYAN}║  多文件辅导 ({len(files)}个文件)".ljust(59) + "║")
         for i, (fp, ttl) in enumerate(files):
             print(f"{Fore.CYAN}║    {i+1}. {ttl[:45]}".ljust(59) + "║")
     else:
-        print(f"{Fore.CYAN}║  📖 {titles[0][:40]}".ljust(59) + "║")
+        print(f"{Fore.CYAN}║  {titles[0][:40]}".ljust(59) + "║")
     print(f"{Fore.CYAN}╚══════════════════════════════════════════════════════════╝{Style.RESET_ALL}")
     print(f"\n{Fore.GREEN}AI导师已就绪！你可以：{Style.RESET_ALL}")
     print(f"  {Fore.YELLOW}•{Style.RESET_ALL} 直接提问 → AI讲解知识点" + (f"（跨{len(files)}个文件综合分析）" if is_multi else ""))
@@ -4117,7 +5025,7 @@ async def _tutor_session(files: list[tuple[str, str]]):
 
     while True:
         try:
-            user_input = input(f"{Fore.GREEN}💬 你: {Style.RESET_ALL}").strip()
+            user_input = input(f"{Fore.GREEN}你: {Style.RESET_ALL}").strip()
         except (EOFError, KeyboardInterrupt):
             print(f"\n{Fore.YELLOW}[INFO] 退出辅导{Style.RESET_ALL}")
             break
@@ -4182,9 +5090,9 @@ async def _tutor_session(files: list[tuple[str, str]]):
             else:
                 fp, ttl = files[0]
 
-            print(f"\n{Fore.CYAN}✍️ AI正在二次创作: {ttl[:40]}...{Style.RESET_ALL}")
+            print(f"\n{Fore.CYAN}AI正在二次创作: {ttl[:40]}...{Style.RESET_ALL}")
             summary, new_content = await tutor.rewrite_file(fp, extra)
-            print(f"\n{Fore.GREEN}📝 修改说明:{Style.RESET_ALL}")
+            print(f"\n{Fore.GREEN}修改说明:{Style.RESET_ALL}")
             print(f"  {summary}")
 
             if new_content:
@@ -4214,7 +5122,7 @@ async def _tutor_session(files: list[tuple[str, str]]):
                 style = "dark"
 
             file_label = f"{len(files)}个文件" if is_multi else titles[0]
-            print(f"\n{Fore.CYAN}🎨 正在生成HTML网页 [{file_label}] (风格: {style})...{Style.RESET_ALL}")
+            print(f"\n{Fore.CYAN}正在生成HTML网页 [{file_label}] (风格: {style})...{Style.RESET_ALL}")
             print(f"{Fore.YELLOW}[INFO] 这可能需要30-60秒，请耐心等待...{Style.RESET_ALL}")
 
             html_content = await tutor.generate_html(file_paths, style)
@@ -4244,7 +5152,7 @@ async def _tutor_session(files: list[tuple[str, str]]):
             continue
 
         # ── 普通问答 ──
-        print(f"\n{Fore.CYAN}🤔 AI思考中...{Style.RESET_ALL}")
+        print(f"\n{Fore.CYAN}AI思考中...{Style.RESET_ALL}")
         reply = await tutor.chat_about_file(file_paths, user_input, conversation_history)
 
         conversation_history.append({"role": "user", "content": user_input})
@@ -4252,13 +5160,110 @@ async def _tutor_session(files: list[tuple[str, str]]):
         if len(conversation_history) > 20:
             conversation_history = conversation_history[-20:]
 
-        print(f"\n{Fore.MAGENTA}🎓 AI导师:{Style.RESET_ALL}")
+        print(f"\n{Fore.MAGENTA}AI导师:{Style.RESET_ALL}")
         print(f"  {reply}")
         print()
 
 
+async def manual_visual_note_analysis():
+    """图文学习笔记：下载视频→网格抽帧→AI生成带目录+配图的 Markdown。
+    支持 BV 号、完整 B站 URL 或 b23.tv 短链接。
+    """
+    if not all([VideoUnderstanding, load_modular_settings, ModelClient, BotState]):
+        print(f"{Fore.RED}[ERROR] 图文学习笔记模块未加载，请检查 xingye_bot 包{Style.RESET_ALL}")
+        return
+
+    from xingye_bot.video_modes import extract_bvid
+    from services.platform_adapter import resolve_bilibili_short_url
+    from core.config import KNOWLEDGE_BASE_DIR
+
+    print(f"\n{Fore.CYAN}+{'='*60}+{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}|           图文学习笔记 - 目录+AI配图全过程讲解             |{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}+{'='*60}+{Style.RESET_ALL}")
+    print(f"{Fore.YELLOW}[INFO] 支持: B站视频链接 | BV号 | b23.tv 短链接{Style.RESET_ALL}")
+
+    user_input = input(f"\n{Fore.CYAN}请输入视频链接或BV号: {Style.RESET_ALL}").strip()
+    if not user_input:
+        print(f"{Fore.YELLOW}[WARN] 输入为空，已取消{Style.RESET_ALL}")
+        return
+
+    bvid = extract_bvid(user_input)
+    if not bvid and "b23.tv" in user_input.lower():
+        try:
+            resolved = await resolve_bilibili_short_url(user_input)
+            bvid = extract_bvid(resolved) if resolved else ""
+        except Exception as e:
+            print(f"{Fore.YELLOW}[WARN] 短链接解析失败: {e}{Style.RESET_ALL}")
+
+    if not bvid:
+        print(f"{Fore.RED}[ERROR] 无法识别BV号，请提供完整链接或BV号{Style.RESET_ALL}")
+        return
+
+    custom_prompt = input(
+        f"{Fore.CYAN}自定义提示词（可选，回车使用默认）: {Style.RESET_ALL}"
+    ).strip()
+
+    print(f"\n{Fore.CYAN}正在生成图文笔记，请稍候...{Style.RESET_ALL}")
+
+    settings = load_modular_settings()
+    if custom_prompt:
+        settings.custom_video_prompt = custom_prompt
+    state = BotState()
+    model = ModelClient(settings, state)
+
+    vu = VideoUnderstanding(settings, model)
+    try:
+        asset = await vu.fetch_metadata(bvid)
+        await vu.fetch_subtitles(asset)
+
+        if asset.duration and asset.duration > settings.video_max_duration_seconds:
+            print(f"{Fore.RED}[ERROR] 视频时长 {asset.duration}s 超过上限 {settings.video_max_duration_seconds}s{Style.RESET_ALL}")
+            return
+
+        video_path = await vu.download_video(asset)
+        import xingye_bot.grid_frames as gf
+        grid_imgs = gf.extract_visual_note_grids(video_path, config.get("video", {}))
+        if not grid_imgs:
+            print(f"{Fore.RED}[ERROR] 网格抽帧为空，无法生成图文笔记{Style.RESET_ALL}")
+            return
+
+        summary = await vu.summarize_with_grid(
+            asset, video_path, grid_imgs, True, settings.custom_video_prompt
+        )
+
+        if settings.video_delete_after_understand:
+            vu.delete_downloaded_video(video_path)
+
+        # 保存到知识库/图文笔记
+        save_dir = Path(KNOWLEDGE_BASE_DIR) / "图文笔记"
+        save_dir.mkdir(parents=True, exist_ok=True)
+        safe_title = sanitize_filename(asset.title or bvid)
+        save_path = save_dir / f"{safe_title}_{bvid}.md"
+        save_path.write_text(summary, encoding='utf-8')
+
+        # 提取目录
+        toc = []
+        for line in summary.split('\n'):
+            if line.startswith('## '):
+                toc.append(line[3:].strip())
+
+        print(f"\n{Fore.GREEN}+{'='*60}+{Style.RESET_ALL}")
+        print(f"{Fore.GREEN}[OK] 图文笔记生成完成: {asset.title}{Style.RESET_ALL}")
+        print(f"{Fore.GREEN}[FILE] 已保存: {save_path}{Style.RESET_ALL}")
+        if toc:
+            print(f"\n{Fore.CYAN}目录:{Style.RESET_ALL}")
+            for i, title in enumerate(toc, 1):
+                print(f"  {Fore.YELLOW}{i}.{Style.RESET_ALL} {title}")
+        print(f"{Fore.GREEN}+{'='*60}+{Style.RESET_ALL}\n")
+
+    except Exception as e:
+        print(f"{Fore.RED}[ERROR] 图文学习笔记分析失败: {e}{Style.RESET_ALL}")
+        import traceback
+        traceback.print_exc()
+
+
 async def video_to_html_bg():
-    """🎨 视频→网页: 搜索B站视频, AI生成HTML分析页面（流程复用V功能）"""
+    """视频→网页: 搜索B站视频, AI生成HTML分析页面（流程复用V功能）"""
     from pathlib import Path
     import re as _re
     loop = asyncio.get_running_loop()
@@ -4275,7 +5280,7 @@ async def video_to_html_bg():
     desc = ''
 
     print(f"\n{Fore.CYAN}+{'='*60}+{Style.RESET_ALL}")
-    print(f"{Fore.CYAN}|        🎨 视频→网页 — AI生成HTML分析页面                    |{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}|        视频→网页 — AI生成HTML分析页面                    |{Style.RESET_ALL}")
     print(f"{Fore.CYAN}+{'='*60}+{Style.RESET_ALL}")
     print(f"{Fore.YELLOW}[INFO] 支持: B站视频链接 | BV号 | 视频标题 | UP主名字{Style.RESET_ALL}")
 
@@ -4433,9 +5438,9 @@ async def video_to_html_bg():
             title_display = r['title'][:50]
             author = r.get('author', '?')
             _bvid = r.get('bvid', '')
-            tag = f"  {'📝 有字幕' if sub_status.get(_bvid) else '🔇 无字幕'}" if _bvid in sub_status else ""
+            tag = f"  {'有字幕' if sub_status.get(_bvid) else '无字幕'}" if _bvid in sub_status else ""
             print(f"  {Fore.YELLOW}{i+1:>2}.{Style.RESET_ALL} {title_display}{tag}")
-            print(f"      {Fore.LIGHTBLACK_EX}@{author}  |  ▶ {play_str}  |  ⏱ {dur}{Style.RESET_ALL}")
+            print(f"      {Fore.LIGHTBLACK_EX}@{author}  |  ▶ {play_str}  |  {dur}{Style.RESET_ALL}")
         print(f"{Fore.CYAN}{'─' * 80}{Style.RESET_ALL}")
         print(f"  {Fore.YELLOW} 0.{Style.RESET_ALL} 取消")
         print(f"  {Fore.CYAN}输入UP主名字可搜索TA的最新视频{Style.RESET_ALL}")
@@ -4586,7 +5591,7 @@ async def video_to_html_bg():
             _aid = 0
         if _aid:
             try:
-                print(f"  {Fore.CYAN}📝 获取热门评论补充...{Style.RESET_ALL}")
+                print(f"  {Fore.CYAN}获取热门评论补充...{Style.RESET_ALL}")
                 comments = await brain.bili.get_hot_comments(_aid, limit=10)
                 if comments:
                     lines = []
@@ -4597,46 +5602,51 @@ async def video_to_html_bg():
                             lines.append(f"@{uname}: {msg}")
                     if lines:
                         ctx += f"\n\n[热门评论 Top{len(lines)}]\n" + "\n".join(lines)
-                        print(f"  {Fore.GREEN}✓ 获取到 {len(lines)} 条热门评论{Style.RESET_ALL}")
+                        print(f"  {Fore.GREEN}获取到 {len(lines)} 条热门评论{Style.RESET_ALL}")
             except Exception as _e:
-                print(f"  {Fore.YELLOW}⚠ 评论获取失败: {_e}{Style.RESET_ALL}")
+                print(f"  {Fore.YELLOW}评论获取失败: {_e}{Style.RESET_ALL}")
     
     # 模板选择
-    print(f"\n{Fore.CYAN}🎨 视觉风格 (回车=auto/自动选择):{Style.RESET_ALL}")
-    print(f"  {Fore.YELLOW}1.🖼️ Claude 幻灯片 (推荐){Style.RESET_ALL} — 纯白+暖橙+亮暗切换，参考claude-style-slides.html")
-    print(f"  2.🌙 暗夜粒子 — 暗色+红金粒子Canvas动画+科技感")
-    print(f"  3.💡 极简白昼 — 亮色现代+干净排版+阅读优先")
-    print(f"  4.🎞️ 幻灯片叙事 — 多页翻页+章节导航+动画入场")
-    print(f"  5.🃏 卡片画廊 — 卡片网格+悬停动效+信息密度高")
-    print(f"  6.🍊 Claude 暖橙 — Inter字体+暖灰背景+紫粉渐变标题")
-    print(f"  7.🍱 Bento 网格 — 卡片拼图式不规则网格布局，iOS小组件风格")
-    print(f"  8.🫧 玻璃拟态 — 毛玻璃半透明+背景模糊，现代SaaS风格")
-    print(f"  9.🌌 极光渐变 — 流动渐变网格背景+梦幻色彩过渡")
-    print(f"  10.⚡ 新野蛮主义 — 粗黑边框+高对比度+大胆撞色+Figma风格")
-    print(f"  11.🌑 深色OLED — 纯黑背景+霓虹点缀+护眼暗色主题")
-    print(f"  12.🏙️ 赛博朋克 — 霓虹灯效+暗黑背景+科幻故障风")
-    print(f"  13.💎 新拟态 — 柔和UI/内凹外凸圆角/柔和阴影/智能家居控制台风格")
-    print(f"  14.🧊 液态玻璃 — 毛玻璃透明层+透光层次感/磨砂质感/OS高端科技产品官网")
-    print(f"  15.📻 复古主义 — 像素风/复古GUI/老式操作系统质感/80年代流行元素/早期Windows/Mac界面")
-    print(f"  16.🔲 Linear风格 — 线性色彩背景/发光边框/未来科技UI/Web3项目/加密工具Landing Page")
-    print(f"  17.🌈 新变风 — 色彩渐变/科技或潮流/视觉抓眼球/Landing Page创意工作室官网")
-    print(f"  18.☁️ 柔和流行 — 柔和力和玩具色/手绘插画/卡通插画/圆润字体/儿童APP/UI/健康儿童产品界面")
-    print(f"  19.🤖 PromptPort风格 — 深黑背景+霓虹绿青发光+Emoji图标+巨大标题+模块卡片+AI/Web3科技极简")
+    print(f"\n{Fore.CYAN}视觉风格 (回车=auto/自动选择):{Style.RESET_ALL}")
+    print(f"  {Fore.YELLOW}1.Claude 幻灯片 (推荐){Style.RESET_ALL} — 基于 bilibili_learning_bot_slides.html，可选完整分段动画+亮暗切换")
+    print(f"  2.暗夜粒子 — 暗色+红金粒子Canvas动画+科技感")
+    print(f"  3.极简白昼 — 亮色现代+干净排版+阅读优先")
+    print(f"  4.幻灯片叙事 — 多页翻页+章节导航+动画入场")
+    print(f"  5.卡片画廊 — 卡片网格+悬停动效+信息密度高")
+    print(f"  6.Bento 网格 — 卡片拼图式不规则网格布局，iOS小组件风格")
+    print(f"  7.玻璃拟态 — 毛玻璃半透明+背景模糊，现代SaaS风格")
+    print(f"  8.极光渐变 — 流动渐变网格背景+梦幻色彩过渡")
+    print(f"  9.新野蛮主义 — 粗黑边框+高对比度+大胆撞色+Figma风格")
+    print(f"  10.深色OLED — 纯黑背景+霓虹点缀+护眼暗色主题")
+    print(f"  11.赛博朋克 — 霓虹灯效+暗黑背景+科幻故障风")
+    print(f"  12.新拟态 — 柔和UI/内凹外凸圆角/柔和阴影/智能家居控制台风格")
+    print(f"  13.液态玻璃 — 毛玻璃透明层+透光层次感/磨砂质感/OS高端科技产品官网")
+    print(f"  14.复古主义 — 像素风/复古GUI/老式操作系统质感/80年代流行元素/早期Windows/Mac界面")
+    print(f"  15.Linear风格 — 线性色彩背景/发光边框/未来科技UI/Web3项目/加密工具Landing Page")
+    print(f"  16.新变风 — 色彩渐变/科技或潮流/视觉抓眼球/Landing Page创意工作室官网")
+    print(f"  17.柔和流行 — 柔和力和玩具色/手绘插画/卡通插画/圆润字体/儿童APP/UI/健康儿童产品界面")
+    print(f"  18.PromptPort风格 — 深黑背景+霓虹绿青发光+Emoji图标+巨大标题+模块卡片+AI/Web3科技极简")
     t = (await loop.run_in_executor(None, input, f"{Fore.CYAN}> {Style.RESET_ALL}")).strip()
-    styles = {'1':'claude_slides','2':'dark','3':'light','4':'slide','5':'card','6':'claude',
-              '7':'bento','8':'glass','9':'aurora','10':'neobrutal','11':'oled','12':'cyberpunk',
-              '13':'neumorphism','14':'liquid_glass','15':'nostalgic','16':'linear','17':'gradient_new','18':'soft_pop',
-              '19':'promptport'}
+    styles = {'1':'claude_slides','2':'dark','3':'light','4':'slide','5':'card','6':'bento','7':'glass','8':'aurora',
+              '9':'neobrutal','10':'oled','11':'cyberpunk','12':'neumorphism','13':'liquid_glass','14':'nostalgic',
+              '15':'linear','16':'gradient_new','17':'soft_pop','18':'promptport'}
     style = styles.get(t, 'auto')
 
+    enhanced_animations = False
+    if style == 'claude_slides':
+        print(f"\n{Fore.CYAN}是否加入更多分段动画？{Style.RESET_ALL}")
+        print(f"  1. 是 — 卡片、列表、流程步骤依次入场")
+        print(f"  2. 否 — 保持轻量淡入动画（默认）")
+        enhanced_animations = (await loop.run_in_executor(None, input, f"{Fore.CYAN}> {Style.RESET_ALL}")).strip() == '1'
+
     # 输出格式选择
-    print(f"\n{Fore.CYAN}📄 输出格式 (回车=auto/AI自动判断):{Style.RESET_ALL}")
-    print(f"  1.📄 正常网页 — 标准文章/知识卡片布局")
-    print(f"  2.🎞️ PPT演示 — 多页幻灯片+键盘翻页+动画")
-    print(f"  3.🎬 动画讲解 — 步骤动画+渐进展示+叙事节奏")
-    print(f"  4.🤖 AI建议 — 让AI分析内容后推荐最佳格式")
-    print(f"  5.🔬 技术科普动画 — 知识图解+视觉化拆解+3B1B风格叙事")
-    print(f"  6.🔀 PPT+科普融合 — 幻灯片框架+图解动画混合，可自定义融合比例")
+    print(f"\n{Fore.CYAN}输出格式 (回车=auto/AI自动判断):{Style.RESET_ALL}")
+    print(f"  1.正常网页 — 标准文章/知识卡片布局")
+    print(f"  2.PPT演示 — 多页幻灯片+键盘翻页+动画")
+    print(f"  3.动画讲解 — 步骤动画+渐进展示+叙事节奏")
+    print(f"  4.AI建议 — 让AI分析内容后推荐最佳格式")
+    print(f"  5.技术科普动画 — 知识图解+视觉化拆解+3B1B风格叙事")
+    print(f"  6.PPT+科普融合 — 幻灯片框架+图解动画混合，可自定义融合比例")
     fmt_input = (await loop.run_in_executor(None, input, f"{Fore.CYAN}> {Style.RESET_ALL}")).strip()
     fmt_map = {'1':'webpage','2':'ppt','3':'animation','4':'ai_suggest','5':'tech_explainer','6':'ppt_explainer'}
     output_format = fmt_map.get(fmt_input, 'auto')
@@ -4644,7 +5654,7 @@ async def video_to_html_bg():
     # PPT+科普融合：可选自定义融合描述
     ppt_explainer_blend = ""
     if output_format == 'ppt_explainer':
-        print(f"\n{Fore.CYAN}🔀 融合比例/自定义描述 (回车=AI自动融合):{Style.RESET_ALL}")
+        print(f"\n{Fore.CYAN}融合比例/自定义描述 (回车=AI自动融合):{Style.RESET_ALL}")
         print(f"  例如: 70%PPT幻灯片+30%图解动画 / 前一半PPT后一半图解 / 每页PPT配SVG示意图")
         blend_input = (await loop.run_in_executor(None, input, f"{Fore.CYAN}> {Style.RESET_ALL}")).strip()
         ppt_explainer_blend = blend_input
@@ -4652,7 +5662,7 @@ async def video_to_html_bg():
     # 自定义页数 (仅PPT/动画/auto格式有意义)
     page_count = 0  # 0=AI自动
     if output_format in ('ppt', 'animation', 'tech_explainer', 'ppt_explainer', 'auto', 'ai_suggest'):
-        print(f"\n{Fore.CYAN}📑 页数设置 (回车=AI自动):{Style.RESET_ALL}")
+        print(f"\n{Fore.CYAN}页数设置 (回车=AI自动):{Style.RESET_ALL}")
         print(f"  输入数字指定页数，如 5 或 5-10，直接回车则AI自动决定")
         pc_input = (await loop.run_in_executor(None, input, f"{Fore.CYAN}> {Style.RESET_ALL}")).strip()
         if pc_input:
@@ -4662,31 +5672,31 @@ async def video_to_html_bg():
                     min_p = int(parts[0].strip())
                     max_p = int(parts[1].strip())
                     page_count = (min_p, max_p)
-                    print(f"  {Fore.GREEN}✓ 页数范围: {min_p}~{max_p} 页{Style.RESET_ALL}")
+                    print(f"  {Fore.GREEN}页数范围: {min_p}~{max_p} 页{Style.RESET_ALL}")
                 else:
                     page_count = int(pc_input)
-                    print(f"  {Fore.GREEN}✓ 页数: {page_count} 页{Style.RESET_ALL}")
+                    print(f"  {Fore.GREEN}页数: {page_count} 页{Style.RESET_ALL}")
             except ValueError:
-                print(f"  {Fore.YELLOW}⚠ 格式无效，使用AI自动决定{Style.RESET_ALL}")
+                print(f"  {Fore.YELLOW}格式无效，使用AI自动决定{Style.RESET_ALL}")
                 page_count = 0
 
     # 详细程度
-    print(f"\n{Fore.CYAN}📏 详细程度 (默认=2):{Style.RESET_ALL}")
-    print(f"  1.✂️ 简短 — 精简要点，快速浏览")
-    print(f"  2.📖 中长 — 内容充实，适合阅读")
-    print(f"  3.📚 很长 — 深度展开，面面俱到")
+    print(f"\n{Fore.CYAN}详细程度 (默认=2):{Style.RESET_ALL}")
+    print(f"  1.简短 — 精简要点，快速浏览")
+    print(f"  2.中长 — 内容充实，适合阅读")
+    print(f"  3.很长 — 深度展开，面面俱到")
     dl_input = (await loop.run_in_executor(None, input, f"{Fore.CYAN}> {Style.RESET_ALL}")).strip()
     detail_map = {'1':'brief','2':'medium','3':'long'}
     detail_level = detail_map.get(dl_input, 'medium')
     
     # 自定义提示词
-    print(f"\n{Fore.CYAN}✏️ 自定义提示词/系统指令 (可选, 回车跳过):{Style.RESET_ALL}")
+    print(f"\n{Fore.CYAN}自定义提示词/系统指令 (可选, 回车跳过):{Style.RESET_ALL}")
     print(f"  {Fore.LIGHTBLACK_EX}例如: 用学术风格写 / 面向小学生 / 侧重数据分析 / 翻译成英文{Style.RESET_ALL}")
     custom = (await loop.run_in_executor(None, input, f"{Fore.CYAN}> {Style.RESET_ALL}")).strip()
 
     # ── 弹幕/评论是否包含到 HTML 中 ──
     include_danmaku_comment = False
-    print(f"\n{Fore.CYAN}💬 是否将弹幕和热门评论也加入到HTML内容中？{Style.RESET_ALL}")
+    print(f"\n{Fore.CYAN}是否将弹幕和热门评论也加入到HTML内容中？{Style.RESET_ALL}")
     print(f"  {Fore.YELLOW}1.{Style.RESET_ALL} 是 — 获取弹幕+热门评论，AI会整合到HTML中（更丰富）")
     print(f"  {Fore.YELLOW}2.{Style.RESET_ALL} 否 — 仅使用视频字幕内容（更快更精简）")
     dc_input = (await loop.run_in_executor(None, input, f"{Fore.CYAN}> (回车=默认:否) {Style.RESET_ALL}")).strip()
@@ -4697,7 +5707,7 @@ async def video_to_html_bg():
         # 获取弹幕
         _danmaku_text = ""
         try:
-            print(f"  {Fore.CYAN}📡 正在获取弹幕...{Style.RESET_ALL}")
+            print(f"  {Fore.CYAN}正在获取弹幕...{Style.RESET_ALL}")
             from bilibili_api import Credential as _Cred
             _cred = None
             if brain.cookies:
@@ -4710,16 +5720,16 @@ async def video_to_html_bg():
                     _danmaku_text = "\n".join(_dm_texts[:100]) + "\n...[省略中间弹幕]...\n" + "\n".join(_dm_texts[-100:])
                 else:
                     _danmaku_text = "\n".join(_dm_texts)
-                print(f"  {Fore.GREEN}✓ 获取到 {len(_dm_texts)} 条弹幕{Style.RESET_ALL}")
+                print(f"  {Fore.GREEN}获取到 {len(_dm_texts)} 条弹幕{Style.RESET_ALL}")
             else:
-                print(f"  {Fore.YELLOW}⚠ 未获取到弹幕{Style.RESET_ALL}")
+                print(f"  {Fore.YELLOW}未获取到弹幕{Style.RESET_ALL}")
         except Exception as _de:
-            print(f"  {Fore.YELLOW}⚠ 弹幕获取失败: {_de}{Style.RESET_ALL}")
+            print(f"  {Fore.YELLOW}弹幕获取失败: {_de}{Style.RESET_ALL}")
 
         # 获取热门评论（如果还没获取过）
         _comment_text = ""
         try:
-            print(f"  {Fore.CYAN}📝 正在获取热门评论...{Style.RESET_ALL}")
+            print(f"  {Fore.CYAN}正在获取热门评论...{Style.RESET_ALL}")
             _aid_for_cmt = 0
             try:
                 _meta_cmt = await brain.bili._wbi_get(
@@ -4742,9 +5752,9 @@ async def video_to_html_bg():
                             _clines.append(f"@{_uname}: {_msg}")
                     if _clines:
                         _comment_text = "\n".join(_clines)
-                        print(f"  {Fore.GREEN}✓ 获取到 {len(_clines)} 条热门评论{Style.RESET_ALL}")
+                        print(f"  {Fore.GREEN}获取到 {len(_clines)} 条热门评论{Style.RESET_ALL}")
         except Exception as _ce:
-            print(f"  {Fore.YELLOW}⚠ 评论获取失败: {_ce}{Style.RESET_ALL}")
+            print(f"  {Fore.YELLOW}评论获取失败: {_ce}{Style.RESET_ALL}")
 
         # 组装弹幕+评论文本块
         _extra_content_parts = []
@@ -4759,7 +5769,7 @@ async def video_to_html_bg():
         print(f"{Fore.CYAN}[OK] 不包含弹幕和评论{Style.RESET_ALL}")
 
     # ── 前后固定页设置 ──
-    print(f"\n{Fore.CYAN}📐 前后固定页设置 (回车=保留默认):{Style.RESET_ALL}")
+    print(f"\n{Fore.CYAN}前后固定页设置 (回车=保留默认):{Style.RESET_ALL}")
     print(f"  默认前两页=封面+数据概览，最后两页=金句+总结")
     print(f"  输入 n=AI自由设计所有页面，或输入自定义描述")
     slide_frame_input = (await loop.run_in_executor(None, input, f"{Fore.CYAN}> {Style.RESET_ALL}")).strip()
@@ -4782,8 +5792,7 @@ async def video_to_html_bg():
         'light': '极简白昼风格：纯白/浅灰背景+干净排版+大量留白，阅读优先，适合知识/教程/教育类内容',
         'slide': '幻灯片叙事风格：多页翻页+章节导航+入场动画+底部进度点，每页聚焦一个主题',
         'card': '卡片画廊风格：卡片网格布局+悬停动效(hover放大/阴影)+信息密度高，适合盘点/对比类内容',
-        'claude': 'Claude暖橙风格：Inter字体+暖灰背景(#f5f0e8)+紫粉渐变标题(#c77dff→#f96)+柔和圆角卡片',
-        'claude_slides': 'Claude幻灯片风格：纯白背景+暖橙强调色(#D97757)+Inter字体+亮暗切换+进度条+翻页动画',
+        'claude_slides': 'Claude幻灯片风格：基于 bilibili_learning_bot_slides.html，白/黑/灰+暖橙强调色、亮暗切换、进度条与翻页动画',
         'bento': 'Bento便当网格风格：2025最热趋势！不规则卡片拼图式网格布局，大小不一的圆角卡片错落排列，Apple风格留白，适合产品展示/功能亮点/知识拆解',
         'glass': '玻璃拟态风格：毛玻璃半透明卡片(backdrop-filter:blur)+柔和渐变背景+细腻边框+多层景深感，现代SaaS/高端品牌风格',
         'aurora': '极光渐变风格：流动的渐变色网格背景(Aurora Gradient Mesh)+梦幻色彩过渡(紫蓝绿粉融合)+柔和发光卡片，视觉冲击力强',
@@ -4802,7 +5811,9 @@ async def video_to_html_bg():
 
     # ── Claude 系列 + PPT/动画格式 → 使用专业管道（完整设计系统+CSS/JS模板）──
     # claude_slides 本身即是幻灯片风格，不依赖 output_format
-    is_claude_style = style in ('claude', 'claude_slides')
+    if style in ('claude', 'claude_slides_v2'):
+        style = 'claude_slides'
+    is_claude_style = style == 'claude_slides'
     is_slide_format = output_format in ('ppt', 'animation', 'tech_explainer', 'ppt_explainer') or style == 'claude_slides'
 
     from xingye_bot.settings import load_settings as _ls
@@ -4834,7 +5845,13 @@ async def video_to_html_bg():
                 }
             }
 
-            rich_prompt = build_slide_prompt(video_info, ctx, style)
+            rich_prompt = build_slide_prompt(
+                video_info,
+                ctx,
+                style,
+                custom_prompt=custom,
+                enhanced_animations=enhanced_animations,
+            )
             
             # 详细程度注入
             _detail_hints = {
@@ -4852,8 +5869,6 @@ async def video_to_html_bg():
             elif style == 'claude_slides':
                 # 用户未指定页数 → AI自动，但确保不偷懒
                 rich_prompt += "\n\n【内容要求】视频内容很长，请充分展开每个章节，不要省略任何重要知识点。每个slide内容要充实，不是一两句话就带过。"
-            if custom:
-                rich_prompt += f"\n\n【用户额外要求】{custom}"
             if slide_frame_custom:
                 if slide_frame_custom == 'n':
                     rich_prompt += "\n\n【前后固定页】取消默认的封面+数据概览+金句总结固定页模板。所有slide由你自由设计内容结构，不必遵循Slide1封面/Slide2数据/最后页总结的套路。"
@@ -4870,7 +5885,11 @@ async def video_to_html_bg():
                 if slide_html.lower().startswith('html'):
                     slide_html = slide_html[4:].strip()
             # 用完整CSS/JS模板包装（Inter字体+Lucide图标+暖橙配色+亮暗切换+翻页动画）
-            html = build_full_html(slide_html, style)
+            html = build_full_html(
+                slide_html,
+                style,
+                enhanced_animations=enhanced_animations,
+            )
             print(f"{Fore.GREEN}  [OK] Claude设计系统注入完成 ({style}模板){Style.RESET_ALL}")
         except Exception as _e:
             import traceback
@@ -4916,7 +5935,7 @@ Video title: {title}
 UP主: {up_name}
 Link: {video_url}
 
-⚠️ 以下视频数据为真实统计数据，必须在页面中准确展示（如"视频数据概览"卡片），不得编造：
+以下视频数据为真实统计数据，必须在页面中准确展示（如"视频数据概览"卡片），不得编造：
 - 播放量: {stats.get('view', '??')}
 - 点赞数: {stats.get('like', '??')}
 - 投币数: {stats.get('coin', '??')}
@@ -4970,7 +5989,7 @@ Link: {video_url}
         try:
             from services.video_to_ppt import start_preview_server, stop_preview_server
             preview_url = start_preview_server(html)
-            print(f"\n{Fore.CYAN}🌐 Flask预览服务已启动: {preview_url}{Style.RESET_ALL}")
+            print(f"\n{Fore.CYAN}Flask预览服务已启动: {preview_url}{Style.RESET_ALL}")
 
             # 浏览器打开预览
             try:
@@ -4985,9 +6004,9 @@ Link: {video_url}
         
         # ── AI布局检测/修复（循环迭代，可多轮修复）──
         while True:
-            print(f"\n{Fore.CYAN}🔧 布局检测与修复:{Style.RESET_ALL}")
-            print(f"  {Fore.YELLOW}1.{Style.RESET_ALL} 🤖 AI自动检测+修复 — 让AI检查并修正布局/样式问题")
-            print(f"  {Fore.YELLOW}2.{Style.RESET_ALL} 💬 Agent反馈修复 — 你描述问题，AI针对性修复（可多轮迭代）")
+            print(f"\n{Fore.CYAN}布局检测与修复:{Style.RESET_ALL}")
+            print(f"  {Fore.YELLOW}1.{Style.RESET_ALL} AI自动检测+修复 — 让AI检查并修正布局/样式问题")
+            print(f"  {Fore.YELLOW}2.{Style.RESET_ALL} Agent反馈修复 — 你描述问题，AI针对性修复（可多轮迭代）")
             print(f"  (直接回车跳过，继续预览/保存)")
             fix_input = (await loop.run_in_executor(None, input, f"{Fore.CYAN}> {Style.RESET_ALL}")).strip()
 
@@ -4996,7 +6015,7 @@ Link: {video_url}
 
             if fix_input == "1":
                 # AI 自动检测修复
-                print(f"\n{Fore.CYAN}[FIX] 🤖 正在分析HTML布局...{Style.RESET_ALL}")
+                print(f"\n{Fore.CYAN}[FIX] 正在分析HTML布局...{Style.RESET_ALL}")
                 _fix_spinner_stop = asyncio.Event()
                 async def _fix_spinner():
                     chars = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
@@ -5033,8 +6052,8 @@ Link: {video_url}
                         if fixed_html.lower().startswith('html'):
                             fixed_html = fixed_html[4:].strip()
                     html = fixed_html
-                    print(f"\r{Fore.GREEN}[OK] ✅ AI布局修复完成! 新文件大小: {len(html)} 字符{Style.RESET_ALL}")
-                    print(f"  {Fore.CYAN}💡 可继续选择 1/2 再次修复，或直接回车完成{Style.RESET_ALL}")
+                    print(f"\r{Fore.GREEN}[OK] AI布局修复完成! 新文件大小: {len(html)} 字符{Style.RESET_ALL}")
+                    print(f"  {Fore.CYAN}可继续选择 1/2 再次修复，或直接回车完成{Style.RESET_ALL}")
                 except Exception as e:
                     print(f"\n{Fore.RED}[ERROR] AI修复失败: {e}，使用原始HTML{Style.RESET_ALL}")
                 _fix_spinner_stop.set()
@@ -5046,7 +6065,7 @@ Link: {video_url}
                     f"\n{Fore.CYAN}请描述你看到的问题 (如: 内容偏右/字体太小/颜色不对): {Style.RESET_ALL}")).strip()
                 if not issue_desc:
                     continue
-                print(f"{Fore.CYAN}[FIX] 💬 正在根据反馈修复...{Style.RESET_ALL}")
+                print(f"{Fore.CYAN}[FIX] 正在根据反馈修复...{Style.RESET_ALL}")
                 _fix_spinner_stop = asyncio.Event()
                 async def _fix_spinner2():
                     chars = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
@@ -5074,8 +6093,8 @@ Link: {video_url}
                         if fixed_html.lower().startswith('html'):
                             fixed_html = fixed_html[4:].strip()
                     html = fixed_html
-                    print(f"\r{Fore.GREEN}[OK] ✅ 修复完成! 新文件大小: {len(html)} 字符{Style.RESET_ALL}")
-                    print(f"  {Fore.CYAN}💡 可继续描述问题再次修复，或直接回车完成{Style.RESET_ALL}")
+                    print(f"\r{Fore.GREEN}[OK] 修复完成! 新文件大小: {len(html)} 字符{Style.RESET_ALL}")
+                    print(f"  {Fore.CYAN}可继续描述问题再次修复，或直接回车完成{Style.RESET_ALL}")
                 except Exception as e:
                     print(f"\n{Fore.RED}[ERROR] 修复失败: {e}，使用原始HTML{Style.RESET_ALL}")
                 _fix_spinner_stop.set()
@@ -5086,7 +6105,7 @@ Link: {video_url}
 
         # ── 询问是否保存 ──
         print(f"\n{Fore.CYAN}{'─'*50}{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}💾 是否保存此网页？{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}是否保存此网页？{Style.RESET_ALL}")
         print(f"{Fore.CYAN}   按 Enter 保存到默认路径 | 输入 n 跳过 | 或输入自定义路径{Style.RESET_ALL}")
 
         # 默认保存到项目目录下的 web 文件夹
@@ -5138,7 +6157,7 @@ Link: {video_url}
 
         # 提示：预览服务器将在程序退出时自动关闭
         if preview_url:
-            print(f"{Fore.LIGHTBLACK_EX}   💡 Flask预览服务器将持续运行 ({preview_url})，退出程序时自动停止{Style.RESET_ALL}")
+            print(f"{Fore.LIGHTBLACK_EX}   Flask预览服务器将持续运行 ({preview_url})，退出程序时自动停止{Style.RESET_ALL}")
 
     except Exception as e:
         import traceback
@@ -5292,7 +6311,7 @@ async def _bg_html_gen(tid, bvid, title, up_name, style, custom):
         html = resp.strip()
         if html.startswith("```"): html = html.split("```", 2)[1].strip()
         if html.lower().startswith("html"): html = html[4:].strip()
-        d = os.path.join(BASE_DIR, "html_exports"); os.makedirs(d, exist_ok=True)
+        d = str(_SHARED_HTML_EXPORTS_DIR); os.makedirs(d, exist_ok=True)
         sf = re.sub(r'[\\/*?:"<>|]', '_', title)[:30]
         hp = os.path.join(d, f"{sf}_{style}_{tid}.html")
         with open(hp, 'w') as f: f.write(html)
@@ -5311,7 +6330,7 @@ def show_search_history():
         if not history:
             print(f"{Fore.YELLOW}[INFO] 搜索记录为空{Style.RESET_ALL}")
             return
-        print(f"\n{Fore.CYAN}📋 搜索历史 (最近{len(history)}条):{Style.RESET_ALL}")
+        print(f"\n{Fore.CYAN}搜索历史 (最近{len(history)}条):{Style.RESET_ALL}")
         print(f"{Fore.LIGHTBLACK_EX}{'─' * 60}{Style.RESET_ALL}")
         for i, h in enumerate(reversed(history[-20:])):  # 最近20条
             t = h.get('time','')[:16].replace('T',' ')
@@ -5323,269 +6342,351 @@ def show_search_history():
         print(f"{Fore.RED}[ERROR] 读取搜索记录失败: {e}{Style.RESET_ALL}")
 
 
+def quick_factory_reset_all():
+    """R command: erase every private record and generated artifact in one reset."""
+    global config
+    from copy import deepcopy
+    from core.config import CIPHER_KEY_FILE, DATA_DIR as ACTIVE_DATA_DIR
+    from core.user_data import USER_DATA_DIR
+
+    print(f"\n{Fore.RED}{'=' * 60}{Style.RESET_ALL}")
+    print(f"{Fore.RED}  恢复出厂设置：彻底清除全部私人数据{Style.RESET_ALL}")
+    print(f"{Fore.RED}{'=' * 60}{Style.RESET_ALL}")
+    print("将清除：API 配置和密钥、Cookie、二维码、网页账号/密码/恢复文件、")
+    print("全部日志与审核记录、私信/评论/画像/日记/记忆、知识库，以及 HTML、")
+    print("Word、PDF、PPT、思维导图等所有生成产物。已导出的备份默认保留。")
+    print("程序源码、模板、依赖和启动脚本不会删除。")
+    print("\n可选清理范围（默认保留配置备份；输入 ALL 才包含备份）：")
+    for group_id, meta in RESET_GROUPS.items():
+        print(f"  {group_id}: {meta['label']} - {meta['description']}")
+    raw_groups = input("输入 ALL 或逗号分隔的范围 ID：").strip()
+    selected_groups = (
+        list(DEFAULT_RESET_GROUP_IDS) if not raw_groups or raw_groups.upper() == "RESET"
+        else list(RESET_GROUPS) if raw_groups.upper() == "ALL"
+        else [x.strip() for x in raw_groups.split(",") if x.strip()]
+    )
+    try:
+        preview = preview_reset_targets(
+            data_dir=Path(ACTIVE_DATA_DIR), user_data_dir=Path(USER_DATA_DIR),
+            project_dir=Path(BASE_DIR), backup_dir=Path(BACKUP_DIR),
+            cipher_key_file=Path(CIPHER_KEY_FILE), config=config, selected_groups=selected_groups,
+        )
+    except ValueError as exc:
+        print(f"{Fore.RED}[ERROR] {exc}{Style.RESET_ALL}")
+        return
+    print("\n将删除以下内容：")
+    for group in preview["groups"]:
+        if group["selected"]:
+            print(f"  - {group['label']}: {group['files']} 个文件，{group['bytes']} 字节")
+            for path in group["paths"]:
+                print(f"      {path}")
+    confirm = raw_groups if raw_groups.upper() == "RESET" else input(f"{Fore.RED}不可恢复。输入 RESET 确认，其它输入取消：{Style.RESET_ALL}").strip()
+    if confirm != "RESET":
+        print(f"{Fore.YELLOW}已取消恢复出厂设置。{Style.RESET_ALL}")
+        return
+
+    result = erase_all_user_data(
+        data_dir=Path(ACTIVE_DATA_DIR),
+        user_data_dir=Path(USER_DATA_DIR),
+        project_dir=Path(BASE_DIR),
+        backup_dir=Path(BACKUP_DIR),
+        cipher_key_file=Path(CIPHER_KEY_FILE),
+        config=config,
+        selected_groups=selected_groups,
+    )
+    config = deepcopy(DEFAULT_CONFIG)
+    if not save_config(config):
+        result["failures"].append("默认配置写入失败")
+    _reload_all_globals(config)
+    print(f"\n{Fore.GREEN}[OK] 已清除 {len(result['deleted'])} 项私有数据与生成产物。{Style.RESET_ALL}")
+    print("下次使用需重新配置 AI、B站登录和网页端账号。")
+    if result["failures"]:
+        print(f"{Fore.YELLOW}[WARN] 未能清除：{' ; '.join(result['failures'])}{Style.RESET_ALL}")
+
+
 def factory_reset_all():
-    """[FACTORY RESET] 一键恢复所有配置为默认值，清除登录/状态/日志等一切数据"""
+    """[LEGACY FACTORY RESET] 按类别逐一询问清除隐私数据，无数据的类别自动跳过"""
     global config
     import shutil as _shu
     import glob as _glob
 
     print(f"\n{Fore.RED}╔══════════════════════════════════════════════════╗{Style.RESET_ALL}")
-    print(f"{Fore.RED}║  ⚠️  危险操作：彻底恢复出厂设置                ║{Style.RESET_ALL}")
-    print(f"{Fore.RED}║  一键清空所有隐私数据，包括:                   ║{Style.RESET_ALL}")
-    print(f"{Fore.RED}║  · 配置/API Key/登录Cookie/Session              ║{Style.RESET_ALL}")
-    print(f"{Fore.RED}║  · 状态/日志/UP主记忆/心理画像/人设/心情       ║{Style.RESET_ALL}")
-    print(f"{Fore.RED}║  · 主人信息/推荐记录/行为日志/向量索引         ║{Style.RESET_ALL}")
-    print(f"{Fore.RED}║  · 待机监控/搜索历史/二维码/评论缓存           ║{Style.RESET_ALL}")
-    print(f"{Fore.RED}║  · 兴趣引擎/费用记录/用户画像                  ║{Style.RESET_ALL}")
-    print(f"{Fore.RED}║  · web面板全部数据(人设/心情/日志/模板等)      ║{Style.RESET_ALL}")
-    print(f"{Fore.RED}║  · 知识库/干货/HTML导出/web导出/导出备份       ║{Style.RESET_ALL}")
-    print(f"{Fore.RED}║  · 加密密钥(.cipher_key)                       ║{Style.RESET_ALL}")
-    print(f"{Fore.RED}║  AI模型文件不受影响                             ║{Style.RESET_ALL}")
+    print(f"{Fore.RED}║   隐私数据清理 — 按类别逐一确认              ║{Style.RESET_ALL}")
+    print(f"{Fore.RED}║  无数据的类别自动跳过，已清除的不可恢复         ║{Style.RESET_ALL}")
     print(f"{Fore.RED}╚══════════════════════════════════════════════════╝{Style.RESET_ALL}")
 
-    confirm = input(f"\n{Fore.RED}确认清空所有隐私数据？输入 YES 继续: {Style.RESET_ALL}").strip()
+    html_dir = str(_SHARED_HTML_EXPORTS_DIR)
+    web_dir = os.path.join(BASE_DIR, "web")
+    qr_dir = str(_SHARED_QR_CODES_DIR)
+    mindmap_dir = str(_SHARED_MINDMAPS_DIR)
+
+    # ═══════════════════════════════════════════════════════════
+    # 定义清理分组：每组包含 (显示名称, [(描述, 路径), ...])
+    # ═══════════════════════════════════════════════════════════
+    groups = [
+        ("登录凭证 (清除后需重新登录)",
+         [("登录Cookie", COOKIE_FILE),
+          ("运行时状态", RUNTIME_STATE_FILE),
+          ("机器人锁", BOT_LOCK_FILE),
+          ("加密密钥", CIPHER_KEY_FILE)]),
+
+        ("用户画像与个人数据",
+         [("搜索记录", SEARCH_HISTORY_FILE),
+          ("兴趣配置", INTERESTS_FILE),
+          ("人设配置", PERSONAS_FILE),
+          ("用户画像", USER_PROFILES_FILE),
+          ("主人信息", os.path.join(DATA_DIR, "owner_profile.json")),
+          ("兴趣引擎数据", os.path.join(DATA_DIR, "interest_engine.json"))]),
+
+        ("互动历史记录 (评论/私信/视频)",
+         [("评论日志", COMMENT_LOG_FILE),
+          ("私信日志", PRIVATE_MESSAGE_LOG_FILE),
+          ("私信上下文", PRIVATE_CONTEXT_FILE),
+          ("视频互动记录", HISTORY_VIDEOS_FILE)]),
+
+        ("机器人心智与记忆 (心情/日记/进化/Agent)",
+         [("心情状态", MOOD_STATE_FILE),
+          ("机器人日记", BOT_DIARY_FILE),
+          ("自我进化记录", SELF_EVOLUTION_FILE),
+          ("Agent技能日志", AGENT_SKILL_LOG_FILE),
+          ("学习日志", LEARNING_LOG_FILE),
+          ("UP主关注记忆", MEMORY_FILE),
+          ("机器人日志", JOURNAL_FILE),
+          ("知识库元数据", KB_METADATA_FILE)]),
+
+        ("心理画像系统",
+         [("心理画像", os.path.join(DATA_DIR, "psycho_profile.json")),
+          ("心理推荐日志", os.path.join(DATA_DIR, "recommendation_log.json")),
+          ("心理行为日志", os.path.join(DATA_DIR, "action_log.json")),
+          ("内容避雷", os.path.join(DATA_DIR, "content_aversions.json"))]),
+
+        ("向量检索索引",
+         [("向量检索索引", os.path.join(DATA_DIR, "kb_vector_index.json"))]),
+
+        ("待机与监控数据",
+         [("待机配置", os.path.join(DATA_DIR, "standby_config.json")),
+          ("待机统计", os.path.join(DATA_DIR, "standby_stats.json")),
+          ("监控配置", os.path.join(DATA_DIR, "monitor_config.json")),
+          ("监控统计", os.path.join(DATA_DIR, "monitor_stats.json")),
+          ("评论区回复缓存", os.path.join(DATA_DIR, "reply_cache.json")),
+          ("评论已处理列表", os.path.join(DATA_DIR, "processed_comments.json"))]),
+
+        ("网页面板所有数据",
+         [("网页版Session密钥", os.path.join(DATA_DIR, ".web_secret_key")),
+          ("网页版人设", os.path.join(DATA_DIR, "web_personas.json")),
+          ("网页版活跃人设", os.path.join(DATA_DIR, "web_persona.json")),
+          ("网页版心情", os.path.join(DATA_DIR, "web_mood.json")),
+          ("网页版用户画像", os.path.join(DATA_DIR, "web_user_profiles.json")),
+          ("网页版操作日志", os.path.join(DATA_DIR, "web_action_log.json")),
+          ("网页版提示词模板", os.path.join(DATA_DIR, "web_prompt_templates.json")),
+          ("网页版费用记录", os.path.join(DATA_DIR, "web_costs.json"))]),
+
+        ("知识库 (KnowledgeBase/)",
+         [("知识库全部内容", KNOWLEDGE_BASE_DIR)]),
+
+        ("干货归档 (highlights/)",
+         [("干货全部内容", DRY_GOODS_DIR)]),
+
+        ("所有导出文件",
+         [("HTML导出目录", html_dir),
+          ("Web导出目录", web_dir),
+          ("导出备份目录", BACKUP_DIR),
+          ("思维导图目录", mindmap_dir)]),
+
+        ("Word/文档导出",
+         [("Word文档目录", str(_SHARED_WORD_DIR))]),
+
+        (" 缓存与临时文件",
+         [("Data/子目录 (video_cache/feedback等)", DATA_DIR + "/【子目录】"),  # 特殊标记
+          ("二维码临时文件", qr_dir),
+          ("根目录临时HTML", os.path.join(BASE_DIR, "web_explain_*.html")),  # glob模式
+          ("ID列表文件", os.path.join(BASE_DIR, "html_ids.txt")),
+          ("KB内嵌HTML缓存", os.path.join(KNOWLEDGE_BASE_DIR or "", ".html_exports"))]),
+    ]
+
+    # ═══════════════════════════════════════════════════════════
+    # 第一遍：逐个询问
+    # ═══════════════════════════════════════════════════════════
+    to_delete = {}  # group_index -> [(name, path), ...] 实际存在的文件
+
+    for gi, (group_name, items) in enumerate(groups):
+        # 检查该组是否有文件存在
+        existing = []
+        for name, path in items:
+            path = str(path)  # 兼容 Path 对象
+            if path.endswith("【子目录】"):
+                # Data/ 子目录：检查是否有子目录
+                dd = DATA_DIR
+                if os.path.isdir(dd):
+                    has_subdirs = any(
+                        os.path.isdir(os.path.join(dd, x)) for x in os.listdir(dd)
+                    )
+                    if has_subdirs:
+                        existing.append((name, path))
+            elif "*.html" in path:
+                # glob 模式
+                base, pattern = os.path.split(path)
+                matched = _glob.glob(os.path.join(base, pattern))
+                if matched:
+                    existing.append((name, path))
+            elif os.path.exists(path):
+                existing.append((name, path))
+
+        if not existing:
+            print(f"\n{Fore.LIGHTBLACK_EX}  [{group_name}] — 无数据，自动跳过{Style.RESET_ALL}")
+            continue
+
+        # 显示存在项列表
+        existing_names = [n for n, _ in existing]
+        print(f"\n{Fore.CYAN}  [{group_name}]{Style.RESET_ALL}")
+        print(f"  {Fore.WHITE}现有数据: {', '.join(existing_names)}{Style.RESET_ALL}")
+
+        answer = input(f"  {Fore.YELLOW}清除此项？[y/N]: {Style.RESET_ALL}").strip().lower()
+        if answer == 'y' or answer == 'yes':
+            to_delete[gi] = existing
+            print(f"  {Fore.GREEN}  → 已标记清除{Style.RESET_ALL}")
+        else:
+            print(f"  {Fore.LIGHTBLACK_EX}  → 保留{Style.RESET_ALL}")
+
+    # ═══════════════════════════════════════════════════════════
+    # 汇总确认
+    # ═══════════════════════════════════════════════════════════
+    if not to_delete:
+        print(f"\n{Fore.GREEN}没有选中任何需要清除的项目，操作已取消。{Style.RESET_ALL}")
+        return
+
+    print(f"\n{Fore.RED}{'─' * 50}{Style.RESET_ALL}")
+    print(f"{Fore.RED}将要清除以下 {len(to_delete)} 类数据:{Style.RESET_ALL}")
+    total_files = 0
+    for gi, existing in to_delete.items():
+        group_name = groups[gi][0]
+        names = [n for n, _ in existing]
+        total_files += len(existing)
+        print(f"  {Fore.YELLOW}• {group_name}: {', '.join(names)}{Style.RESET_ALL}")
+    print(f"\n{Fore.RED}  共 {total_files} 项数据将被永久删除！{Style.RESET_ALL}")
+    print(f"{Fore.RED}{'─' * 50}{Style.RESET_ALL}")
+
+    confirm = input(f"\n{Fore.RED}确认执行清除？输入 YES 继续: {Style.RESET_ALL}").strip()
     if confirm.upper() != "YES":
         print(f"{Fore.YELLOW}已取消{Style.RESET_ALL}")
         return
 
-    # 一键清除：所有子目录/导出/备份全部删除，不再逐个询问
-    clear_kb = True
-    clear_dry = True
-    clear_html = True
-    clear_web = True
-    clear_backup = True
-    html_dir = os.path.join(BASE_DIR, "html_exports")
-    web_dir = os.path.join(BASE_DIR, "web")
-    backup_dir = BACKUP_DIR
-
+    # ═══════════════════════════════════════════════════════════
+    # 执行删除
+    # ═══════════════════════════════════════════════════════════
     deleted_count = 0
 
-    # ═══════════════════════════════════════════════════════════
-    # 1) 单文件 — Data/ 下的 JSON/MD 数据
-    # ═══════════════════════════════════════════════════════════
-    files_to_delete = [
-        # 核心配置 & 登录
-        ("登录Cookie",           COOKIE_FILE),
-        ("运行时状态",           RUNTIME_STATE_FILE),
-        ("机器人锁",             BOT_LOCK_FILE),
-        # 用户数据
-        ("搜索记录",             SEARCH_HISTORY_FILE),
-        ("兴趣配置",             INTERESTS_FILE),
-        ("人设配置",             PERSONAS_FILE),
-        ("用户画像",             USER_PROFILES_FILE),
-        # 互动日志
-        ("评论日志",             COMMENT_LOG_FILE),
-        ("私信日志",             PRIVATE_MESSAGE_LOG_FILE),
-        ("私信上下文",           PRIVATE_CONTEXT_FILE),
-        ("视频互动记录",         HISTORY_VIDEOS_FILE),
-        # Agent & 进化
-        ("Agent技能日志",        AGENT_SKILL_LOG_FILE),
-        ("自我进化记录",         SELF_EVOLUTION_FILE),
-        ("心情状态",             MOOD_STATE_FILE),
-        ("机器人日记",           BOT_DIARY_FILE),
-        # 知识 & 记忆
-        ("学习日志",             LEARNING_LOG_FILE),
-        ("知识库元数据",         KB_METADATA_FILE),
-        ("UP主关注记忆",         MEMORY_FILE),
-        ("机器人日志",           JOURNAL_FILE),
-        # 心理画像
-        ("心理画像",             os.path.join(DATA_DIR, "psycho_profile.json")),
-        ("心理推荐日志",         os.path.join(DATA_DIR, "recommendation_log.json")),
-        ("心理行为日志",         os.path.join(DATA_DIR, "action_log.json")),
-        ("内容避雷",             os.path.join(DATA_DIR, "content_aversions.json")),
-        ("主人信息",             os.path.join(DATA_DIR, "owner_profile.json")),
-        # 向量 & 检索
-        ("向量检索索引",         os.path.join(DATA_DIR, "kb_vector_index.json")),
-        # 待机/监控 (v3.0.1+)
-        ("待机配置",             os.path.join(DATA_DIR, "standby_config.json")),
-        ("待机统计",             os.path.join(DATA_DIR, "standby_stats.json")),
-        ("监控配置",             os.path.join(DATA_DIR, "monitor_config.json")),
-        ("监控统计",             os.path.join(DATA_DIR, "monitor_stats.json")),
-        # 评论区缓存 (legacy)
-        ("评论区回复缓存",       os.path.join(DATA_DIR, "reply_cache.json")),
-        ("评论已处理列表",       os.path.join(DATA_DIR, "processed_comments.json")),
-        # 网页面板
-        ("网页版Session密钥",    os.path.join(DATA_DIR, ".web_secret_key")),
-        ("网页版人设",           os.path.join(DATA_DIR, "web_personas.json")),
-        ("网页版活跃人设",       os.path.join(DATA_DIR, "web_persona.json")),
-        ("网页版心情",           os.path.join(DATA_DIR, "web_mood.json")),
-        ("网页版用户画像",       os.path.join(DATA_DIR, "web_user_profiles.json")),
-        ("网页版操作日志",       os.path.join(DATA_DIR, "web_action_log.json")),
-        ("网页版提示词模板",     os.path.join(DATA_DIR, "web_prompt_templates.json")),
-        ("网页版费用记录",       os.path.join(DATA_DIR, "web_costs.json")),
-        # 兴趣引擎 (v2.0)
-        ("兴趣引擎数据",         os.path.join(DATA_DIR, "interest_engine.json")),
-        # 加密密钥 (根目录)
-        ("加密密钥",             CIPHER_KEY_FILE),
-    ]
-
-    for name, path in files_to_delete:
+    # ---- 辅助函数：安全删除文件 ----
+    def _safe_delete_file(path, label):
+        nonlocal deleted_count
         if os.path.exists(path):
             try:
                 os.remove(path)
-                print(f"  {Fore.GREEN}✓{Style.RESET_ALL} 已删除: {name} ({os.path.basename(path)})")
+                print(f"  {Fore.GREEN}{Style.RESET_ALL} 已删除: {label}")
                 deleted_count += 1
             except Exception as e:
-                print(f"  {Fore.RED}✗{Style.RESET_ALL} 删除失败: {name} - {e}")
+                print(f"  {Fore.RED}{Style.RESET_ALL} 删除失败: {label} - {e}")
         else:
-            print(f"  {Fore.LIGHTBLACK_EX}- {name}: 不存在,跳过{Style.RESET_ALL}")
+            print(f"  {Fore.LIGHTBLACK_EX}- {label}: 不存在,跳过{Style.RESET_ALL}")
 
-    # ═══════════════════════════════════════════════════════════
-    # 2) Data/ 下所有子目录 (video_cache / feedback / 等)
-    # ═══════════════════════════════════════════════════════════
-    if os.path.isdir(DATA_DIR):
-        for item in os.listdir(DATA_DIR):
-            item_path = os.path.join(DATA_DIR, item)
-            if os.path.isdir(item_path):
-                try:
-                    _shu.rmtree(item_path, ignore_errors=True)
-                    print(f"  {Fore.GREEN}✓{Style.RESET_ALL} 已删除目录: Data/{item}")
-                    deleted_count += 1
-                except Exception as e:
-                    print(f"  {Fore.RED}✗{Style.RESET_ALL} 删除目录失败: Data/{item} - {e}")
-
-    # ═══════════════════════════════════════════════════════════
-    # 3) 知识库目录 (KnowledgeBase/)
-    # ═══════════════════════════════════════════════════════════
-    if clear_kb and os.path.exists(KNOWLEDGE_BASE_DIR):
-        try:
-            _shu.rmtree(KNOWLEDGE_BASE_DIR, ignore_errors=True)
-            print(f"  {Fore.GREEN}✓{Style.RESET_ALL} 已删除: 知识库目录")
-            deleted_count += 1
-        except Exception as e:
-            print(f"  {Fore.RED}✗{Style.RESET_ALL} 知识库删除失败: {e}")
-
-    # ═══════════════════════════════════════════════════════════
-    # 4) 干货目录 (highlights/)
-    # ═══════════════════════════════════════════════════════════
-    if clear_dry and os.path.exists(DRY_GOODS_DIR):
-        try:
-            _shu.rmtree(DRY_GOODS_DIR, ignore_errors=True)
-            print(f"  {Fore.GREEN}✓{Style.RESET_ALL} 已删除: 干货目录")
-            deleted_count += 1
-        except Exception as e:
-            print(f"  {Fore.RED}✗{Style.RESET_ALL} 干货目录删除失败: {e}")
-
-    # ═══════════════════════════════════════════════════════════
-    # 5) HTML 导出目录 (html_exports/)
-    # ═══════════════════════════════════════════════════════════
-    if clear_html and os.path.exists(html_dir):
-        try:
-            _shu.rmtree(html_dir, ignore_errors=True)
-            print(f"  {Fore.GREEN}✓{Style.RESET_ALL} 已删除: HTML导出目录")
-            deleted_count += 1
-        except Exception as e:
-            print(f"  {Fore.RED}✗{Style.RESET_ALL} HTML导出目录删除失败: {e}")
-
-    # ═══════════════════════════════════════════════════════════
-    # 6) web/ 导出目录
-    # ═══════════════════════════════════════════════════════════
-    if clear_web and os.path.exists(web_dir):
-        try:
-            _shu.rmtree(web_dir, ignore_errors=True)
-            print(f"  {Fore.GREEN}✓{Style.RESET_ALL} 已删除: web/导出目录")
-            deleted_count += 1
-        except Exception as e:
-            print(f"  {Fore.RED}✗{Style.RESET_ALL} web/目录删除失败: {e}")
-
-    # ═══════════════════════════════════════════════════════════
-    # 7) 导出备份目录 (C:/bilibili_claw_backup/)
-    # ═══════════════════════════════════════════════════════════
-    if clear_backup and os.path.exists(backup_dir):
-        try:
-            _shu.rmtree(backup_dir, ignore_errors=True)
-            print(f"  {Fore.GREEN}✓{Style.RESET_ALL} 已删除: 导出备份目录 ({backup_dir})")
-            deleted_count += 1
-        except Exception as e:
-            print(f"  {Fore.RED}✗{Style.RESET_ALL} 备份目录删除失败: {e}")
-
-    # ═══════════════════════════════════════════════════════════
-    # 8) 二维码临时目录 (qr_codes/)
-    # ═══════════════════════════════════════════════════════════
-    qr_dir = os.path.join(BASE_DIR, "qr_codes")
-    if os.path.exists(qr_dir):
-        try:
-            _shu.rmtree(qr_dir, ignore_errors=True)
-            os.makedirs(qr_dir, exist_ok=True)
-            print(f"  {Fore.GREEN}✓{Style.RESET_ALL} 已清空: qr_codes/")
-            deleted_count += 1
-        except Exception as e:
-            print(f"  {Fore.RED}✗{Style.RESET_ALL} 清理 qr_codes 失败: {e}")
-
-    # ═══════════════════════════════════════════════════════════
-    # 9) 根目录临时 HTML 文件 (web_explain_*.html)
-    # ═══════════════════════════════════════════════════════════
-    for html_file in _glob.glob(os.path.join(BASE_DIR, "web_explain_*.html")):
-        try:
-            os.remove(html_file)
-            print(f"  {Fore.GREEN}✓{Style.RESET_ALL} 已删除: {os.path.basename(html_file)}")
-            deleted_count += 1
-        except Exception as e:
-            print(f"  {Fore.RED}✗{Style.RESET_ALL} 删除失败: {html_file} - {e}")
-
-    # ═══════════════════════════════════════════════════════════
-    # 10) 根目录 ID 列表文件 (html_ids.txt / js_ids.txt)
-    # ═══════════════════════════════════════════════════════════
-    for id_file in ("html_ids.txt", "js_ids.txt"):
-        id_path = os.path.join(BASE_DIR, id_file)
-        if os.path.exists(id_path):
+    # ---- 辅助函数：安全删除目录 ----
+    def _safe_delete_dir(path, label):
+        nonlocal deleted_count
+        if os.path.exists(path):
             try:
-                os.remove(id_path)
-                print(f"  {Fore.GREEN}✓{Style.RESET_ALL} 已删除: {id_file}")
+                _shu.rmtree(path, ignore_errors=True)
+                print(f"  {Fore.GREEN}{Style.RESET_ALL} 已删除目录: {label}")
                 deleted_count += 1
             except Exception as e:
-                print(f"  {Fore.RED}✗{Style.RESET_ALL} 删除失败: {id_file} - {e}")
+                print(f"  {Fore.RED}{Style.RESET_ALL} 删除目录失败: {label} - {e}")
+        else:
+            print(f"  {Fore.LIGHTBLACK_EX}- {label}: 不存在,跳过{Style.RESET_ALL}")
+
+    for gi, existing in sorted(to_delete.items()):
+        group_name = groups[gi][0]
+        print(f"\n{Fore.CYAN}── 正在清除: {group_name} ──{Style.RESET_ALL}")
+
+        for name, path in existing:
+            path = str(path)  # 兼容 Path 对象
+            if path.endswith("【子目录】"):
+                # Data/ 下所有子目录
+                dd = DATA_DIR
+                if os.path.isdir(dd):
+                    for item in os.listdir(dd):
+                        item_path = os.path.join(dd, item)
+                        if os.path.isdir(item_path):
+                            try:
+                                _shu.rmtree(item_path, ignore_errors=True)
+                                print(f"  {Fore.GREEN}{Style.RESET_ALL} 已删除: Data/{item}")
+                                deleted_count += 1
+                            except Exception as e:
+                                print(f"  {Fore.RED}{Style.RESET_ALL} 删除失败: Data/{item} - {e}")
+            elif "*.html" in path:
+                # glob 模式删除
+                base, pattern = os.path.split(path)
+                for f in _glob.glob(os.path.join(base, pattern)):
+                    try:
+                        os.remove(f)
+                        print(f"  {Fore.GREEN}{Style.RESET_ALL} 已删除: {os.path.basename(f)}")
+                        deleted_count += 1
+                    except Exception as e:
+                        print(f"  {Fore.RED}{Style.RESET_ALL} 删除失败: {f} - {e}")
+            elif os.path.isdir(path):
+                _safe_delete_dir(path, name)
+            elif path in (KNOWLEDGE_BASE_DIR, DRY_GOODS_DIR, html_dir, web_dir,
+                          BACKUP_DIR, mindmap_dir,
+                          str(_SHARED_WORD_DIR)):
+                # 已经是目录，前面 isdir 会处理
+                _safe_delete_dir(path, name)
+            else:
+                _safe_delete_file(path, name)
 
     # ═══════════════════════════════════════════════════════════
-    # 11) KnowledgeBase/.html_exports (知识库内嵌HTML缓存)
+    # 额外清理 (用户确认过但需特殊处理的)
     # ═══════════════════════════════════════════════════════════
-    kb_html_dir = os.path.join(KNOWLEDGE_BASE_DIR, ".html_exports") if KNOWLEDGE_BASE_DIR else None
-    if kb_html_dir and os.path.exists(kb_html_dir) and not clear_kb:
-        try:
-            _shu.rmtree(kb_html_dir, ignore_errors=True)
-            print(f"  {Fore.GREEN}✓{Style.RESET_ALL} 已删除: KnowledgeBase/.html_exports/")
-            deleted_count += 1
-        except Exception as e:
-            print(f"  {Fore.RED}✗{Style.RESET_ALL} 删除 KnowledgeBase/.html_exports 失败: {e}")
-
-    # ═══════════════════════════════════════════════════════════
-    # 11.5) 思维导图导出目录 (MindMaps/)
-    mindmap_dir = os.path.join(BASE_DIR, "MindMaps")
-    if os.path.exists(mindmap_dir):
-        try:
-            _shu.rmtree(mindmap_dir, ignore_errors=True)
-            print(f"  {Fore.GREEN}✓{Style.RESET_ALL} 已删除: 思维导图目录 (MindMaps/)")
-            deleted_count += 1
-        except Exception as e:
-            print(f"  {Fore.RED}✗{Style.RESET_ALL} 思维导图目录删除失败: {e}")
-
-    # 11.6) Word 文档导出目录 (Word/)
-    docx_dirs = [os.path.join(BASE_DIR, "Word")]
-    try:
-        _de = config.get("document_export", {}) if isinstance(config, dict) else {}
-        _custom = _de.get("output_dir") or _de.get("folder_name")
-        if _custom:
-            docx_dirs.append(os.path.join(BASE_DIR, _custom))
-    except Exception:
-        pass
-    for _dd in docx_dirs:
-        if os.path.exists(_dd):
+    # 二维码目录：清空而非删除
+    if any(n == "二维码临时文件" for gi, ex in to_delete.items() for n, _ in ex):
+        if os.path.exists(qr_dir):
             try:
-                _shu.rmtree(_dd, ignore_errors=True)
-                print(f"  {Fore.GREEN}✓{Style.RESET_ALL} 已删除: Word文档目录 ({os.path.basename(_dd)}/)")
+                _shu.rmtree(qr_dir, ignore_errors=True)
+                os.makedirs(qr_dir, exist_ok=True)
+                print(f"  {Fore.GREEN}{Style.RESET_ALL} 已清空: qr_codes/")
                 deleted_count += 1
             except Exception as e:
-                print(f"  {Fore.RED}✗{Style.RESET_ALL} Word文档目录删除失败: {e}")
+                print(f"  {Fore.RED}{Style.RESET_ALL} 清理 qr_codes 失败: {e}")
 
-    # 12) 重新生成默认配置文件
+    # ID列表文件 (html_ids.txt / js_ids.txt)
+    if any(n == "ID列表文件" for gi, ex in to_delete.items() for n, _ in ex):
+        for id_file in ("html_ids.txt", "js_ids.txt"):
+            id_path = os.path.join(BASE_DIR, id_file)
+            _safe_delete_file(id_path, id_file)
+
+    # KB内嵌HTML缓存
+    if any(n == "KB内嵌HTML缓存" for gi, ex in to_delete.items() for n, _ in ex):
+        kb_html_dir = os.path.join(KNOWLEDGE_BASE_DIR, ".html_exports") if KNOWLEDGE_BASE_DIR else None
+        if kb_html_dir:
+            _safe_delete_dir(kb_html_dir, "KnowledgeBase/.html_exports/")
+
+    # Word文档自定义目录
+    if any(n == "Word文档目录" for gi, ex in to_delete.items() for n, _ in ex):
+        try:
+            _de = config.get("document_export", {}) if isinstance(config, dict) else {}
+            _custom = _de.get("output_dir") or _de.get("folder_name")
+            if _custom:
+                _custom_path = os.path.join(BASE_DIR, _custom)
+                _safe_delete_dir(_custom_path, f"自定义文档目录 ({_custom}/)")
+        except Exception:
+            pass
+
+    # ═══════════════════════════════════════════════════════════
+    # 最后：重新生成默认配置文件
     # ═══════════════════════════════════════════════════════════
     config = DEFAULT_CONFIG.copy()
     save_config(config)
     _reload_all_globals(config)
 
     print(f"\n{Fore.GREEN}════════════════════════════════════════════════{Style.RESET_ALL}")
-    print(f"{Fore.GREEN}[OK] 恢复出厂设置完成！已重置 {deleted_count} 项，配置已恢复默认{Style.RESET_ALL}")
-    print(f"{Fore.GREEN}    现在需要重新配置 AI Key 并重新登录才能使用{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}[OK] 隐私数据清理完成！已清除 {deleted_count} 项，配置已恢复默认{Style.RESET_ALL}")
     print(f"{Fore.GREEN}════════════════════════════════════════════════{Style.RESET_ALL}")
     input(f"\n{Fore.CYAN}按回车继续...{Style.RESET_ALL}")
 
@@ -5609,6 +6710,13 @@ def export_config():
         return
     if custom:
         export_path = custom
+
+    # 导出模式：脱敏（默认，安全分享）或完整（含 API Key / Cookie，仅自用迁移）
+    mode = input(f"\n{Fore.YELLOW}导出模式: 回车=脱敏导出(可安全分享) | 输入 f=完整导出(含API Key/Cookie，仅自用): {Style.RESET_ALL}").strip().lower()
+    sanitize = mode != "f"
+    if not sanitize and not custom:
+        export_path = str(export_path).replace(".json", "_full.json")
+    print(f"{Fore.CYAN}导出模式: {'脱敏（安全分享）' if sanitize else '完整（含敏感信息，勿外传）'}{Style.RESET_ALL}")
 
     # 收集所有数据
     export_data = {
@@ -5641,9 +6749,9 @@ def export_config():
         "kb_vector_index": None,
     }
 
-    # 🔒 导出时对敏感数据脱敏
+    # 导出时对敏感数据脱敏（仅脱敏模式）
     def _sanitize_export_data(data, key):
-        if key in ("config", "bilibili_cookies") and data is not None:
+        if sanitize and key in ("config", "bilibili_cookies") and data is not None:
             return sanitize_config_for_export(data)
         return data
 
@@ -5671,31 +6779,31 @@ def export_config():
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     export_data[key] = _sanitize_export_data(json.load(f), key)
-                print(f"  {Fore.GREEN}✓{Style.RESET_ALL} {key} ({os.path.basename(path)})")
+                print(f"  {Fore.GREEN}{Style.RESET_ALL} {key} ({os.path.basename(path)})")
                 exported_files += 1
             except Exception as e:
-                print(f"  {Fore.YELLOW}⚠{Style.RESET_ALL} 读取失败 {os.path.basename(path)}: {e}")
+                print(f"  {Fore.YELLOW}{Style.RESET_ALL} 读取失败 {os.path.basename(path)}: {e}")
 
     # 知识库元数据
-    kb_metadata_file = os.path.join(BASE_DIR, "knowledge_metadata.json")
+    kb_metadata_file = KB_METADATA_FILE
     if os.path.exists(kb_metadata_file):
         try:
             with open(kb_metadata_file, "r", encoding="utf-8") as f:
                 export_data["knowledge_metadata"] = json.load(f)
-            print(f"  {Fore.GREEN}✓{Style.RESET_ALL} knowledge_metadata")
+            print(f"  {Fore.GREEN}{Style.RESET_ALL} knowledge_metadata")
             exported_files += 1
         except Exception as e:
-            print(f"  {Fore.YELLOW}⚠{Style.RESET_ALL} 知识库元数据: {e}")
+            print(f"  {Fore.YELLOW}{Style.RESET_ALL} 知识库元数据: {e}")
 
     # 学习日志 (纯文本)
     if os.path.exists(LEARNING_LOG_FILE):
         try:
             with open(LEARNING_LOG_FILE, "r", encoding="utf-8") as f:
                 export_data["learning_log"] = f.read()
-            print(f"  {Fore.GREEN}✓{Style.RESET_ALL} learning_log.md")
+            print(f"  {Fore.GREEN}{Style.RESET_ALL} learning_log.md")
             exported_files += 1
         except Exception as e:
-            print(f"  {Fore.YELLOW}⚠{Style.RESET_ALL} 学习日志: {e}")
+            print(f"  {Fore.YELLOW}{Style.RESET_ALL} 学习日志: {e}")
 
     # 心理画像
     psycho_file = os.path.join(DATA_DIR, "psycho_profile.json")
@@ -5703,10 +6811,10 @@ def export_config():
         try:
             with open(psycho_file, "r", encoding="utf-8") as f:
                 export_data["psycho_profile"] = json.load(f)
-            print(f"  {Fore.GREEN}✓{Style.RESET_ALL} psycho_profile.json")
+            print(f"  {Fore.GREEN}{Style.RESET_ALL} psycho_profile.json")
             exported_files += 1
         except Exception as e:
-            print(f"  {Fore.YELLOW}⚠{Style.RESET_ALL} 心理画像: {e}")
+            print(f"  {Fore.YELLOW}{Style.RESET_ALL} 心理画像: {e}")
 
     # 内容厌恶记录
     aversions_file = os.path.join(DATA_DIR, "content_aversions.json")
@@ -5714,20 +6822,20 @@ def export_config():
         try:
             with open(aversions_file, "r", encoding="utf-8") as f:
                 export_data["content_aversions"] = json.load(f)
-            print(f"  {Fore.GREEN}✓{Style.RESET_ALL} content_aversions.json")
+            print(f"  {Fore.GREEN}{Style.RESET_ALL} content_aversions.json")
             exported_files += 1
         except Exception as e:
-            print(f"  {Fore.YELLOW}⚠{Style.RESET_ALL} 内容厌恶记录: {e}")
+            print(f"  {Fore.YELLOW}{Style.RESET_ALL} 内容厌恶记录: {e}")
 
     # Bot日志 (纯文本)
     if os.path.exists(JOURNAL_FILE):
         try:
             with open(JOURNAL_FILE, "r", encoding="utf-8") as f:
                 export_data["bot_journal"] = f.read()
-            print(f"  {Fore.GREEN}✓{Style.RESET_ALL} bot_journal.md")
+            print(f"  {Fore.GREEN}{Style.RESET_ALL} bot_journal.md")
             exported_files += 1
         except Exception as e:
-            print(f"  {Fore.YELLOW}⚠{Style.RESET_ALL} Bot日志: {e}")
+            print(f"  {Fore.YELLOW}{Style.RESET_ALL} Bot日志: {e}")
 
     # 心理推荐日志
     rec_log_file = os.path.join(DATA_DIR, "recommendation_log.json")
@@ -5735,10 +6843,10 @@ def export_config():
         try:
             with open(rec_log_file, "r", encoding="utf-8") as f:
                 export_data["recommendation_log"] = json.load(f)
-            print(f"  {Fore.GREEN}✓{Style.RESET_ALL} recommendation_log.json")
+            print(f"  {Fore.GREEN}{Style.RESET_ALL} recommendation_log.json")
             exported_files += 1
         except Exception as e:
-            print(f"  {Fore.YELLOW}⚠{Style.RESET_ALL} 推荐日志: {e}")
+            print(f"  {Fore.YELLOW}{Style.RESET_ALL} 推荐日志: {e}")
 
     # 心理行为日志
     action_log_file = os.path.join(DATA_DIR, "action_log.json")
@@ -5746,10 +6854,10 @@ def export_config():
         try:
             with open(action_log_file, "r", encoding="utf-8") as f:
                 export_data["action_log"] = json.load(f)
-            print(f"  {Fore.GREEN}✓{Style.RESET_ALL} action_log.json")
+            print(f"  {Fore.GREEN}{Style.RESET_ALL} action_log.json")
             exported_files += 1
         except Exception as e:
-            print(f"  {Fore.YELLOW}⚠{Style.RESET_ALL} 行为日志: {e}")
+            print(f"  {Fore.YELLOW}{Style.RESET_ALL} 行为日志: {e}")
 
     # 主人信息 (含UID)
     owner_file = os.path.join(DATA_DIR, "owner_profile.json")
@@ -5757,10 +6865,10 @@ def export_config():
         try:
             with open(owner_file, "r", encoding="utf-8") as f:
                 export_data["owner_profile"] = json.load(f)
-            print(f"  {Fore.GREEN}✓{Style.RESET_ALL} owner_profile.json")
+            print(f"  {Fore.GREEN}{Style.RESET_ALL} owner_profile.json")
             exported_files += 1
         except Exception as e:
-            print(f"  {Fore.YELLOW}⚠{Style.RESET_ALL} 主人信息: {e}")
+            print(f"  {Fore.YELLOW}{Style.RESET_ALL} 主人信息: {e}")
 
     # 知识库向量索引
     vector_index_file = os.path.join(DATA_DIR, "kb_vector_index.json")
@@ -5768,10 +6876,10 @@ def export_config():
         try:
             with open(vector_index_file, "r", encoding="utf-8") as f:
                 export_data["kb_vector_index"] = json.load(f)
-            print(f"  {Fore.GREEN}✓{Style.RESET_ALL} kb_vector_index.json")
+            print(f"  {Fore.GREEN}{Style.RESET_ALL} kb_vector_index.json")
             exported_files += 1
         except Exception as e:
-            print(f"  {Fore.YELLOW}⚠{Style.RESET_ALL} 向量索引: {e}")
+            print(f"  {Fore.YELLOW}{Style.RESET_ALL} 向量索引: {e}")
 
     # 写入导出文件
     try:
@@ -5851,22 +6959,22 @@ def import_config():
             try:
                 with open(path, "w", encoding="utf-8") as f:
                     json.dump(data, f, ensure_ascii=False, indent=4)
-                print(f"  {Fore.GREEN}✓{Style.RESET_ALL} 已恢复: {os.path.basename(path)}")
+                print(f"  {Fore.GREEN}{Style.RESET_ALL} 已恢复: {os.path.basename(path)}")
                 restored += 1
             except Exception as e:
-                print(f"  {Fore.RED}✗{Style.RESET_ALL} 恢复失败 {os.path.basename(path)}: {e}")
+                print(f"  {Fore.RED}{Style.RESET_ALL} 恢复失败 {os.path.basename(path)}: {e}")
 
     # 知识库元数据
-    kb_metadata_file = os.path.join(BASE_DIR, "knowledge_metadata.json")
+    kb_metadata_file = KB_METADATA_FILE
     kb_data = import_data.get("knowledge_metadata")
     if kb_data is not None:
         try:
             with open(kb_metadata_file, "w", encoding="utf-8") as f:
                 json.dump(kb_data, f, ensure_ascii=False, indent=2)
-            print(f"  {Fore.GREEN}✓{Style.RESET_ALL} 已恢复: knowledge_metadata.json")
+            print(f"  {Fore.GREEN}{Style.RESET_ALL} 已恢复: knowledge_metadata.json")
             restored += 1
         except Exception as e:
-            print(f"  {Fore.RED}✗{Style.RESET_ALL} 知识库元数据: {e}")
+            print(f"  {Fore.RED}{Style.RESET_ALL} 知识库元数据: {e}")
 
     # 学习日志
     log_data = import_data.get("learning_log")
@@ -5874,10 +6982,10 @@ def import_config():
         try:
             with open(LEARNING_LOG_FILE, "w", encoding="utf-8") as f:
                 f.write(log_data)
-            print(f"  {Fore.GREEN}✓{Style.RESET_ALL} 已恢复: learning_log.md")
+            print(f"  {Fore.GREEN}{Style.RESET_ALL} 已恢复: learning_log.md")
             restored += 1
         except Exception as e:
-            print(f"  {Fore.RED}✗{Style.RESET_ALL} 学习日志: {e}")
+            print(f"  {Fore.RED}{Style.RESET_ALL} 学习日志: {e}")
 
     # 心理画像
     psycho_data = import_data.get("psycho_profile")
@@ -5886,10 +6994,10 @@ def import_config():
         try:
             with open(psycho_file, "w", encoding="utf-8") as f:
                 json.dump(psycho_data, f, ensure_ascii=False, indent=4)
-            print(f"  {Fore.GREEN}✓{Style.RESET_ALL} 已恢复: psycho_profile.json")
+            print(f"  {Fore.GREEN}{Style.RESET_ALL} 已恢复: psycho_profile.json")
             restored += 1
         except Exception as e:
-            print(f"  {Fore.RED}✗{Style.RESET_ALL} 心理画像: {e}")
+            print(f"  {Fore.RED}{Style.RESET_ALL} 心理画像: {e}")
 
     # 内容厌恶记录
     aversions_data = import_data.get("content_aversions")
@@ -5898,10 +7006,10 @@ def import_config():
         try:
             with open(aversions_file, "w", encoding="utf-8") as f:
                 json.dump(aversions_data, f, ensure_ascii=False, indent=4)
-            print(f"  {Fore.GREEN}✓{Style.RESET_ALL} 已恢复: content_aversions.json")
+            print(f"  {Fore.GREEN}{Style.RESET_ALL} 已恢复: content_aversions.json")
             restored += 1
         except Exception as e:
-            print(f"  {Fore.RED}✗{Style.RESET_ALL} 内容厌恶记录: {e}")
+            print(f"  {Fore.RED}{Style.RESET_ALL} 内容厌恶记录: {e}")
 
     # 重新加载配置（尤其重要：config 全局变量）
     new_config = load_config()
@@ -5917,7 +7025,7 @@ def import_config():
 
 
 # ═══════════════════════════════════════════════════════════════
-# 🛋️ 待机模式设置 (Standby Mode Config)
+# 待机模式设置 (Standby Mode Config)
 # ═══════════════════════════════════════════════════════════════
 def _configure_standby_settings():
     """待机模式完整设置：ASR/总结/评论区/PPT/视频触发 等全部选项"""
@@ -5934,7 +7042,7 @@ def _configure_standby_settings():
     sc.setdefault("max_replies_per_check", 3)
     sc.setdefault("reply_cooldown_seconds", 120)
     sc.setdefault("ppt_auto_generate", False)
-    sc.setdefault("ppt_theme", "claude")
+    sc.setdefault("ppt_theme", "claude_slides")
     sc.setdefault("video_trigger_enabled", True)
     sc.setdefault("custom_prompt", "")
     # 新增：ASR/视觉/评论模式等正常刷视频的选项
@@ -5949,20 +7057,20 @@ def _configure_standby_settings():
     sc.setdefault("notification_mode", True)  # 通知模式：通过B站@我通知检测
 
     while True:
-        enabled_text = f"{Fore.GREEN}✓ 已启用{Style.RESET_ALL}" if sc.get("enabled") else f"{Fore.RED}✗ 已禁用{Style.RESET_ALL}"
-        at_text = f"{Fore.GREEN}✓{Style.RESET_ALL}" if sc.get("at_trigger_enabled") else f"{Fore.RED}✗{Style.RESET_ALL}"
-        video_text = f"{Fore.GREEN}✓{Style.RESET_ALL}" if sc.get("video_trigger_enabled") else f"{Fore.RED}✗{Style.RESET_ALL}"
-        reply_text = f"{Fore.GREEN}✓{Style.RESET_ALL}" if sc.get("auto_reply") else f"{Fore.RED}✗{Style.RESET_ALL}"
-        asr_text = f"{Fore.GREEN}✓{Style.RESET_ALL}" if sc.get("asr_enabled") else f"{Fore.RED}✗{Style.RESET_ALL}"
-        vision_text = f"{Fore.GREEN}✓{Style.RESET_ALL}" if sc.get("vision_enabled") else f"{Fore.RED}✗{Style.RESET_ALL}"
-        ppt_text = f"{Fore.GREEN}✓{Style.RESET_ALL}" if sc.get("ppt_auto_generate") else f"{Fore.RED}✗{Style.RESET_ALL}"
+        enabled_text = f"{Fore.GREEN}已启用{Style.RESET_ALL}" if sc.get("enabled") else f"{Fore.RED}已禁用{Style.RESET_ALL}"
+        at_text = f"{Fore.GREEN}{Style.RESET_ALL}" if sc.get("at_trigger_enabled") else f"{Fore.RED}{Style.RESET_ALL}"
+        video_text = f"{Fore.GREEN}{Style.RESET_ALL}" if sc.get("video_trigger_enabled") else f"{Fore.RED}{Style.RESET_ALL}"
+        reply_text = f"{Fore.GREEN}{Style.RESET_ALL}" if sc.get("auto_reply") else f"{Fore.RED}{Style.RESET_ALL}"
+        asr_text = f"{Fore.GREEN}{Style.RESET_ALL}" if sc.get("asr_enabled") else f"{Fore.RED}{Style.RESET_ALL}"
+        vision_text = f"{Fore.GREEN}{Style.RESET_ALL}" if sc.get("vision_enabled") else f"{Fore.RED}{Style.RESET_ALL}"
+        ppt_text = f"{Fore.GREEN}{Style.RESET_ALL}" if sc.get("ppt_auto_generate") else f"{Fore.RED}{Style.RESET_ALL}"
 
         print(f"""
     ╔══════════════════════════════════════════════════════════╗
-    ║         🛋️  待机模式设置 (Standby Configuration)          ║
+    ║          待机模式设置 (Standby Configuration)          ║
     ╚══════════════════════════════════════════════════════════╝
 
-    {Fore.CYAN}📊 统计: 已处理 {st.get('comments_processed',0)} 条评论
+    {Fore.CYAN}统计: 已处理 {st.get('comments_processed',0)} 条评论
                @总结回复 {st.get('at_replies',0)} 次 | PPT生成 {st.get('ppt_generated',0)} 次
                错误 {st.get('errors',0)} 次{Style.RESET_ALL}
 
@@ -5981,7 +7089,7 @@ def _configure_standby_settings():
     {Fore.MAGENTA}8.{Style.RESET_ALL} 自定义提示词 ({'已设置' if sc.get('custom_prompt') else '未设置'})
 
     {Fore.CYAN}▶ 评论/内容获取:{Style.RESET_ALL}
-    {Fore.LIGHTBLUE_EX}9.{Style.RESET_ALL}  {'关闭' if sc.get('comment_fetch_enabled') else '开启'}获取评论区 → {Fore.GREEN + '✓' if sc.get('comment_fetch_enabled') else Fore.RED + '✗'}{Style.RESET_ALL}
+    {Fore.LIGHTBLUE_EX}9.{Style.RESET_ALL}  {'关闭' if sc.get('comment_fetch_enabled') else '开启'}获取评论区 → {Fore.GREEN + '' if sc.get('comment_fetch_enabled') else Fore.RED + ''}{Style.RESET_ALL}
     {Fore.LIGHTBLUE_EX}10.{Style.RESET_ALL} 评论检查间隔 (当前: {sc.get('comment_check_interval',60)}秒)
     {Fore.LIGHTBLUE_EX}11.{Style.RESET_ALL} 每次最大回复数 (当前: {sc.get('max_replies_per_check',3)})
     {Fore.LIGHTBLUE_EX}12.{Style.RESET_ALL} 回复冷却时间 (当前: {sc.get('reply_cooldown_seconds',120)}秒)
@@ -5993,13 +7101,13 @@ def _configure_standby_settings():
 
     {Fore.CYAN}▶ PPT自动生成:{Style.RESET_ALL}
     {Fore.LIGHTMAGENTA_EX}16.{Style.RESET_ALL} {'关闭' if sc.get('ppt_auto_generate') else '开启'}自动生成PPT → {ppt_text}
-    {Fore.LIGHTMAGENTA_EX}17.{Style.RESET_ALL} PPT主题 (当前: {sc.get('ppt_theme','claude')})
+    {Fore.LIGHTMAGENTA_EX}17.{Style.RESET_ALL} PPT主题 (当前: {sc.get('ppt_theme','claude_slides')})
 
     {Fore.CYAN}▶ 数据管理:{Style.RESET_ALL}
     {Fore.YELLOW}V.{Style.RESET_ALL} [STATS] 查看待机统计数据
-    {Fore.YELLOW}S.{Style.RESET_ALL} 💾 保存配置到文件
-    {Fore.RED}R.{Style.RESET_ALL} 🔄 恢复待机默认配置
-    {Fore.RED}0.{Style.RESET_ALL} ↩️  返回主菜单
+    {Fore.YELLOW}S.{Style.RESET_ALL} 保存配置到文件
+    {Fore.RED}R.{Style.RESET_ALL} 恢复待机默认配置
+    {Fore.RED}0.{Style.RESET_ALL} ↩ 返回主菜单
         """)
 
         choice = input(f"{Fore.CYAN}请输入选项 (0-17/V/S/R): {Style.RESET_ALL}").strip()
@@ -6108,7 +7216,7 @@ def _configure_standby_settings():
             for i, (k, v) in enumerate(THEMES.items(), 1):
                 sel = " ← 当前" if k == sc.get("ppt_theme") else ""
                 print(f"  {i}. {v['name']} ({k}){sel}")
-            s = input(f"{Fore.YELLOW}输入主题ID (如 claude/dark/purple/cyan): {Style.RESET_ALL}").strip().lower()
+            s = input(f"{Fore.YELLOW}输入主题ID (如 claude_slides/dark/purple/cyan): {Style.RESET_ALL}").strip().lower()
             if s in THEMES:
                 sc["ppt_theme"] = s
                 print(f"{Fore.GREEN}[OK] 已更新: {s}{Style.RESET_ALL}")
@@ -6124,7 +7232,7 @@ def _configure_standby_settings():
             input(f"{Fore.CYAN}按回车返回...{Style.RESET_ALL}")
         elif choice.upper() == "S":
             if save_standby_config(sc):
-                print(f"{Fore.GREEN}[OK] 待机配置已保存到 Data/standby_config.json{Style.RESET_ALL}")
+                print(f"{Fore.GREEN}[OK] 待机配置已保存到 {os.path.join(DATA_DIR, 'standby_config.json')}{Style.RESET_ALL}")
             else:
                 print(f"{Fore.RED}[ERROR] 保存失败{Style.RESET_ALL}")
         elif choice.upper() == "R":
@@ -6182,7 +7290,8 @@ def _reload_all_globals(new_config: dict):
     global BEHAVIOR_MAX_CONSECUTIVE_AI_REPLIES
     global BEHAVIOR_MIN_REPLY_DELAY_SECONDS, BEHAVIOR_MAX_REPLY_DELAY_SECONDS
     global BEHAVIOR_PREFER_SHORT_REPLIES, COMMENT_MODE
-    global SESSION_MAX_VIDEOS, SESSION_MAX_DURATION_MINUTES
+    global SESSION_MAX_VIDEOS, SESSION_MAX_LEARNED_VIDEOS
+    global SESSION_MAX_DURATION_MINUTES, SESSION_COMPLETION_ACTION
     global REVISIT_ENABLED, PROB_REVISIT, REVISIT_COOLDOWN_MINUTES
     global REVISIT_MIN_SCORE, REVISIT_MAX_PER_VIDEO, REVISIT_PER_VIDEO_COOLDOWN_MINUTES
     global KNOWLEDGE_VERIFY_ENABLED, KNOWLEDGE_VERIFY_USE_WEB, KNOWLEDGE_VERIFY_MIN_SCORE, KNOWLEDGE_VERIFY_AUTO_FIX
@@ -6219,7 +7328,7 @@ def _reload_all_globals(new_config: dict):
     VISION_API_KEY = api.get("vision_api_key", "") or UNIFIED_API_KEY
     VISION_BASE_URL = api.get("vision_base_url", "") or UNIFIED_BASE_URL
 
-    # 🔧 同步更新 core.config 和 core.globals 中的模块级变量
+    # 同步更新 core.config 和 core.globals 中的模块级变量
     try:
         import core.config as _cfg
         import core.globals as _glo
@@ -6227,7 +7336,7 @@ def _reload_all_globals(new_config: dict):
         _cfg.UNIFIED_BASE_URL = UNIFIED_BASE_URL
         _cfg.MODEL_BRAIN = MODEL_BRAIN
         _cfg.MODEL_VISION = MODEL_VISION
-        # 🔧 同步 config dict (xingye_bot 从此读取)
+        # 同步 config dict (xingye_bot 从此读取)
         _cfg.config["api"]["unified_api_key"] = UNIFIED_API_KEY
         _cfg.config["api"]["unified_base_url"] = UNIFIED_BASE_URL
         _cfg.config["api"]["model_brain"] = MODEL_BRAIN
@@ -6380,7 +7489,9 @@ def _reload_all_globals(new_config: dict):
 
     sess = new_config.get("session", {})
     SESSION_MAX_VIDEOS = sess.get("max_videos", 0)
+    SESSION_MAX_LEARNED_VIDEOS = sess.get("max_learned_videos", 0)
     SESSION_MAX_DURATION_MINUTES = sess.get("max_duration_minutes", 0)
+    SESSION_COMPLETION_ACTION = sess.get("completion_action", "stop")
 
     rev = new_config.get("revisit", {})
     REVISIT_ENABLED = rev.get("enabled", True)
@@ -6418,7 +7529,7 @@ def _reload_all_globals(new_config: dict):
     KNOWLEDGE_REVIEW_SAMPLE_SIZE = aiv.get("knowledge_review_sample_size", 3)
 
     ac = new_config.get("active_chat", {})
-    ACTIVE_CHAT_ENABLED = ac.get("enabled", True)
+    ACTIVE_CHAT_ENABLED = ac.get("enabled", False)
     PROB_INITIATE_CHAT = ac.get("prob_initiate", 0.06)
     ACTIVE_CHAT_COOLDOWN_MINUTES = ac.get("cooldown_minutes", 45)
     ACTIVE_CHAT_MAX_PER_SESSION = ac.get("max_initiate_per_session", 3)

@@ -18,6 +18,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from core.config import config, resolve_knowledge_base_dir
+
 from .llm import ModelClient
 from .settings import DATA_DIR, BotSettings
 from .state import BotState
@@ -42,7 +44,7 @@ def _normalize_path(path: str | Path) -> str:
     """统一路径格式为 POSIX 相对路径"""
     p = Path(path).resolve()
     try:
-        kb_root = DATA_DIR.parent / "KnowledgeBase"
+        kb_root = Path(resolve_knowledge_base_dir(config))
         return str(p.relative_to(kb_root))
     except ValueError:
         return str(p)
@@ -115,7 +117,7 @@ class KBSearchEngine:
     def build_index(self, kb_root: str | Path | None = None) -> int:
         """扫描 KnowledgeBase 下所有 .md 文件，构建完整向量索引"""
         if kb_root is None:
-            kb_root = DATA_DIR.parent / "KnowledgeBase"
+            kb_root = resolve_knowledge_base_dir(config)
         kb_root = Path(kb_root)
         if not kb_root.exists():
             return 0

@@ -10,11 +10,19 @@ import hashlib, base64, secrets
 from colorama import Fore, Style
 from utils.storage import get_backup_dir
 from utils.display import mask_secret
+from core.user_data import (
+    DATA_DIR as _USER_DATA_DIR,
+    HIGHLIGHTS_DIR as _USER_HIGHLIGHTS_DIR,
+    KNOWLEDGE_BASE_DIR as _USER_KNOWLEDGE_BASE_DIR,
+    USER_DATA_DIR as _USER_DATA_ROOT,
+    ensure_user_data_dir,
+)
 
 # ===== 路径常量 =====
+# BASE_DIR is source code only. All user-specific data is stored outside the project.
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_DATA_DIR_OVERRIDE = os.getenv("BILI_ACCOUNT_DATA_DIR", "").strip()
-DATA_DIR = os.path.join(BASE_DIR, _DATA_DIR_OVERRIDE) if _DATA_DIR_OVERRIDE else os.path.join(BASE_DIR, "Data")
+USER_DATA_DIR = str(ensure_user_data_dir())
+DATA_DIR = str(_USER_DATA_DIR)
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 BOT_LOCK_FILE = os.path.join(DATA_DIR, "bot.lock")
 BACKUP_DIR = get_backup_dir()
@@ -31,8 +39,8 @@ BOT_DIARY_FILE = os.path.join(DATA_DIR, "bot_diary.json")
 SELF_EVOLUTION_FILE = os.path.join(DATA_DIR, "self_evolution.json")
 AGENT_SKILL_LOG_FILE = os.path.join(DATA_DIR, "agent_skill_log.json")
 RUNTIME_STATE_FILE = os.path.join(DATA_DIR, "bot_runtime_state.json")
-KNOWLEDGE_BASE_DIR = os.path.join(BASE_DIR, "KnowledgeBase")
-HIGHLIGHTS_DIR = os.path.join(BASE_DIR, "highlights")
+KNOWLEDGE_BASE_DIR = str(_USER_KNOWLEDGE_BASE_DIR)
+HIGHLIGHTS_DIR = str(_USER_HIGHLIGHTS_DIR)
 
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -47,10 +55,10 @@ def resolve_knowledge_base_dir(cfg=None):
         kb = cfg.get("knowledge_base_dir") or cfg.get("knowledge", {}).get("base_dir")
         if kb:
             return os.path.join(BASE_DIR, kb) if not os.path.isabs(kb) else kb
-    return os.path.join(BASE_DIR, "KnowledgeBase")
+    return KNOWLEDGE_BASE_DIR
 
 # ===== 敏感词加密 =====
-CIPHER_KEY_FILE = os.path.join(BASE_DIR, ".cipher_key")
+CIPHER_KEY_FILE = os.path.join(USER_DATA_DIR, ".cipher_key")
 
 def _get_or_create_cipher_key():
     """获取或生成加密密钥"""
@@ -95,7 +103,8 @@ os.makedirs(KNOWLEDGE_BASE_DIR, exist_ok=True)
 # ===== 厂商预设（内置官方 OpenAI 兼容格式）=====
 # 默认就是 OpenAI 兼容（/v1/chat/completions），各厂商填入其官方 base_url 与默认模型名。
 # 选了预设 = 自动填好 Base URL + 思考/视觉/快速模型；API Key 仍需用户自己填。
-# base_url / 模型名均来自各厂商官方文档（2026-07 核实）。
+# 厂商会调整模型名、可用区域和计费；预设提供官方兼容端点的起点，
+# 实际可用模型始终以用户厂商控制台中的模型列表为准。
 PROVIDER_PRESETS = {
     "openai": {
         "name": "OpenAI 兼容 (自定义/其他)",
@@ -107,7 +116,7 @@ PROVIDER_PRESETS = {
         "name": "DeepSeek 官网",
         "chat": "deepseek-v4-flash", "vision": "deepseek-v4-flash", "fast": "deepseek-v4-flash",
         "base_url": "https://api.deepseek.com/v1", "format": "openai",
-        "note": "DeepSeek 官方 API。base_url 用 https://api.deepseek.com 或 https://api.deepseek.com/v1 均可（v1 与模型版本无关）。默认 deepseek-v4-flash（便宜快）；要更强推理用 deepseek-v4-pro；开启思考模式传 thinking=true。⚠️ deepseek-chat/deepseek-reasoner 将于 2026/07/24 弃用，请尽快切到 v4 系列。DeepSeek 暂无独立视觉模型，视觉/图片任务可能不支持。",
+        "note": "DeepSeek 官方 API。base_url 用 https://api.deepseek.com 或 https://api.deepseek.com/v1 均可（v1 与模型版本无关）。默认 deepseek-v4-flash（便宜快）；要更强推理用 deepseek-v4-pro；开启思考模式传 thinking=true。deepseek-chat/deepseek-reasoner 将于 2026/07/24 弃用，请尽快切到 v4 系列。DeepSeek 暂无独立视觉模型，视觉/图片任务可能不支持。",
     },
     "qwen": {
         "name": "阿里云百炼 (通义千问 Qwen)",
@@ -133,12 +142,70 @@ PROVIDER_PRESETS = {
         "base_url": "https://open.bigmodel.cn/api/paas/v4", "format": "openai",
         "note": "智谱 BigModel OpenAI 兼容端点。",
     },
+    "openrouter": {"name": "OpenRouter", "chat": "openai/gpt-4.1-mini", "vision": "openai/gpt-4.1-mini", "fast": "openai/gpt-4.1-mini", "base_url": "https://openrouter.ai/api/v1", "format": "openai", "note": "聚合模型平台；模型名以 OpenRouter 模型列表为准。"},
+    "groq": {"name": "GroqCloud", "chat": "llama-3.3-70b-versatile", "vision": "meta-llama/llama-4-scout-17b-16e-instruct", "fast": "llama-3.1-8b-instant", "base_url": "https://api.groq.com/openai/v1", "format": "openai", "note": "Groq 官方 OpenAI 兼容端点。"},
+    "together": {"name": "Together AI", "chat": "meta-llama/Llama-3.3-70B-Instruct-Turbo", "vision": "meta-llama/Llama-3.2-90B-Vision-Instruct-Turbo", "fast": "meta-llama/Llama-3.1-8B-Instruct-Turbo", "base_url": "https://api.together.xyz/v1", "format": "openai", "note": "Together AI 官方 OpenAI 兼容端点。"},
+    "fireworks": {"name": "Fireworks AI", "chat": "accounts/fireworks/models/llama-v3p3-70b-instruct", "vision": "accounts/fireworks/models/qwen2-vl-72b-instruct", "fast": "accounts/fireworks/models/llama-v3p1-8b-instruct", "base_url": "https://api.fireworks.ai/inference/v1", "format": "openai", "note": "Fireworks 官方 OpenAI 兼容端点。"},
+    "mistral": {"name": "Mistral AI", "chat": "mistral-large-latest", "vision": "pixtral-large-latest", "fast": "ministral-8b-latest", "base_url": "https://api.mistral.ai/v1", "format": "openai", "note": "Mistral 官方 OpenAI 兼容端点。"},
+    "cohere": {"name": "Cohere", "chat": "command-a-03-2025", "vision": "command-a-vision-07-2025", "fast": "command-r7b-12-2024", "base_url": "https://api.cohere.com/compatibility/v1", "format": "openai", "note": "Cohere OpenAI compatibility API；请以控制台可用模型为准。"},
+    "xai": {"name": "xAI (Grok)", "chat": "grok-3-mini", "vision": "grok-2-vision-1212", "fast": "grok-3-mini", "base_url": "https://api.x.ai/v1", "format": "openai", "note": "xAI 官方 OpenAI 兼容端点。"},
+    "gemini": {"name": "Google Gemini", "chat": "gemini-2.5-pro", "vision": "gemini-2.5-pro", "fast": "gemini-2.5-flash", "base_url": "https://generativelanguage.googleapis.com/v1beta/openai", "format": "openai", "note": "Google Gemini 的 OpenAI 兼容端点。"},
+    "perplexity": {"name": "Perplexity", "chat": "sonar-pro", "vision": "sonar-pro", "fast": "sonar", "base_url": "https://api.perplexity.ai", "format": "openai", "note": "Perplexity 官方 OpenAI 兼容端点，适合联网检索。"},
+    "cerebras": {"name": "Cerebras", "chat": "llama-3.3-70b", "vision": "llama-3.2-90b-vision", "fast": "llama3.1-8b", "base_url": "https://api.cerebras.ai/v1", "format": "openai", "note": "Cerebras 官方 OpenAI 兼容端点。"},
+    "sambanova": {"name": "SambaNova Cloud", "chat": "Meta-Llama-3.3-70B-Instruct", "vision": "Llama-3.2-90B-Vision-Instruct", "fast": "Meta-Llama-3.1-8B-Instruct", "base_url": "https://api.sambanova.ai/v1", "format": "openai", "note": "SambaNova 官方 OpenAI 兼容端点。"},
+    "nvidia_nim": {"name": "NVIDIA NIM", "chat": "meta/llama-3.3-70b-instruct", "vision": "microsoft/phi-3.5-vision-instruct", "fast": "meta/llama-3.1-8b-instruct", "base_url": "https://integrate.api.nvidia.com/v1", "format": "openai", "note": "NVIDIA API Catalog/NIM OpenAI 兼容端点。"},
+    "deepinfra": {"name": "DeepInfra", "chat": "meta-llama/Meta-Llama-3.3-70B-Instruct", "vision": "meta-llama/Llama-3.2-90B-Vision-Instruct", "fast": "meta-llama/Meta-Llama-3.1-8B-Instruct", "base_url": "https://api.deepinfra.com/v1/openai", "format": "openai", "note": "DeepInfra OpenAI 兼容端点。"},
+    "novita": {"name": "Novita AI", "chat": "meta-llama/llama-3.3-70b-instruct", "vision": "qwen/qwen2.5-vl-72b-instruct", "fast": "meta-llama/llama-3.1-8b-instruct", "base_url": "https://api.novita.ai/openai", "format": "openai", "note": "Novita AI OpenAI 兼容端点。"},
+    "siliconflow": {"name": "硅基流动 SiliconFlow", "chat": "Qwen/Qwen2.5-72B-Instruct", "vision": "Qwen/Qwen2.5-VL-72B-Instruct", "fast": "Qwen/Qwen2.5-7B-Instruct", "base_url": "https://api.siliconflow.cn/v1", "format": "openai", "note": "硅基流动官方 OpenAI 兼容端点。"},
+    "modelscope": {"name": "魔搭 ModelScope", "chat": "Qwen/Qwen2.5-72B-Instruct", "vision": "Qwen/Qwen2.5-VL-72B-Instruct", "fast": "Qwen/Qwen2.5-7B-Instruct", "base_url": "https://api-inference.modelscope.cn/v1", "format": "openai", "note": "魔搭社区推理 API；可用模型因账户和地区而异。"},
+    "minimax": {"name": "MiniMax", "chat": "MiniMax-Text-01", "vision": "MiniMax-VL-01", "fast": "MiniMax-Text-01", "base_url": "https://api.minimax.chat/v1", "format": "openai", "note": "MiniMax 官方 OpenAI 兼容端点。"},
+    "stepfun": {"name": "阶跃星辰 StepFun", "chat": "step-2-16k", "vision": "step-1v-8k", "fast": "step-1-8k", "base_url": "https://api.stepfun.com/v1", "format": "openai", "note": "阶跃星辰官方 OpenAI 兼容端点。"},
+    "baichuan": {"name": "百川智能 Baichuan", "chat": "Baichuan4", "vision": "Baichuan4", "fast": "Baichuan3-Turbo", "base_url": "https://api.baichuan-ai.com/v1", "format": "openai", "note": "百川智能官方 OpenAI 兼容端点。"},
+    "yi": {"name": "零一万物 Yi", "chat": "yi-lightning", "vision": "yi-vision", "fast": "yi-lightning", "base_url": "https://api.lingyiwanwu.com/v1", "format": "openai", "note": "零一万物官方 OpenAI 兼容端点。"},
+    "infini": {"name": "无问芯穹 Infini", "chat": "Qwen2.5-72B-Instruct", "vision": "Qwen2.5-VL-72B-Instruct", "fast": "Qwen2.5-7B-Instruct", "base_url": "https://cloud.infini-ai.com/maas/v1", "format": "openai", "note": "无问芯穹 MaaS OpenAI 兼容端点。"},
+    "ppinfra": {"name": "PPIO 派欧云", "chat": "Qwen2.5-72B-Instruct", "vision": "Qwen2.5-VL-72B-Instruct", "fast": "Qwen2.5-7B-Instruct", "base_url": "https://api.ppinfra.com/v3/openai", "format": "openai", "note": "PPIO 官方 OpenAI 兼容端点。"},
+    "github_models": {"name": "GitHub Models", "chat": "openai/gpt-4.1-mini", "vision": "openai/gpt-4.1-mini", "fast": "openai/gpt-4.1-mini", "base_url": "https://models.github.ai/inference", "format": "openai", "note": "需要 GitHub Token；可用模型以 GitHub Models 目录为准。"},
+    "ollama": {"name": "本机 Ollama", "chat": "qwen2.5:7b", "vision": "llama3.2-vision", "fast": "qwen2.5:3b", "base_url": "http://127.0.0.1:11434/v1", "format": "openai", "note": "本地 OpenAI 兼容服务；请先在 Ollama 拉取对应模型。"},
+    "vllm": {"name": "本地 vLLM", "chat": "your-model-name", "vision": "your-vision-model", "fast": "your-model-name", "base_url": "http://127.0.0.1:8000/v1", "format": "openai", "note": "本地 vLLM 默认服务地址；模型名必须与启动参数一致。"},
+    "lmstudio": {"name": "本机 LM Studio", "chat": "local-model", "vision": "local-model", "fast": "local-model", "base_url": "http://127.0.0.1:1234/v1", "format": "openai", "note": "LM Studio Local Server 的常用 OpenAI 兼容地址。"},
+    "localai": {"name": "本机 LocalAI", "chat": "gpt-4", "vision": "gpt-4-vision-preview", "fast": "gpt-4", "base_url": "http://127.0.0.1:8080/v1", "format": "openai", "note": "LocalAI OpenAI 兼容地址；模型名取决于本机安装内容。"},
 }
 
 # ===== 默认配置模板 =====
+POLITICAL_SAFETY_DEFAULT_KEYWORDS = [
+    # This is an editable outbound-interaction blocklist, not a classifier or
+    # a claim that every sensitive topic has been enumerated.
+    # Chinese political figures and institutions
+    "习近平", "毛泽东", "邓小平", "江泽民", "胡锦涛", "李克强", "温家宝",
+    "赵紫阳", "李鹏", "薄熙来", "周永康", "王岐山", "刘少奇", "林彪",
+    "中共中央", "中国共产党", "中共", "国务院", "中央军委", "政治局",
+    # Taiwan and cross-strait terms
+    "台湾", "台独", "台湾独立", "中华民国", "两岸关系", "两岸统一", "统一台湾",
+    "武统", "一国两制", "九二共识", "台湾问题", "台海", "中华民国政府",
+    # Hong Kong, Xinjiang, Tibet and related separatist terms
+    "香港", "反送中", "香港国安法", "港独", "新疆", "再教育营", "东突",
+    "疆独", "西藏", "藏独", "达赖", "法轮功", "法轮大法",
+    # Historical and protest-related topics
+    "六四", "天安门事件", "八九民运", "文化大革命", "反右运动", "大跃进",
+    "白纸革命", "乌鲁木齐中路", "非法集会", "暴力抗议", "政治运动",
+    # International political figures and conflicts
+    "特朗普", "拜登", "普京", "泽连斯基", "内塔尼亚胡", "俄乌战争",
+    "以色列", "巴勒斯坦", "加沙", "北约", "制裁",
+    # Explicit political and extremist language
+    "政治敏感", "政治人物", "政治事件", "政治地区", "分裂主义", "极端主义",
+    "恐怖主义", "煽动暴力", "政党攻击", "选举操纵", "仇恨言论", "辱华",
+    "靖国神社", "民族主义", "独裁",
+]
+
+PROMPT_INJECTION_DEFAULT_TERMS = [
+    "system", "system prompt", "developer message", "提示词", "系统提示",
+    "忽略之前指令", "越狱", "jailbreak", "开发者模式", "管理模式",
+    "超级用户", "超级管理员", "管理员", "切换模式", "内部设定",
+]
+
 DEFAULT_CONFIG = {
     "api": {
-        "unified_api_key": "",
+        "unified_api_key": "", "max_retries": 3, "fallback_retries": 2,
         "unified_base_url": "",
         "model_brain": "",
         "model_vision": "",
@@ -148,6 +215,16 @@ DEFAULT_CONFIG = {
     },
     "model_presets": PROVIDER_PRESETS,
     "active_preset": "",
+    "project_info": {
+        "name": "Bilibili Learning Bot",
+        "summary": "本地运行的 B 站智能学习与互动工作台",
+        "homepage": "https://bxya.top/",
+        "repository": "https://github.com/xiaoyaya191/bilibili_learning_bot",
+        "license": "", "contact": "", "qq_group_url": "https://qun.qq.com/join.html?gc=1056941856"
+    },
+    "update": {
+        "retry_count": 5
+    },
     "interaction": {
         "coin_threshold": 8.0, "fav_threshold": 8.5, "interest_threshold": 6.5,
         "learn_min_score": 6.0, "learn_min_duration_seconds": 60,
@@ -155,7 +232,7 @@ DEFAULT_CONFIG = {
         "prob_reply_trigger": 0.15, "prob_coin": 0.25, "prob_fav": 0.8,
         "prob_like_solo": 0.5, "prob_comment_others": 0.3,
         "comment_check_interval": 300, "max_replies_per_check": 3,
-        "random_enabled": True,
+        "random_enabled": True, "comment_check_enabled": True,
         "coin_cooldown_minutes": 0, "coin_max_per_hour": 0
     },
     "energy": {
@@ -164,22 +241,34 @@ DEFAULT_CONFIG = {
         "round_interval_min": 60, "round_interval_max": 180,
         "video_interval_min": 1, "video_interval_max": 5
     },
-    "persona": {"active_persona": "默认人格", "prompt_name": "AI小助手", "self_description": ""},
+    "persona": {"active_persona": "默认人格", "prompt_name": "", "self_description": ""},
     "mood": {
         "default_mood": "平静", "mood_volatility": 1.0,
         "random_enabled": False, "random_interval_minutes": 5,
         "custom_enabled": False, "custom_mood": ""
     },
     "video": {
-        "mode": "smart", "max_duration_seconds": 900, "frame_count": 12,
+        "mode": "smart", "browse_mode": "candidate_review", "max_duration_seconds": 900, "frame_count": 12,
         "download_interest_threshold": 7.0, "download_dir": "",
-        "delete_video_after_understand": True, "filter_mode": "cover_and_title",
-        "frame_anchor_mode": "bilinote",
-        "quality": "best"  # 下载画质: best=自动最高/1080p/720p/480p/360p
+        "delete_video_after_understand": True,         "filter_mode": "cover_and_title",
+        "frame_note_mode": "visual_note",
+        "visual_note_frame_interval": 6,
+        "visual_note_max_frames": 240,
+        "visual_note_grid_cols": 3,
+        "visual_note_grid_rows": 3,
+        "candidate_pool_size": 20,
+        "quality": "best",  # 下载画质: best=自动最高/1080p/720p/480p/360p
+        "custom_video_prompt": "请完整覆盖视频全过程，像教程/部署文档一样逐步讲解，保留关键细节、命令、参数、配置和截图，不要省略步骤。"
     },
     "vision": {
+        # Disabled by default because many OpenAI-compatible text endpoints do
+        # not accept image_url content blocks. Users can opt in after choosing
+        # a vision-capable provider/model.
+        "multimodal_enabled": False,
         "cover_enabled": True, "frames_enabled": True, "comment_images_enabled": True,
-        "max_comment_images": 5, "frame_count": 8
+        "analyze_frames_with_sufficient_subtitles": False,
+        "max_comment_images": 5, "frame_count": 8,
+        "smart_frame_enabled": False, "smart_frame_min": 10, "smart_frame_max": 60
     },
     "asr": {
         "enabled": False, "backend": "funasr", "whisper_model": "base",
@@ -191,7 +280,40 @@ DEFAULT_CONFIG = {
     },
     "private_message": {
         "enabled": True, "auto_reply": True, "check_interval": 120,
-        "max_replies_per_check": 3, "only_recent_seconds": 900
+        "max_replies_per_check": 3, "only_recent_seconds": 900,
+        "agent": {
+            "enabled": True,
+            "allow_account_actions": True,
+            "allow_social_follow_actions": True,
+            "allow_proactive_social_follow": True,
+            "social_follow_daily_limit": 2,
+            "sender_public_context_enabled": True,
+            "sender_dynamics_enabled": True,
+            "sender_public_context_refresh_hours": 12,
+            "burst_merge_enabled": True,
+            "burst_merge_window_seconds": 3,
+            "coin_reserve": 5,
+            "coin_abundant_threshold": 50,
+        },
+    },
+    "per_video_check": {
+        "enabled": True,
+        "check_at_notifications": True,
+        "check_private_messages": True,
+        "check_own_comments": True,
+        "max_at_per_check": 5,
+        "cooldown_seconds": 10,
+    },
+    "approval_review": {
+        "enabled": True,
+        "action_types": {
+            "video_like": True, "follow_up": True, "send_danmaku": True,
+            "public_comment": True, "private_reply": True, "coin": True,
+            "favorite": True, "knowledge_write": False, "file_export": False
+        }
+    },
+    "up_learning": {
+        "per_video_timeout_seconds": 600
     },
     "reply_safety": {
         "enabled": True, "block_on_incoming": True, "block_on_outgoing": True,
@@ -213,18 +335,32 @@ DEFAULT_CONFIG = {
             "fVXNQI/RyMycButo", "c1jfQbvc", "fF7oTbPC"
         ]
     },
+    "prompt_injection": {
+        "enabled": True,
+        "custom_terms": PROMPT_INJECTION_DEFAULT_TERMS.copy(),
+    },
     "diary": {
-        "enabled": True, "auto_enabled": True, "auto_interval_minutes": 60,
+        "enabled": False, "auto_enabled": False, "auto_interval_minutes": 60,
         "min_events_for_auto": 3
     },
     "self_evolution": {
-        "enabled": True, "auto_enabled": True, "reflect_interval_events": 8,
+        "enabled": False, "auto_enabled": False, "reflect_interval_events": 8,
         "min_events_for_reflect": 3, "auto_apply": True
     },
     "agent": {
         "enabled": True, "auto_enabled": True, "max_steps_per_plan": 5,
         "max_search_results": 8, "max_videos_per_plan": 5,
-        "auto_min_score": 7.5, "cooldown_minutes": 60
+        "auto_min_score": 7.5, "cooldown_minutes": 60,
+        "deep_learning_enabled": True, "deep_learning_max_videos": 2,
+        "deep_learning_timeout_seconds": 180,
+    },
+    "learning_workflow": {
+        "read_comments": True,
+        "read_danmaku": True,
+    },
+    "engagement": {
+        "recognize_calls_to_action": True,
+        "allow_keyword_comment_campaigns": False,
     },
     "behavior": {
         "comment_mode": "real",
@@ -236,14 +372,60 @@ DEFAULT_CONFIG = {
         "max_reply_delay_seconds": 50,
         "prefer_short_replies": True
     },
-    "session": {"max_videos": 0, "max_duration_minutes": 0},
+    "session": {
+        "max_videos": 0,
+        "max_learned_videos": 0,
+        "max_duration_minutes": 0,
+        "completion_action": "stop",
+    },
     "revisit": {
         "enabled": True, "prob_revisit": 0.25, "revisit_cooldown_minutes": 15,
         "min_score": 7.5, "max_per_video": 2, "per_video_cooldown_minutes": 240
     },
     "active_chat": {
-        "enabled": True, "prob_initiate": 0.06, "cooldown_minutes": 45,
-        "max_initiate_per_session": 3
+        "enabled": False, "prob_initiate": 0.06, "cooldown_minutes": 45,
+        "max_initiate_per_session": 3, "quiet_hours_enabled": True,
+        "quiet_start_hour": 22, "quiet_end_hour": 8,
+        "whitelist_enabled": False, "whitelist_uids": [],
+        "target_mode": "any", "active_hours_enabled": False,
+        "active_start_hour": 9, "active_end_hour": 23,
+        "custom_prompt": ""
+    },
+    "owner_share": {
+        "enabled": False,
+        "owner_bili_uid": "",
+        "share_learned": True,
+        "share_fun": True,
+        "min_score": 7.5,
+        "probability": 0.35,
+        "extra_message_probability": 0.65,
+        "daily_limit": 3,
+        "cooldown_minutes": 30,
+        "willingness": 0.35,
+        "match_tags": [],
+        "receiver_affinity_min": 0,
+        "custom_prompt": "",
+    },
+    "quota_alert": {
+        "enabled": False,
+        "email_enabled": False,
+        "smtp_host": "",
+        "smtp_port": 465,
+        "smtp_security": "ssl",
+        "smtp_username": "",
+        "smtp_sender": "",
+        "recipient_email": "",
+        "smtp_password_encrypted": "",
+        "alert_on_balance_error": True,
+        "spend_limit": 0.0,
+        "balance_threshold": 0.0,
+        "cooldown_minutes": 60,
+    },
+    "local_favorites": {
+        "auto_collect_enabled": True,
+        "min_score": 8.0,
+        "folder_name": "AI 精选",
+        "require_interest_match": True,
     },
     "up_follow": {
         "enabled": True, "auto_follow_prob": 0.08, "max_daily_follows": 3,
@@ -322,6 +504,9 @@ DEFAULT_CONFIG = {
         "proxy": "",
         "allow_web_local_files": False,
     },
+    "network": {
+        "proxy": {"enabled": False, "url": ""},
+    },
     "browser_extension": {"enabled": False, "port": 9527, "subtitle_direct_capture": True},
     "ai_subtitle_verify": {"enabled": True, "knowledge_review_interval": 10, "knowledge_review_sample_size": 3},
     "cooldown": {
@@ -339,8 +524,29 @@ DEFAULT_CONFIG = {
         "max_actions_in_log": 2000, "max_recommendation_log": 200,
         "aversion_auto_blacklist_threshold": 3, "aversion_score_block_threshold": 0.7,
         "aversion_score_warn_threshold": 0.4
+    },
+    "ob": {
+        "enabled": False,
+        "base_url": "http://127.0.0.1:8420",
+        "auto_launch": False,
+        "launch_command": "openbiliclaw serve",
+        "launch_cwd": "",
+        "health_check_timeout_seconds": 5,
+        "recommendation_fetch_limit": 20,
+        "feedback_enabled": True,
+        "event_report_enabled": True,
+        "profile_sync_enabled": True,
+        "explore_mode_fallback": True,
+        "explore_pools": ["科技", "编程", "物理", "数学", "历史", "哲学"],
+        "curiosity_keyword_ttl_hours": 24,
+        "audit_enabled": True,
+        "ab_test_enabled": True,
+        "ab_window_size": 200
     }
 }
+
+
+DEFAULT_CONFIG["reply_safety"]["blocked_keywords"] = POLITICAL_SAFETY_DEFAULT_KEYWORDS.copy()
 
 
 def normalize_config(cfg):
@@ -358,6 +564,18 @@ def normalize_config(cfg):
         for old_key, new_key in legacy_pairs.items():
             if not api_cfg.get(new_key) and api_cfg.get(old_key):
                 api_cfg[new_key] = api_cfg.get(old_key)
+    # Diary and persona evolution are still internal preview features.  Keep
+    # them disabled even when an older web page submits a full, stale config.
+    # This prevents background jobs from running or emitting preview-only logs.
+    diary = cfg.setdefault("diary", {})
+    if isinstance(diary, dict):
+        diary["enabled"] = False
+        diary["auto_enabled"] = False
+    evolution = cfg.setdefault("self_evolution", {})
+    if isinstance(evolution, dict):
+        evolution["enabled"] = False
+        evolution["auto_enabled"] = False
+        evolution["auto_apply"] = False
     return cfg
 
 
@@ -369,6 +587,14 @@ def load_config():
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 cfg = json.load(f)
             cfg = normalize_config(cfg)
+            # 清洗脱敏占位符：'[已隐藏]' 视为未配置（避免被当真实 key 使用）
+            _api = cfg.setdefault("api", {})
+            for _k in ("unified_api_key", "vision_api_key"):
+                if _api.get(_k) == "[已隐藏]":
+                    _api[_k] = ""
+            _fb = cfg.setdefault("fallback_provider", {})
+            if _fb.get("api_key") == "[已隐藏]":
+                _fb["api_key"] = ""
             for key in DEFAULT_CONFIG:
                 if key not in cfg:
                     cfg[key] = DEFAULT_CONFIG[key]
@@ -400,7 +626,21 @@ def save_config(cfg):
         tmp = CONFIG_FILE + '.tmp'
         with open(tmp, 'w', encoding='utf-8') as f:
             json.dump(cfg, f, ensure_ascii=False, indent=4)
-        os.replace(tmp, CONFIG_FILE)
+        # Windows 下若 config.json 短暂被其他进程（面板/机器人/杀毒）占用，
+        # os.replace 会抛 PermissionError 导致"保存失败: Unable to save ..."。
+        # 这里做短重试，把瞬态占用变成无感成功。
+        import time as _time
+        last_err = None
+        for attempt in range(4):
+            try:
+                os.replace(tmp, CONFIG_FILE)
+                last_err = None
+                break
+            except PermissionError as exc:
+                last_err = exc
+                _time.sleep(0.12 * (attempt + 1))
+        if last_err is not None:
+            raise last_err
         # 存完后解密回内存，保持内存中明文
         if kw_list:
             cfg["reply_safety"]["blocked_keywords"] = kw_list
@@ -415,11 +655,11 @@ def save_config(cfg):
 
 
 def get_bot_name():
-    return config.get("persona", {}).get("prompt_name", "AI小助手")
+    return config.get("persona", {}).get("prompt_name", "")
 
 
 def get_config_or_env(section, key, env_name):
-    # 🔧 优先环境变量，其次配置文件，兜底空字符串
+    # 优先环境变量，其次配置文件，兜底空字符串
     val = os.getenv(env_name)
     if val is not None:
         return val
@@ -489,9 +729,9 @@ _CONFIG_PATHS = {
     "PROB_COMMENT_OTHERS":   (("interaction", "prob_comment_others"), 0.3),
     "PRIVATE_MESSAGE_ENABLED": (("private_message", "enabled"), True),
     "PRIVATE_MESSAGE_CHECK_INTERVAL": (("private_message", "check_interval"), 120),
-    "DIARY_ENABLED":         (("diary", "enabled"), True),
-    "DIARY_AUTO_ENABLED":    (("diary", "auto_enabled"), True),
-    "EVOLUTION_ENABLED":     (("self_evolution", "enabled"), True),
+    "DIARY_ENABLED":         (("diary", "enabled"), False),
+    "DIARY_AUTO_ENABLED":    (("diary", "auto_enabled"), False),
+    "EVOLUTION_ENABLED":     (("self_evolution", "enabled"), False),
     "AGENT_ENABLED":         (("agent", "enabled"), True),
     "AGENT_DIVE_MAX_VIDEOS": (("agent", "dive_max_videos"), 10),
     "AGENT_MAX_SEARCH_RESULTS":(("agent", "max_search_results"), 8),
@@ -504,16 +744,31 @@ _CONFIG_PATHS = {
     "FALLBACK_PROVIDER_NAME":(("fallback_provider", "name"), "chatanywhere"),
     "PSYCHO_ENGINE_ENABLED": (("psycho_engine", "enabled"), True),
     "SESSION_MAX_VIDEOS":    (("session", "max_videos"), 0),
+    "SESSION_MAX_LEARNED_VIDEOS": (("session", "max_learned_videos"), 0),
     "SESSION_MAX_DURATION_MINUTES": (("session", "max_duration_minutes"), 0),
+    "SESSION_COMPLETION_ACTION": (("session", "completion_action"), "stop"),
     "BEHAVIOR_COMMENT_USER_COOLDOWN_MINUTES": (("behavior", "comment_user_cooldown_minutes"), 60),
     "BEHAVIOR_PRIVATE_REPLY_COOLDOWN_MINUTES": (("behavior", "private_reply_cooldown_minutes"), 3),
+    "OB_ENABLED":              (("ob", "enabled"), False),
+    "OB_BASE_URL":             (("ob", "base_url"), "http://127.0.0.1:8420"),
+    "OB_AUTO_LAUNCH":          (("ob", "auto_launch"), False),
+    "OB_LAUNCH_CWD":           (("ob", "launch_cwd"), ""),
+    "OB_LAUNCH_COMMAND":       (("ob", "launch_command"), "openbiliclaw serve"),
+    "OB_REC_FETCH_LIMIT":      (("ob", "recommendation_fetch_limit"), 20),
+    "OB_FEEDBACK_ENABLED":     (("ob", "feedback_enabled"), True),
+    "OB_EVENT_REPORT_ENABLED": (("ob", "event_report_enabled"), True),
+    "OB_PROFILE_SYNC_ENABLED":     (("ob", "profile_sync_enabled"), True),
+    "OB_CURIOSITY_TTL_HOURS": (("ob", "curiosity_keyword_ttl_hours"), 24),
+    "OB_AUDIT_ENABLED":       (("ob", "audit_enabled"), True),
+    "OB_AB_TEST_ENABLED":     (("ob", "ab_test_enabled"), True),
+    "OB_AB_WINDOW_SIZE":      (("ob", "ab_window_size"), 200),
 }
 
 _SPECIAL_GETTERS = {}
 
 def _get_vision_api_key():
     val = config.get("api", {}).get("vision_api_key")
-    if val:
+    if val and val != "[已隐藏]":
         return val
     return get_config_or_env("api", "unified_api_key", "BILI_AI_API_KEY")
 

@@ -8,13 +8,16 @@ from datetime import datetime
 from html.parser import HTMLParser
 
 from core.config import config, KNOWLEDGE_BASE_DIR
-# 从 config 实时读取，避免 import * 缓存问题
-def _get_model_brain():
-    return config.get("api", {}).get("model_brain", "")
 from utils.display import log
 from utils.helpers import _mask_urls
 from api.subtitles import SYSTEM_PROMPT_KNOWLEDGE_VERIFY
-from openai import OpenAI
+from brain.decision import decode_ai_mapping
+
+# ── 统一 AI 调用（不再依赖 openai） ──
+async def _ai_chat(messages, timeout=120, temperature=0.7):
+    from services._services_ai import call_ai
+    return await call_ai(messages=messages, timeout=timeout,
+                         temperature=temperature, verbose=False)
 
 async def _fetch_search_page(client, url, params=None, headers_extra=None):
     """通用搜索页面抓取（带超时和异常处理）。"""
@@ -166,15 +169,14 @@ async def verify_knowledge_with_ai(knowledge_content: str, video_title: str, web
 请逐条核实，判断是否有错误、过时或需要补充的内容。"""
     
     try:
-        client = OpenAI(api_key=config.get("api", {}).get("unified_api_key", ""), base_url=config.get("api", {}).get("unified_base_url", ""), timeout=120)
-        resp = client.chat.completions.create(
-            model=_get_model_brain(),
+        raw = await _ai_chat(
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT_KNOWLEDGE_VERIFY},
                 {"role": "user", "content": verify_context}
-            ]
+            ],
+            timeout=120,
         )
-        raw = resp.choices[0].message.content.strip()
+        raw = raw.strip()
         start = raw.find("{")
         # [FIX] 嵌套匹配提取JSON，防止 rfind 被多花括号干扰
         if start >= 0:
@@ -194,7 +196,10 @@ async def verify_knowledge_with_ai(knowledge_content: str, video_title: str, web
                 end = raw.rfind("}")
                 if end >= start:
                     raw = raw[start:end + 1]
-        result = json.loads(raw)
+        result = decode_ai_mapping(raw, (
+            "overall_reliable", "overall_score", "issues", "supplements",
+            "recommend_rewrite", "rewrite_reason", "corrected_content",
+        ))
         # 防御：如果 AI 返回的是非 dict（如纯字符串），用默认值兜底
         if not isinstance(result, dict):
             log(f"知识验证AI返回非dict类型({type(result).__name__})，使用默认值", "WARN")
@@ -224,13 +229,13 @@ def backup_and_rewrite_knowledge(file_path: str, corrected_content: str, verify_
     try:
         # 备份原文件
         shutil.copy2(file_path, backup_path)
-        log(f"📦 原知识文件已备份: {backup_path}", "KB")
+        log(f"原知识文件已备份: {backup_path}", "KB")
         
         # 添加验证标记到新内容
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         verify_header = (
             f"\n\n---\n\n"
-            f"## 🔍 知识验证记录\n\n"
+            f"## 知识验证记录\n\n"
             f"- **验证时间**: {timestamp}\n"
             f"- **可靠性评分**: {verify_result.get('overall_score', 0):.0%}\n"
             f"- **发现的问题**: {len(verify_result.get('issues', []))} 处\n"
@@ -252,7 +257,7 @@ def backup_and_rewrite_knowledge(file_path: str, corrected_content: str, verify_
 
 
 # ==============================================================================
-# 🔑 BiliClient 类
+# BiliClient 类
 # ==============================================================================
 # [bili/client.py] BiliClient
 # [bili/auth.py] login_bilibili

@@ -19,6 +19,19 @@ from utils.display import log
 from utils.helpers import _mask_urls
 from api.throttle import _bili_throttle, _bili_trigger_cooldown
 
+# [FIX] brotli 解码失败修复：不向 B 站请求 br 压缩（详见 utils/bili_compat.py）
+from utils.bili_compat import patch_bili_api_headers
+patch_bili_api_headers()
+
+# [FIX] h2 未安装时 httpx(http2=True) 会令所有请求抛异常。
+# 缺失则自动回退 HTTP/1.1，并提示一次安装建议（pip install httpx[http2]）。
+try:
+    import h2  # noqa: F401
+    _HTTP2_AVAILABLE = True
+except ImportError:
+    _HTTP2_AVAILABLE = False
+    log("未安装 h2 包，HTTP/2 已自动回退为 HTTP/1.1（建议 pip install httpx[http2]）", "WARN")
+
 class BiliClient:
     def __init__(self):
         self.credential = None
@@ -32,6 +45,9 @@ class BiliClient:
         # [FIX] 视频元数据缓存：避免重复 get_video_meta
         self._video_meta_cache = {}  # bvid -> (meta_dict, timestamp)
         self._video_meta_cache_ttl = 300  # 5分钟
+        self._recommendation_cache = []
+        self._recommendation_cache_ts = 0.0
+        self._recommendation_cache_ttl = 300
 
     def _load_credential(self):
         if not os.path.exists(COOKIE_FILE):
@@ -99,7 +115,7 @@ class BiliClient:
         _logged = False
         for attempt in range(5):
             try:
-                await _bili_throttle()  # 🔒 全局节流
+                await _bili_throttle()  # 全局节流
                 log("正在验证账号有效性...", "LOGIN")
                 my_info = await user.get_self_info(self.credential)
                 self.uid = my_info.get('mid')
@@ -108,7 +124,7 @@ class BiliClient:
             except Exception as e:
                 err_msg = str(e)
                 if ('-799' in err_msg or '请求过于频繁' in err_msg) and attempt < 4:
-                    _bili_trigger_cooldown()  # 🔒 启动全局冷却
+                    _bili_trigger_cooldown()  # 启动全局冷却
                     # 指数退避：2^(attempt+1) * [2, 3.5] 秒
                     wait = (2 ** (attempt + 1)) * random.uniform(2.0, 3.5)
                     if not _logged:
@@ -128,7 +144,7 @@ class BiliClient:
         """
         if self._http_client is None or getattr(self._http_client, 'is_closed', False):
             self._http_client = httpx.AsyncClient(
-                http2=True,
+                http2=_HTTP2_AVAILABLE,
                 timeout=httpx.Timeout(20.0, connect=10.0),
                 limits=httpx.Limits(
                     max_keepalive_connections=10,
@@ -165,27 +181,31 @@ class BiliClient:
             log(f"WBI 密钥刷新失败: {e}", "WARN")
         return False
 
+    # WBI mixin key 重排索引表（与 bilibili_api 17.4.1 utils/network.py 的 OE 一致）
+    _WBI_OE = [46,47,18,2,53,8,23,32,15,50,10,31,58,3,45,35,27,43,5,49,33,9,
+               42,19,29,28,14,39,12,38,41,13,37,48,7,16,24,55,40,61,26,17,0,1,
+               60,51,30,4,22,25,54,21,56,59,6,63,57,62,11,36,20,34,44,52]
+
     def _wbi_sign(self, params: dict) -> dict:
         """为参数字典添加 WBI 签名 (w_rid + wts)，不修改原字典。
 
-        B站 WBI v3 签名算法：
-        1. 拼接 mixin = img_key + sub_key
-        2. 对 params 排序后拼接 query string
-        3. w_rid = md5(query_string + mixin)
+        [FIX] 与 bilibili_api 17.4.1 的 _get_mixin_key/_enc_wbi 严格一致：
+        1. mixin_key = (img_key + sub_key) 按 OE 表重排后取前 32 位
+        2. params 补充 wts 与默认 web_location=1550101
+        3. w_rid = md5(urlencode(排序后参数) + mixin_key)
         """
         if not self._wbi_keys:
             return dict(params)
-        import hashlib
         img_key, sub_key = self._wbi_keys
-        mixin = img_key + sub_key
-        wts = int(time.time())
+        ae = img_key + sub_key
+        mixin_key = ''.join(ae[i] if i < len(ae) else '' for i in self._WBI_OE)[:32]
         signed = dict(params)
-        signed['wts'] = wts
-        # 按 key 字母序排序拼接
-        sorted_items = sorted(signed.items(), key=lambda x: x[0])
-        query_str = '&'.join(f'{k}={v}' for k, v in sorted_items)
-        w_rid = hashlib.md5((query_str + mixin).encode()).hexdigest()
-        signed['w_rid'] = w_rid
+        signed['wts'] = int(time.time())
+        if not signed.get('web_location'):
+            signed['web_location'] = 1550101
+        from urllib.parse import urlencode
+        query_str = urlencode(sorted(signed.items()))
+        signed['w_rid'] = hashlib.md5((query_str + mixin_key).encode()).hexdigest()
         return signed
 
     async def _wbi_get(self, url: str, params: dict = None, **kwargs):
@@ -223,23 +243,61 @@ class BiliClient:
                              key=lambda k: self._video_meta_cache[k][1])
                 del self._video_meta_cache[oldest]
 
+    @staticmethod
+    def _is_transient_network_error(error: Exception) -> bool:
+        """只识别可安全重试的网络瞬断，不覆盖 B 站业务错误。"""
+        message = str(error).lower()
+        markers = (
+            "resolving timed out", "temporary failure in name resolution",
+            "name or service not known", "getaddrinfo", "curl: (28)",
+            "readtimeout", "connecttimeout", "connect timeout",
+            "network is unreachable", "connection reset", "connection aborted",
+        )
+        return any(marker in message for marker in markers)
+
+    def _cached_recommendations(self) -> list:
+        if (self._recommendation_cache
+                and time.time() - self._recommendation_cache_ts < self._recommendation_cache_ttl):
+            return list(self._recommendation_cache)
+        return []
+
     async def get_recommendations(self):
-        _logged = False
+        rate_limit_logged = False
+        network_attempts = 3
         for attempt in range(5):
             try:
-                await _bili_throttle()  # 🔒 全局节流
-                res = await homepage.get_videos(credential=self.credential)
-                return [item for item in res['item'] if 'bvid' in item]
+                await _bili_throttle()  # 全局节流
+                # bilibili-api 底层可能走 curl；DNS 卡住时不能让后台预取无限等待。
+                res = await asyncio.wait_for(
+                    homepage.get_videos(credential=self.credential), timeout=12.0)
+                items = [item for item in res.get('item', []) if 'bvid' in item]
+                if items:
+                    self._recommendation_cache = list(items)
+                    self._recommendation_cache_ts = time.time()
+                return items
             except Exception as e:
                 err_msg = str(e)
                 if ('-799' in err_msg or '请求过于频繁' in err_msg) and attempt < 4:
-                    _bili_trigger_cooldown()  # 🔒 启动全局冷却
+                    _bili_trigger_cooldown()  # 启动全局冷却
                     # 指数退避：2^(attempt+1) * [2, 3.5] 秒
                     wait = (2 ** (attempt + 1)) * random.uniform(2.0, 3.5)
-                    if not _logged:
+                    if not rate_limit_logged:
                         log("[WARN] 推荐流触发-799，全局冷却已启动，静默重试...", "WARN")
-                        _logged = True
+                        rate_limit_logged = True
                     await asyncio.sleep(wait)
+                elif self._is_transient_network_error(e) or isinstance(e, asyncio.TimeoutError):
+                    if attempt < network_attempts - 1:
+                        wait = 2 ** attempt
+                        log(f"[WARN] 推荐流网络异常，{wait}s 后重试 ({attempt + 1}/{network_attempts}): {err_msg[:80]}", "WARN")
+                        await asyncio.sleep(wait)
+                        continue
+                    cached = self._cached_recommendations()
+                    if cached:
+                        age = int(time.time() - self._recommendation_cache_ts)
+                        log(f"[WARN] 推荐流网络暂不可用，使用 {age}s 前缓存的 {len(cached)} 条推荐", "WARN")
+                        return cached
+                    log("[WARN] 推荐流网络暂不可用，稍后会自动重试，不影响当前视频分析", "WARN")
+                    return []
                 else:
                     log(f"获取推荐失败: {e}", "ERROR")
                     return []
@@ -249,7 +307,7 @@ class BiliClient:
         _logged = False
         for attempt in range(4):
             try:
-                await _bili_throttle()  # 🔒 全局节流（含冷却检查）
+                await _bili_throttle()  # 全局节流（含冷却检查）
                 c = await comment.get_comments(
                     oid=aid,
                     type_=CommentResourceType.VIDEO,
@@ -281,7 +339,7 @@ class BiliClient:
 
     async def report_history(self, bvid, played_time=30):
         """上报观看历史（带节流+重试），模拟真实客户端心跳。"""
-        await _bili_throttle("上报历史")  # 🔒 全局节流
+        await _bili_throttle("上报历史")  # 全局节流
         
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
@@ -302,14 +360,20 @@ class BiliClient:
                 if view_data['code'] != 0:
                     err_msg = str(view_data)
                     if '-799' in err_msg and attempt < 4:
-                        _bili_trigger_cooldown()  # 🔒 启动全局冷却
+                        _bili_trigger_cooldown()  # 启动全局冷却
                         wait = (2 ** (attempt + 1)) * random.uniform(2.0, 3.5)
                         await asyncio.sleep(wait)
                         continue
                     return {'code': -1, 'msg': f"无法获取视频信息: {view_data}"}
 
-                aid = view_data['data']['aid']
-                cid = view_data['data']['cid']
+                view_data_fallback = view_data.get('data')
+                if not view_data_fallback or not isinstance(view_data_fallback, dict):
+                    log(f"视频信息返回异常: {bvid}", "ERROR")
+                    return {'code': -1, 'msg': f"视频信息data为空: {view_data}"}
+                aid = view_data_fallback.get('aid')
+                cid = view_data_fallback.get('cid')
+                if not aid or not cid:
+                    return {'code': -1, 'msg': f"无法获取aid/cid: {view_data}"}
 
                 ts = int(time.time())
                 start_payload = {
@@ -383,7 +447,24 @@ class BiliClient:
         try:
             u = user.User(uid, credential=self.credential)
             await u.modify_relation(user.RelationType.SUBSCRIBE)
-            return {"code": 0, "msg": f"已关注 UID:{uid}"}
+            # [FIX] 执行后验证：B站可能返回成功但实际未生效（风控/降权）。
+            # attribute 是关系位标志：2=普通关注 6=特别关注(互关) 8=悄悄关注，
+            # 非 0 即关注已生效；旧白名单 (1,2) 会把悄悄关注(attribute=8)误报成风控失败。
+            try:
+                relation = await u.get_relation()
+                attribute = int((relation or {}).get("attribute", 0) or 0)
+                # [A2] 偶发生效延迟：等 2.5s 复查一次，仍为 0 才判定风控失败
+                if attribute == 0:
+                    await asyncio.sleep(2.5)
+                    relation = await u.get_relation()
+                    attribute = int((relation or {}).get("attribute", 0) or 0)
+                if attribute == 0:
+                    return {"code": -1, "msg": f"关注接口已调用但未生效(可能被B站风控，稍后通常会自动恢复)，UID:{uid}"}
+                _label = {2: "已关注", 6: "已设为特别关注", 8: "已悄悄关注"}.get(attribute)
+                return {"code": 0, "msg": f"{_label or '已关注'} UID:{uid}"}
+            except Exception as ve:
+                # 验证接口偶发失败时不阻断执行，仅提示
+                return {"code": 0, "msg": f"已关注 UID:{uid}（验证跳过: {ve}）"}
         except Exception as e:
             err_str = str(e)
             # 已经是关注状态（B站错误码22014），不算失败
@@ -445,7 +526,8 @@ class BiliClient:
                     "aid": item.get("aid", 0),
                     "play": item.get("play", 0),
                     "created": item.get("created", 0),
-                    "description": item.get("description", "")[:60]
+                    "description": item.get("description", "")[:160],
+                    "pic": item.get("pic", ""),
                 }
                 for item in items[:limit]
             ]
@@ -529,7 +611,12 @@ class BiliClient:
             meta = await self._get_video_meta(bvid)
             cid = meta.get("cid", 0)
             if not cid:
-                log(f"获取弹幕失败：未找到视频cid", "WARN")
+                # [FIX] 元数据偶发失败（网络/风控）时退避后重试一次，避免整轮弹幕直接放弃
+                await asyncio.sleep(random.uniform(1.5, 3.0))
+                meta = await self._get_video_meta(bvid)
+                cid = meta.get("cid", 0)
+            if not cid:
+                log("获取弹幕失败：未找到视频cid（已重试1次）", "WARN")
                 return (0, [])
 
             headers = {
@@ -542,15 +629,11 @@ class BiliClient:
             max_segments = 6
             for seg_idx in range(1, max_segments + 1):
                 params = {'oid': cid, 'type': 1, 'segment_index': seg_idx}
-                # seg.so 接口使用 WBI 签名
-                client = await self._get_http_client()
-                if self._wbi_keys and time.time() - self._wbi_keys_ts < 3600:
-                    signed = self._wbi_sign(params)
-                else:
-                    signed = params
-                resp = await client.get(
-                    'https://api.bilibili.com/x/v2/dm/web/seg.so',
-                    params=signed, headers=headers, cookies=cookies
+                # [FIX] 17.4.1 官方端点已迁移至 /x/v2/dm/wbi/web/seg.so，必须 WBI 签名
+                # _wbi_get 内部会自动刷新密钥并签名（此前 keys 缺失时不签名会被 -403 拒）
+                resp = await self._wbi_get(
+                    'https://api.bilibili.com/x/v2/dm/wbi/web/seg.so',
+                    params, headers=headers, cookies=cookies
                 )
                 data = resp.read()
 
@@ -683,7 +766,8 @@ class BiliClient:
                 try:
                     v = Video(bvid=bvid, credential=self.credential)
                     if hasattr(v, 'like_danmaku'):
-                        await v.like_danmaku(dmid=dmid, cid=cid)
+                        # [FIX] 17.4.1 like_danmaku 声明 dmid: int（id_str 需转换）
+                        await v.like_danmaku(dmid=int(dmid), cid=cid)
                         return {"code": 0, "msg": f"弹幕 {dmid[:12]}... 点赞成功"}
                 except Exception as e:
                     log(f"[WARN] bilibili_api弹幕点赞降级到httpx: {e}", "WARN")
@@ -695,10 +779,12 @@ class BiliClient:
             if not csrf:
                 return {"code": -1, "msg": "弹幕点赞失败: 缺少 bili_jct (csrf token)"}
             client = await self._get_http_client()
+            # [FIX] 17.4.1 video.json thumbup/add: 必填 op(1赞/2取消)、platform=web_player、dmid 为数值
             resp = await client.post('https://api.bilibili.com/x/v2/dm/thumbup/add', data={
-                'dmid': dmid,
+                'dmid': int(dmid),
                 'oid': cid,
-                'platform': 'web',
+                'op': 1,
+                'platform': 'web_player',
                 'csrf': csrf
             }, cookies=self.raw_cookies)
             data = resp.json()
@@ -727,7 +813,7 @@ class BiliClient:
 
 
 # ==============================================================================
-# 🎉 娱乐功能模块（默认关闭，需在主菜单手动开启）
+# 娱乐功能模块（默认关闭，需在主菜单手动开启）
 # ==============================================================================
-# 🔑 登录模块
+# 登录模块
 # ==============================================================================

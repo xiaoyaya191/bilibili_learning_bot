@@ -29,10 +29,11 @@ from datetime import datetime
 from colorama import Fore, Style
 
 # ── 路径常量 ──
-BASE_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = BASE_DIR / "Data"
-KNOWLEDGE_BASE_DIR = BASE_DIR / "KnowledgeBase"
-EXPORT_DIR = BASE_DIR / "html_exports" / "your_feature"
+from core.config import resolve_knowledge_base_dir
+from core.user_data import DATA_DIR, HTML_EXPORTS_DIR
+
+KNOWLEDGE_BASE_DIR = Path(resolve_knowledge_base_dir())
+EXPORT_DIR = HTML_EXPORTS_DIR / "your_feature"
 EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -222,4 +223,5 @@ async function yourFeatureAction(){
 3. **async 函数**: 核心函数用 async，CLI 用 `asyncio.run()`，Web 用 `asyncio.new_event_loop()`
 4. **错误处理**: 核心函数内部 try/except，返回 `{"success": False, "error": "..."}`
 5. **文件导出**: 统一使用 `html_exports/` 下的子目录
-6. **更新 DEV_REFERENCE.txt**: 新增功能后必须更新开发参考文档
+6. **网页生成**: 必须通过 `services.html_renderer`，不要复制完整 HTML/CSS/JS 模板
+7. **更新文档**: 新增功能后检查 `README.md`、`REFACTOR_PLAN.md`、相关 `dev_refs/` 是否需要同步

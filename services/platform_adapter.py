@@ -36,6 +36,7 @@ except Exception:  # pragma: no cover
 
 # 项目根目录（services 的父目录），供下载骨架使用
 BASE_DIR = Path(__file__).resolve().parent.parent
+from core.user_data import DATA_DIR
 
 SUPPORTED_PLATFORMS = ("bilibili", "youtube", "douyin", "kuaishou", "web", "local")
 
@@ -189,7 +190,7 @@ def download_platform_video(
     if yt_dlp is None:
         return None, 0.0, 0.0, {"error": "yt_dlp 未安装"}
     proxy = get_proxy(cfg)
-    out_dir = BASE_DIR / "Data" / "downloads"
+    out_dir = DATA_DIR / "downloads"
     out_dir.mkdir(parents=True, exist_ok=True)
     ydl_opts: dict[str, Any] = {
         "format": "bestaudio[ext=m4a]/bestaudio/best",

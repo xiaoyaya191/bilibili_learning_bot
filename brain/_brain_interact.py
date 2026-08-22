@@ -14,9 +14,25 @@ from utils.helpers import _mask_urls
 class BrainInteractMixin:
     """视觉分析与互动方法"""
 
+    ## ── 全局不识图守卫 ──
+    ## 约定：封面分析 + 评论图片分析 两者都关闭 → 全局完全不识图
+    def _multimodal_enabled(self) -> bool:
+        """Return the live, explicit opt-in for image input to the AI API."""
+        return bool((config.get("vision", {}) or {}).get("multimodal_enabled", False))
+
+    def _is_vision_globally_disabled(self) -> bool:
+        """检查是否全局禁用视觉分析。
+        当封面分析(VISION_COVER_ENABLED)和评论图片分析(VISION_COMMENT_IMAGES_ENABLED)
+        都关闭时，认为用户有意全局禁用所有图片识别。"""
+        if not self._multimodal_enabled():
+            return True
+        vision = config.get("vision", {}) or {}
+        return (not vision.get("cover_enabled", True)) and (not vision.get("comment_images_enabled", True))
+
     async def analyze_vision(self, pic_url):
         if not pic_url: return "无封面", 0
-        if not VISION_COVER_ENABLED: return "封面分析已关闭", 0
+        if self._is_vision_globally_disabled(): return "全局不识图", 0
+        if not (config.get("vision", {}) or {}).get("cover_enabled", True): return "封面分析已关闭", 0
         if self._is_ai_degraded(): return "AI降级,跳过", 0
         try:
             resp = await self._call_ai_with_retry(
@@ -67,6 +83,15 @@ class BrainInteractMixin:
             category=category, vis_desc=vis_desc, vis_score=vis_score
         )
 
+        # 节目效果（实验性开关）：小概率无视引擎结果，随机翻转判定
+        from core import variety as _variety
+        _flip = _variety.interest_flip(title)
+        if _flip is not None:
+            _passed, _reason = _flip
+            if _passed:
+                return True, result.matched_keywords or [], _reason
+            return False, [], _reason
+
         # 结果明确 → 直接返回
         if result.passed is True:
             return True, result.matched_keywords, result.match_reason
@@ -75,27 +100,30 @@ class BrainInteractMixin:
 
         # passed=None → 需要AI进一步判断
         interests = engine.get_keywords()
-        prompt = f"""
-请判断这个B站视频是否符合用户兴趣。
-
-用户兴趣: {", ".join(interests[:20])}
-视频标题: {title}
-UP主: {up}
-封面印象: {vis_desc}
-封面印象分: {vis_score}
-引擎预评分: {result.total_score:.1f}/10 ({result.match_reason})
-
-要求:
-1. 综合标题、UP主、封面印象判断，不要只做关键词匹配。
-2. 只输出JSON，格式为:
-{{"interested": true, "matched": ["兴趣1"], "reason": "一句话理由"}}
-3. 如果明显不相关，interested=false，matched=[]。
-"""
+        # 提示词由 config.judgment.interest_filter 控制（判定提示词分区），默认与内置一致
+        from core.judgment import get_judgment
+        _jif = get_judgment()["interest_filter"]
+        prompt = str(_jif["user_prompt_template"])
+        _sys_prompt = str(_jif["system_prompt"])
+        # 节目效果：往 system 提示词里注入一句"今日风向"
+        _flavor = _variety.prompt_flavor()
+        if _flavor:
+            _sys_prompt = _sys_prompt.rstrip() + "\n" + _flavor
+        for _ph, _val in (
+            ("{interests}", ", ".join(interests[:20])),
+            ("{title}", str(title)),
+            ("{up}", str(up)),
+            ("{vis_desc}", str(vis_desc)),
+            ("{vis_score}", str(vis_score)),
+            ("{engine_score}", f"{result.total_score:.1f}"),
+            ("{engine_reason}", str(result.match_reason)),
+        ):
+            prompt = prompt.replace(_ph, _val)
         try:
             resp = await self._call_ai_with_retry(
                 model=MODEL_BRAIN,
                 messages=[
-                    {"role": "system", "content": "你是B站视频兴趣筛选器，只输出合法JSON。"},
+                    {"role": "system", "content": _sys_prompt},
                     {"role": "user", "content": prompt}
                 ],
                 request_timeout=90
@@ -150,7 +178,7 @@ UP主: {up}
             try:
                 cid, user, msg = c['rpid'], c['member']['uname'], c['content']['message']
                 entry = {"cid": cid, "user": user, "content": msg, "pic_info": ""}
-                if VISION_COMMENT_IMAGES_ENABLED:
+                if VISION_COMMENT_IMAGES_ENABLED and not self._is_vision_globally_disabled():
                     pictures = c.get('content', {}).get('pictures', [])
                     if pictures:
                         img_urls = [p.get('img_src', '') for p in pictures[:3] if p.get('img_src')]
@@ -178,23 +206,71 @@ UP主: {up}
             c_list_clean.append({"id": cid, "user": user, "content": msg, "pic_info": pic_info.strip()})
         return context_str, c_list_clean
 
+    @staticmethod
+    def _comment_image_urls(url):
+        """Return the original image and a CDN-resized fallback when available."""
+        candidates = [str(url)]
+        image_url = str(url)
+        path, separator, query = image_url.partition("?")
+        filename = path.rsplit("/", 1)[-1]
+        if "hdslb.com" in image_url.lower() and "@" not in filename:
+            candidates.append(f"{path}@1024w_1e_1c{separator}{query}")
+        return candidates
+
+    async def _download_comment_image(self, cid, index, url):
+        """Download a complete comment image before it is encoded for the vision API."""
+        import httpx as _httpx
+
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://www.bilibili.com/",
+            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+            "Accept-Encoding": "gzip, deflate",
+            "Connection": "close",
+        }
+        last_error = None
+        for candidate_index, candidate_url in enumerate(self._comment_image_urls(url)):
+            for attempt in range(2):
+                try:
+                    timeout = _httpx.Timeout(connect=10.0, read=25.0, write=10.0, pool=10.0)
+                    async with _httpx.AsyncClient(
+                        timeout=timeout,
+                        follow_redirects=True,
+                        http2=False,
+                    ) as client:
+                        response = await client.get(candidate_url, headers=headers)
+                    response.raise_for_status()
+                    content = response.content
+                    declared_size = response.headers.get("content-length")
+                    if declared_size and int(declared_size) != len(content):
+                        raise IOError(f"incomplete image body: received {len(content)} bytes, expected {declared_size}")
+                    if not content:
+                        raise IOError("empty image body")
+                    mime_type = response.headers.get("content-type", "image/jpeg").split(";", 1)[0].strip()
+                    if not mime_type.startswith("image/"):
+                        mime_type = "image/jpeg"
+                    return content, mime_type
+                except Exception as exc:
+                    last_error = exc
+                    if attempt == 0:
+                        log(
+                            f"评论图片下载重试(cid={cid} img{index}, {'缩小图' if candidate_index else '原图'}): {exc}",
+                            "DEBUG",
+                        )
+                        await asyncio.sleep(0.6)
+        raise RuntimeError(f"comment image download failed after retries: {last_error}")
+
     async def _analyze_comment_images(self, cid, img_urls, user_msg=""):
         """[VISION] 下载评论文图片并用视觉AI描述，同时展示评论文字+图片"""
-        if not img_urls or self._is_ai_degraded():
+        if not img_urls or self._is_ai_degraded() or self._is_vision_globally_disabled():
             return ""
         max_images = min(len(img_urls), VISION_MAX_COMMENT_IMAGES)
-        import httpx as _httpx, base64 as _b64
+        import base64 as _b64
 
         async def _dl_and_analyze(idx, url):
             try:
-                async with _httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-                    r = await client.get(url, headers={
-                        'User-Agent': 'Mozilla/5.0',
-                        'Referer': 'https://www.bilibili.com'
-                    })
-                    if r.status_code != 200:
-                        return None
-                    data_url = "data:image/jpeg;base64," + _b64.b64encode(r.content).decode("ascii")
+                image_bytes, mime_type = await self._download_comment_image(cid, idx, url)
+                data_url = f"data:{mime_type};base64," + _b64.b64encode(image_bytes).decode("ascii")
                 resp = await self._call_ai_with_retry(
                     model=MODEL_VISION,
                     messages=[{

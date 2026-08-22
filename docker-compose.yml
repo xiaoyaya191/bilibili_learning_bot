@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: bilibili_learning_bot:3.0.2
+    image: bilibili_learning_bot:3.1.2
     container_name: bilibili_learning_bot
     restart: unless-stopped
     ports:

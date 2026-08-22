@@ -34,7 +34,9 @@ def ensure_ai_marker(text):
     text = (text or "").strip()
     marker = config.get("behavior", {}).get("ai_marker", "（内容由AI生成并由AI回复）")
     if not text:
-        return marker
+        return ""
+    if text == marker or text == "(内容由AI生成并由AI回复)":
+        return ""
     if marker in text or "(内容由AI生成并由AI回复)" in text:
         return text
     return f"{text}{marker}"
@@ -112,7 +114,7 @@ def _safe_task_callback(task_name="unknown"):
                 traceback.print_exc()
         except _asyncio.CancelledError:
             from utils.display import log as _log
-            _log(f"🔇 后台任务 [{task_name}] 被取消 (CancelledError)", "INFO")
+            _log(f"后台任务 [{task_name}] 被取消 (CancelledError)", "INFO")
         except _asyncio.InvalidStateError:
             pass
         except Exception as e:

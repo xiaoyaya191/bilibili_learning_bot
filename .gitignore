@@ -8,6 +8,16 @@ venv/
 .env
 .env.*
 
+# Local build and release outputs
+/build/
+/dist/
+/release/
+/exe/
+/.pytest_cache/
+
+# Unused local image retained only on this workstation
+/project image.jpg
+
 # Local data
 Data/
 !Data/.gitkeep
@@ -33,6 +43,8 @@ model/
 
 # HTML exports (generated files)
 html_exports/
+MindMaps/
+Word/
 
 # Backup files
 *.bak
@@ -69,3 +81,32 @@ Desktop.ini
 .reasonix/
 .cipher_key
 .web_secret_key
+
+# Sogou IME accidental directory (created by a known input-method bug)
+/%SystemDrive%/
+
+# Web panel runtime logs (redirected by launcher scripts)
+/runtime/
+
+# Local builds kept out of the repo
+/web_panel_error*.log
+
+*.key
+*.pem
+credentials
+password
+*.env
+_panel_stdout.log
+
+# Open-source prep: local scratch data and private workspace files
+_test_userdata/
+dist_old_build/
+qr_codes/
+同步到G盘.bat
+cleanup_c_drive.ps1
+_tmp_js_check.js
+_skill_js_check.js
+_tmp_check.js
+AI_TASK_PROMPT.md
+.testdata/
+highlights/

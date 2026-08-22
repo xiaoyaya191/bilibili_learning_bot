@@ -8,13 +8,6 @@
 ```bash
 # Windows
 python web_panel.py
-# 或
-启动网页版.bat
-
-# 多账号
-BILI_ACCOUNT_NAME=账号2 BILI_ACCOUNT_DATA_DIR=account2/Data python web_panel.py
-# 或
-启动网页版_账号2.bat
 ```
 
 ## API 路由规范

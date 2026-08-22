@@ -38,12 +38,12 @@ save_json_file("path/to/file.json", data)
 from pathlib import Path
 
 # 项目根目录
-BASE_DIR = Path(__file__).resolve().parent.parent
+from core.config import resolve_knowledge_base_dir
+from core.user_data import DATA_DIR, HTML_EXPORTS_DIR
 
-# 常用路径
-DATA_DIR = BASE_DIR / "Data"
-KNOWLEDGE_BASE_DIR = BASE_DIR / "KnowledgeBase"
-EXPORT_DIR = BASE_DIR / "html_exports" / "quizzes"
+# 私密数据使用 DATA_DIR；知识库尊重用户配置；导出留在项目目录
+KNOWLEDGE_BASE_DIR = Path(resolve_knowledge_base_dir())
+EXPORT_DIR = HTML_EXPORTS_DIR / "quizzes"
 
 # 确保目录存在
 EXPORT_DIR.mkdir(parents=True, exist_ok=True)

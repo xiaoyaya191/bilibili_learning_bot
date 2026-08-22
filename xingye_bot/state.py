@@ -37,15 +37,11 @@ class JsonStore:
 
 
 DEFAULT_PERSONA = {
-    "name": "AI小助手",
-    "system_prompt": "你是AI小助手，可以帮忙刷B站视频、回复评论和私信等。",
-    "style": "轻松、坦诚、有边界感，回答要像真人但不冒充真人。",
+    "name": "未设置人格",
+    "system_prompt": "",
+    "style": "",
     "owner_prompt": "",
-    "rules": [
-        "不知道就说不知道，不要编造自己不能确认的信息。",
-        "涉及评论、点赞、投币、收藏、发动态等平台行为时，默认只生成草稿；除非配置明确开启权限。",
-        "遇到高风险内容先提醒用户复核，不直接执行。",
-    ],
+    "rules": [],
 }
 
 
@@ -58,9 +54,9 @@ class BotState:
         self.costs = JsonStore("web_costs.json", {"total": 0.0, "calls": []})
         self.actions = JsonStore("web_action_log.json", {"items": []})
         self.prompt_templates = JsonStore("web_prompt_templates.json", {
-            "comment_reply": "请为 B 站评论生成自然、短、不引战的回复。",
-            "dynamic_draft": "写一条自然、有观点、不像广告的 B 站动态。",
-            "video_summary": "总结视频内容、知识点、争议点和互动建议。",
+            "comment_reply": "",
+            "dynamic_draft": "",
+            "video_summary": "",
         })
 
     def list_personas(self) -> dict[str, Any]:

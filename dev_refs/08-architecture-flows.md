@@ -1,209 +1,144 @@
-# 项目架构与代码流程 (Architecture & Flows)
+# 项目架构与代码流程
 
-> 了解整体架构和数据流，方便快速定位代码。
+> 面向二次开发：快速定位入口、服务边界和数据流。
 
-## 项目结构总览
+## 项目结构
 
-```
-测试/
-├── main.py              # CLI 主入口（26个菜单命令分发）
-├── start_cli.py         # CLI 启动辅助（全局变量定义）
-├── web_panel.py         # Flask Web 管理面板
-├── web_panel.html       # Web 面板前端（单文件）
-├── config.example.json  # 配置文件模板
-├── DEV_REFERENCE.txt    # 开发者完整参考手册
-├── dev_refs/            # 🆕 API/流程参考文件夹（供 AI 开发参考）
-│
-├── api/                 # B站 API 封装层
-│   ├── client.py        # BiliClient 核心客户端
-│   ├── subtitles.py     # 字幕获取与校验
-│   └── throttle.py      # 请求限速
-│
-├── brain/               # AI 大脑（13个 Mixin 组合）
-│   ├── _brain_ai.py     # AI 后端（多Provider/多级降级）
-│   ├── _brain_video.py  # 视频学习流程
-│   ├── _brain_comment.py # 评论互动
-│   ├── _brain_curiosity.py # 好奇心搜索
-│   ├── _brain_session.py # 会话管理（@通知等）
-│   ├── standby.py       # 待机/通知模式
-│   ├── video_analysis.py # 手动视频分析
+```text
+bilibili_learning_bot/
+├── main.py                  # CLI 主入口
+├── start_cli.py             # CLI 兼容入口
+├── web_panel.py             # Flask Web 后端
+├── web_panel.html           # Web 前端模板
+├── api/                     # B站 API、登录、字幕、节流
+├── brain/                   # 自动学习机器人核心流程
+├── cli/                     # CLI 菜单与配置交互
+├── core/                    # 配置、路径和运行时全局状态
+├── knowledge/               # 知识库分类、检索、整理、重温
+├── services/                # 可复用服务模块
+│   ├── html_renderer.py     # 统一网页生成入口
+│   ├── video_to_ppt.py      # 视频→网页
+│   ├── knowledge_tutor.py   # 知识辅导/HTML 输出
+│   ├── deep_dive.py         # 深入了解/深研计划
+│   ├── quiz_generator.py    # 出题考试
+│   ├── mindmap_export.py    # Markdown→markmap
 │   └── ...
-│
-├── cli/                 # CLI 菜单系统
-│   └── app.py           # 所有菜单函数（show_main_menu, show_xxx_menu）
-│
-├── core/                # 核心基础
-│   └── config.py        # 配置加载/路径常量/日志
-│
-├── knowledge/           # 知识库管理
-│   ├── browse.py        # 浏览/搜索知识库
-│   ├── custom.py        # 自定义知识管理
-│   └── web_search.py    # 联网搜索 + AI验证
-│
-├── services/            # 服务模块（独立功能）
-│   ├── video_to_ppt.py  # 视频→精美网页（19种风格）
-│   ├── knowledge_tutor.py # AI 知识辅导
-│   ├── agent_service.py # Agent 自主学习
-│   ├── interest_engine.py # 兴趣引擎
-│   ├── quiz_generator.py # 🆕 出题考试
-│   ├── deep_dive.py     # 🆕 深入了解
-│   └── utils.py         # 服务工具
-│
-├── utils/               # 通用工具
-│   ├── storage.py       # JsonStore（线程安全 JSON）
-│   ├── helpers.py       # 通用辅助函数
-│   └── display.py       # 显示相关
-│
-├── persona/             # 人格系统
-├── security/            # 安全审核
-├── xingye_bot/          # xingye_bot 子系统
-├── tests/               # 测试
-├── templates/           # HTML 模板
-│
-├── Data/                # 数据目录
-│   ├── config.json      # 主配置
-│   └── bilibili_cookies.json # 登录凭证
-│
-├── KnowledgeBase/       # 知识库文件
-├── html_exports/        # HTML 导出
-└── highlights/          # 精品归档
+├── templates/claude/        # 网页提示词和参考页面
+├── tests/                   # pytest 测试
+├── Data/                    # 运行时数据
+├── KnowledgeBase/           # 知识库 Markdown
+└── html_exports/            # HTML/报告导出
 ```
+
+## 分层原则
+
+- `services/`：核心业务能力，尽量可测试、可复用。
+- `cli/`：只负责菜单、输入、输出。
+- `web_panel.py`：只负责路由、任务调度、JSON 返回。
+- `api/`：只封装 B站接口和认证。
+- `core/`：配置、路径、全局状态。
+- `templates/`：网页设计规则和参考，不写业务逻辑。
 
 ## 核心数据流
 
-### 视频学习流程
+### 视频学习
 
-```
-用户操作 (CLI/Web)
-  ↓
-main.py / web_panel.py
-  ↓
-brain/video_analysis.py → manual_video_analysis(bvid)
-  ↓
-api/subtitles.py → fetch_bilibili_subtitles(bvid)
-  │  ├─ 获取 WBI 签名密钥 (nav API)
-  │  ├─ 获取视频信息 (view API)
-  │  ├─ 获取字幕 URL (player/wbi/v2 API)
-  │  └─ 下载字幕 JSON 内容
-  ↓
-brain/_brain_ai.py → _call_ai_with_retry()
-  │  ├─ 分析字幕内容
-  │  ├─ 生成学习笔记
-  │  └─ 多级降级容错
-  ↓
-保存到 KnowledgeBase/
-  ↓
-(可选) video_to_ppt.py → 生成 HTML 网页
+```text
+用户输入 BV/链接
+  -> services.platform_adapter 归一化
+  -> api.subtitles 获取字幕和视频信息
+  -> brain/video_analysis 或 brain/_brain_video 分析
+  -> services._services_ai.call_ai 生成笔记
+  -> KnowledgeBase/ 保存 Markdown
+  -> 可选 services.video_to_ppt + services.html_renderer 导出 HTML
 ```
 
-### 出题考试流程
+### 视频/知识生成网页
 
-```
-CLI: J→1 或 Web: /api/quiz/generate
-  ↓
-services/quiz_generator.py → generate_quiz()
-  ↓
-选择内容来源:
-  ├─ 视频: api/subtitles.py → fetch_bilibili_subtitles(bvid)
-  └─ 知识库: 直接读取 .md 文件
-  ↓
-LLM 调用 (openai):
-  ├─ 使用系统提示词模板
-  ├─ 传入字幕/知识库内容
-  └─ 生成考题
-  ↓
-保存到 html_exports/quizzes/
+```text
+业务模块准备资料
+  -> 构造 AI prompt（引用 templates/claude/prompts/claude-style-prompt.md）
+  -> LLM 输出 <div class="ppt-container">...</div>
+  -> services.html_renderer.render_slide_html()
+  -> html_exports/ 或用户指定目录
 ```
 
-### 深入了解流程
+规则：不要在业务模块里复制完整 HTML/CSS/JS。新增网页输出必须走 `services.html_renderer`。
 
-```
-CLI: J→2 或 Web: /api/deep-dive/run
-  ↓
-services/deep_dive.py → run_deep_dive()
-  ↓
-AI 分析主题 → 生成 3-5 个搜索关键词
-  ↓
-选择模式:
-  ├─ 联网搜索: knowledge/web_search.py → web_search()
-  │    ↓
-  │  Bing → 搜狗 → DuckDuckGo → Wikipedia
-  │
-  └─ B站视频: 搜索B站 → 逐个获取字幕
-  ↓
-AI 综合所有资料 → 生成学习报告
-  ↓
-保存到 KnowledgeBase/深入学习/ + html_exports/deep_dives/
+### 深入了解 / 深研计划
+
+```text
+CLI: J -> 深入了解/深研计划
+Web: /api/action/deep-research
+  -> services.deep_dive.run_deep_dive() / run_deep_research()
+  -> AI 生成关键词
+  -> 联网搜索或 B站搜索
+  -> 汇总来源和内容
+  -> AI 生成 Markdown 报告
+  -> 保存主报告、来源快照、research manifest
+  -> services.html_renderer 导出阅读页和幻灯片页
 ```
 
-### Web 面板请求流
+### 出题考试
 
-```
-浏览器 → Flask 路由 (@app.route)
-  ↓
-request.get_json() → 解析参数
-  ↓
-asyncio.new_event_loop() → 运行异步函数
-  ↓
-service 模块 → 核心处理
-  ↓
-jsonify({"ok": True/False, ...}) → 返回 JSON
-  ↓
-前端 fetch() → 更新 DOM
+```text
+CLI/Web 输入主题或知识来源
+  -> services.quiz_generator
+  -> 读取字幕或知识库 Markdown
+  -> LLM 生成题目
+  -> 保存到 html_exports/quizzes/
 ```
 
-## 关键设计模式
+### Web 面板请求
 
-### 1. 实时配置读取
+```text
+浏览器 fetch
+  -> Flask route
+  -> 参数校验
+  -> 同步调用或后台线程任务
+  -> service 函数
+  -> TASKS 状态 / jsonify 返回
+```
 
-不要缓存配置值，每次使用时从 `config` 字典实时读取：
+后续建议抽取统一任务调度器，减少路由里重复 `TASKS + threading.Thread`。
+
+## 关键开发约定
+
+### 实时配置读取
+
+不要在模块加载时缓存配置值：
 
 ```python
-# ✅ 正确
 def get_api_key():
     from core.config import config
     return config.get("api", {}).get("unified_api_key", "")
-
-# ❌ 错误
-API_KEY = config.get("api", {}).get("unified_api_key", "")  # 模块加载时缓存
 ```
 
-### 2. 异步包装
+### AI 调用
 
-Flask 是同步框架，调用 async 函数时需要包装：
+服务层优先使用：
 
 ```python
-import asyncio
-loop = asyncio.new_event_loop()
-asyncio.set_event_loop(loop)
-try:
-    result = loop.run_until_complete(async_function())
-finally:
-    loop.close()
+from services._services_ai import call_ai
+
+text = await call_ai(messages=[...], timeout=120, verbose=False)
 ```
 
-### 3. 原子写入
-
-所有重要数据写入使用 tmp+replace 防损坏：
+### 网页生成
 
 ```python
-tmp = filepath + '.tmp'
-with open(tmp, 'w', encoding='utf-8') as f:
-    json.dump(data, f, ensure_ascii=False, indent=2)
-os.replace(tmp, filepath)
+from services.html_renderer import render_slide_html
+
+html = render_slide_html(fragment, title="学习页面")
 ```
 
-### 4. 降级容错
+### 文件写入
 
-多级降级模式，每个环节都有 fallback：
-- LLM: 主API → 备用模型 → 备用提供商 → 熔断
-- 搜索: Bing → 搜狗 → DuckDuckGo → Wikipedia
-- 字幕: wbi/v2 → player/v2 → 无字幕
+重要 JSON 使用 tmp + replace 原子写入。普通 Markdown/HTML 导出可以直接写，但要确保目录存在。
 
-## 修改 DEV_REFERENCE.txt 规范
+### 验证
 
-每次开发任务完成后必须更新 `DEV_REFERENCE.txt`：
-- 新增文件 → 更新文件清单
-- 新增功能 → 更新菜单映射 + 变更记录
-- 修改文件 → 在变更记录中注明
-- 新增 CLI 命令 → 同步到 Web 面板
+```bash
+python -m compileall -q api brain cli core knowledge ob_bridge persona security services utils xingye_bot main.py web_panel.py start_cli.py
+python -m pytest -q
+```

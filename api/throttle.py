@@ -32,7 +32,7 @@ async def _bili_throttle(label=""):
     if now < _BILI_GLOBAL_COOLDOWN_UNTIL:
         remain = _BILI_GLOBAL_COOLDOWN_UNTIL - now
         if remain > 2:
-            log(f"🔒 全局限流冷却中，{remain:.0f}s 后恢复...", "COOL")
+            log(f"全局限流冷却中，{remain:.0f}s 后恢复...", "COOL")
         await asyncio.sleep(remain + 0.5)
         _BILI_GLOBAL_COOLDOWN_UNTIL = 0.0
         now = time.time()
@@ -58,4 +58,4 @@ def _bili_trigger_cooldown():
     if now >= _BILI_GLOBAL_COOLDOWN_UNTIL:  # 已有冷却则不重复
         duration = random.uniform(90, 180)
         _BILI_GLOBAL_COOLDOWN_UNTIL = now + duration
-        log(f"🔒 -799 限流命中！全局冷却 {duration:.0f}s，期间暂停所有B站API调用", "COOL")
+        log(f"-799 限流命中！全局冷却 {duration:.0f}s，期间暂停所有B站API调用", "COOL")

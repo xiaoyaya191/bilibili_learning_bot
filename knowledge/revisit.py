@@ -14,7 +14,7 @@ async def revisit_knowledge_video(bvid, title, up_name, category_path, file_path
         mode: "full" = 重新看视频+优化, "optimize" = 只优化(用现有字幕/AI总结)
     """
     print(f"\n{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
-    print(f"{Fore.CYAN}|  🔄 知识库重温: {title[:40]}                          {Style.RESET_ALL}")
+    print(f"{Fore.CYAN}|  知识库重温: {title[:40]}                          {Style.RESET_ALL}")
     print(f"{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
     print(f"  BV号: {bvid}")
     print(f"  分类: {category_path}")
@@ -251,14 +251,14 @@ async def revisit_knowledge_video(bvid, title, up_name, category_path, file_path
         print(f"{Fore.YELLOW}[INFO] 可学习内容不足，跳过归档{Style.RESET_ALL}")
 
     print(f"\n{Fore.GREEN}+============================================================+{Style.RESET_ALL}")
-    print(f"{Fore.GREEN}|  🔄 重温完成: {title[:40]}                                  {Style.RESET_ALL}")
+    print(f"{Fore.GREEN}|  重温完成: {title[:40]}                                  {Style.RESET_ALL}")
     print(f"{Fore.GREEN}+============================================================+{Style.RESET_ALL}")
 
 
 async def revisit_knowledge_base_menu():
     """知识库重温菜单：扫描所有 .md 文件，选择后重看视频优化或仅优化。"""
     print(f"\n{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
-    print(f"{Fore.CYAN}|        🔄 知识库重温优化 - 已学习视频回顾                      |{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}|        知识库重温优化 - 已学习视频回顾                      |{Style.RESET_ALL}")
     print(f"{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
 
     # 扫描知识库
@@ -308,8 +308,8 @@ async def revisit_knowledge_base_menu():
         # 选择模式
         print(f"\n{Fore.CYAN}已选择: {title[:50]}{Style.RESET_ALL}")
         print(f"\n{Fore.CYAN}请选择重温模式:{Style.RESET_ALL}")
-        print(f"  {Fore.GREEN}1.{Style.RESET_ALL} 🔄 完整重温 (重新看视频: 封面→简介→字幕/下载/ASR→评论→弹幕→AI决策→归档)")
-        print(f"  {Fore.BLUE}2.{Style.RESET_ALL} 📝 仅优化 (用现有知识库内容 + 最新评论/弹幕 → AI重新分析 → 归档)")
+        print(f"  {Fore.GREEN}1.{Style.RESET_ALL} 完整重温 (重新看视频: 封面→简介→字幕/下载/ASR→评论→弹幕→AI决策→归档)")
+        print(f"  {Fore.BLUE}2.{Style.RESET_ALL} 仅优化 (用现有知识库内容 + 最新评论/弹幕 → AI重新分析 → 归档)")
         print(f"  {Fore.YELLOW}0.{Style.RESET_ALL} 取消")
 
         mode_choice = input(f"\n{Fore.CYAN}请选择 (1/2/0): {Style.RESET_ALL}").strip()
@@ -337,5 +337,5 @@ async def revisit_knowledge_base_menu():
 
 
 # ==============================================================================
-# 📂 一键整理知识库：非3层文件 → AI自动归类到3层
+# 一键整理知识库：非3层文件 → AI自动归类到3层
 # ==============================================================================

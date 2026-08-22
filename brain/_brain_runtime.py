@@ -17,6 +17,33 @@ class BrainRuntimeMixin:
         self.runtime_state = state
         return state
 
+    def update_video_observation(self, stage, **fields):
+        """Publish the actual video currently being processed for the local panel."""
+        state = _load_json_file(RUNTIME_STATE_FILE, {})
+        observation = state.get("video_observation", {})
+        observation = observation if isinstance(observation, dict) else {}
+        observation.update({key: value for key, value in fields.items() if value not in (None, "")})
+        observation["stage"] = str(stage or observation.get("stage") or "准备中")
+        observation["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        state["video_observation"] = observation
+        _save_json_file(RUNTIME_STATE_FILE, state)
+        self.runtime_state = state
+        return observation
+
+    def update_activity(self, label, detail="", **fields):
+        """Publish the bot's work state even while no video is being decoded."""
+        state = _load_json_file(RUNTIME_STATE_FILE, {})
+        activity = state.get("activity", {})
+        activity = activity if isinstance(activity, dict) else {}
+        activity.update({key: value for key, value in fields.items() if value not in (None, "")})
+        activity["label"] = str(label or activity.get("label") or "准备中")
+        activity["detail"] = str(detail or "")
+        activity["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        state["activity"] = activity
+        _save_json_file(RUNTIME_STATE_FILE, state)
+        self.runtime_state = state
+        return activity
+
     def _load_memory(self):
         if os.path.exists(MEMORY_FILE):
             try:

@@ -31,9 +31,23 @@ class ModelClient:
                 seen.add(model)
         return models
 
+    @staticmethod
+    def _json_request_body(payload: dict[str, Any]) -> tuple[bytes, dict[str, str]]:
+        """Encode OpenAI-compatible requests as UTF-8 bytes.
+
+        Some compatible gateways incorrectly assume ASCII for ``json=``
+        requests. Sending the serialized bytes explicitly keeps Chinese prompts
+        usable for every ModelClient endpoint.
+        """
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        return body, {
+            "Content-Type": "application/json; charset=utf-8",
+            "Content-Length": str(len(body)),
+        }
+
     async def chat(self, messages: list[dict[str, Any]], model_role: str = "chat", purpose: str = "chat") -> str:
         if not self.settings.configured:
-            raise ModelError("AI 接口未配置，请设置 BILI_AI_API_KEY 或 Data/config.json。")
+            raise ModelError("AI 接口未配置，请设置 BILI_AI_API_KEY 或用户数据目录中的 config.json。")
 
         errors: list[str] = []
         for model in self._models_for_role(model_role):
@@ -50,13 +64,10 @@ class ModelClient:
             "messages": messages,
             "temperature": 0.7,
         }
-        headers = {
-            "Authorization": f"Bearer {self.settings.api_key}",
-            "Content-Type": "application/json",
-        }
-
+        body, encoding_headers = self._json_request_body(payload)
+        headers = {"Authorization": f"Bearer {self.settings.api_key}", **encoding_headers}
         async with httpx.AsyncClient(timeout=getattr(self, "_html_timeout", 300) if purpose=="html_gen" else 90) as client:
-            resp = await client.post(url, headers=headers, json=payload)
+            resp = await client.post(url, headers=headers, content=body)
         if resp.status_code >= 400:
             raise ModelError(f"模型请求失败：HTTP {resp.status_code} {resp.text[:300]}")
 
@@ -87,13 +98,14 @@ class ModelClient:
 
     async def generate_image(self, prompt: str, size: str = "1024x1024") -> dict[str, Any]:
         if not self.settings.configured:
-            raise ModelError("AI 接口未配置，请设置 BILI_AI_API_KEY 或 Data/config.json。")
+            raise ModelError("AI 接口未配置，请设置 BILI_AI_API_KEY 或用户数据目录中的 config.json。")
         model = self._models_for_role("image")[0]
         url = self.settings.base_url.rstrip("/") + "/images/generations"
-        headers = {"Authorization": f"Bearer {self.settings.api_key}", "Content-Type": "application/json"}
         payload = {"model": model, "prompt": prompt, "size": size, "n": 1}
-        async with httpx.AsyncClient(timeout=getattr(self, "_html_timeout", 300) if purpose=="html_gen" else 90) as client:
-            resp = await client.post(url, headers=headers, json=payload)
+        body, encoding_headers = self._json_request_body(payload)
+        headers = {"Authorization": f"Bearer {self.settings.api_key}", **encoding_headers}
+        async with httpx.AsyncClient(timeout=getattr(self, "_html_timeout", 300)) as client:
+            resp = await client.post(url, headers=headers, content=body)
         if resp.status_code >= 400:
             raise ModelError(f"图片生成失败：HTTP {resp.status_code} {resp.text[:300]}")
         data = resp.json()
@@ -111,13 +123,15 @@ class ModelClient:
 
     async def embedding(self, text: str) -> list[float]:
         if not self.settings.configured:
-            raise ModelError("AI 接口未配置，请设置 BILI_AI_API_KEY 或 Data/config.json。")
+            raise ModelError("AI 接口未配置，请设置 BILI_AI_API_KEY 或用户数据目录中的 config.json。")
         model = self._models_for_role("embedding")[0]
         url = self.settings.base_url.rstrip("/") + "/embeddings"
-        headers = {"Authorization": f"Bearer {self.settings.api_key}", "Content-Type": "application/json"}
+        headers = {"Authorization": f"Bearer {self.settings.api_key}"}
         payload = {"model": model, "input": text[:8000]}
+        body, encoding_headers = self._json_request_body(payload)
+        headers.update(encoding_headers)
         async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(url, headers=headers, json=payload)
+            resp = await client.post(url, headers=headers, content=body)
         if resp.status_code >= 400:
             raise ModelError(f"Embedding 请求失败：HTTP {resp.status_code} {resp.text[:300]}")
         data = resp.json()

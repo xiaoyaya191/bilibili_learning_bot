@@ -13,9 +13,16 @@ import shutil
 import asyncio
 import subprocess
 import contextlib
+import sys
 from pathlib import Path
 from typing import Any
 from dataclasses import dataclass, field
+
+
+def _hidden_subprocess_kwargs() -> dict:
+    """Avoid flashing ffmpeg helper windows on Windows."""
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    return {"creationflags": flags} if flags else {}
 
 # ── 运行时延迟导入（避免无依赖时崩溃）──
 
@@ -24,7 +31,9 @@ def _get_funasr():
     try:
         from funasr import AutoModel
         return AutoModel
-    except ImportError:
+    except Exception:
+        # Optional ML packages can also fail with missing DLLs or incompatible
+        # native wheels.  Keep ASR optional and allow the normal fallback path.
         return None
 
 def _get_whisper():
@@ -32,7 +41,7 @@ def _get_whisper():
     try:
         import whisper
         return whisper
-    except ImportError:
+    except Exception:
         return None
 
 def _get_pyannote_pipeline():
@@ -185,7 +194,7 @@ class ASREngine:
         try:
             subprocess.run(
                 [ffmpeg, "-version"], check=False,
-                capture_output=True, timeout=10,
+                capture_output=True, timeout=10, **_hidden_subprocess_kwargs()
             )
             self._ffmpeg_ok_cache = True
             return True
@@ -195,12 +204,31 @@ class ASREngine:
 
     def _get_model_dir(self) -> str:
         """获取 FunASR 模型目录（自动创建，供 AutoModel 下载模型）"""
-        if self.funasr_model_dir and os.path.isdir(self.funasr_model_dir):
+        if self.funasr_model_dir:
+            os.makedirs(str(self.funasr_model_dir), exist_ok=True)
             return self.funasr_model_dir
-        # 默认路径：项目下的 model/asr，自动创建目录
-        default = Path(__file__).parent.parent / "model" / "asr"
+        # 默认路径：项目根目录下的 asr 文件夹（开源部署，模型随项目存放），自动创建目录
+        if getattr(sys, "frozen", False):
+            from core.user_data import USER_DATA_DIR
+            default = USER_DATA_DIR / "models" / "asr"
+        else:
+            default = Path(__file__).parent.parent / "asr"
+            # 兼容旧版本：若新默认目录为空但旧目录 model/asr 已有模型，则沿用旧目录避免重复下载。
+            legacy = Path(__file__).parent.parent / "model" / "asr"
+            if not default.exists() and self._dir_has_files(legacy):
+                default = legacy
         os.makedirs(str(default), exist_ok=True)
         return str(default)
+
+    @staticmethod
+    def _dir_has_files(path: Path) -> bool:
+        """目录中是否已有模型文件（用于旧目录回退判断）。"""
+        if not path.exists():
+            return False
+        for item in path.rglob("*"):
+            if item.is_file():
+                return True
+        return False
 
     def _check_funasr_available(self) -> bool:
         """检查 FunASR 是否可用（仅检查包是否安装，模型由 AutoModel 自动下载）"""
@@ -281,7 +309,7 @@ class ASREngine:
         return False, ""
 
     # ═══════════════════════════════════════════════════════════════
-    # 🎬 视频→音频提取（ffmpeg）
+    # 视频→音频提取（ffmpeg）
     # ═══════════════════════════════════════════════════════════════
 
     def extract_audio(self, video_path: Path | str, output_dir: Path | str | None = None) -> tuple[Path | None, float]:
@@ -300,7 +328,7 @@ class ASREngine:
 
             ffmpeg = self._find_ffmpeg()
             if os.path.isfile(ffmpeg) or shutil.which(ffmpeg):
-                # ✅ ffmpeg 可用，标准提取
+                # ffmpeg 可用，标准提取
                 cmd = [
                     ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
                     "-i", str(video_path),
@@ -311,7 +339,8 @@ class ASREngine:
                     str(audio_path),
                 ]
                 try:
-                    subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=600)
+                    subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=600,
+                                   **_hidden_subprocess_kwargs())
                     if audio_path.exists() and audio_path.stat().st_size > 1024:
                         return audio_path, _time.time() - _start
                     return None, _time.time() - _start
@@ -321,11 +350,11 @@ class ASREngine:
                 except subprocess.TimeoutExpired:
                     raise RuntimeError("ffmpeg 提取音频超时（10分钟）")
             else:
-                # 🔧 ffmpeg 不可用，尝试 torchaudio 兜底
+                # ffmpeg 不可用，尝试 torchaudio 兜底
                 try:
                     import torchaudio
                     import torchaudio.functional as F
-                    print(f"⚠️ ffmpeg 未找到，使用 torchaudio 提取音频: {video_path.name}")
+                    print(f"ffmpeg 未找到，使用 torchaudio 提取音频: {video_path.name}")
                     waveform, sample_rate = torchaudio.load(str(video_path))
                     # 转单声道
                     if waveform.shape[0] > 1:
@@ -357,12 +386,14 @@ class ASREngine:
             raise RuntimeError("funasr 未安装，请 pip install funasr")
 
         model_dir = self._get_model_dir()
-        # 检测是否需要首次下载模型
+        # 检测模型是否已存在（扫描 modelscope 缓存结构，兼容多种权重格式）
+        # <model_dir>/models/<namespace>/<model>/snapshots/<hash>/model.pt
         model_exists = False
-        iic_dir = os.path.join(model_dir, "models", "iic")
-        if os.path.isdir(iic_dir):
-            for root, _, files in os.walk(iic_dir):
-                if "model.pt" in files:
+        weight_names = {"model.pt", "pytorch_model.bin"}
+        mm_dir = os.path.join(model_dir, "models")
+        if os.path.isdir(mm_dir):
+            for root, _, files in os.walk(mm_dir):
+                if any(f in weight_names or f.endswith(".safetensors") for f in files):
                     model_exists = True
                     break
         if model_exists:
@@ -550,7 +581,7 @@ class ASREngine:
                 str(chunk_path),
             ]
             try:
-                subprocess.run(cmd, capture_output=True, timeout=120)
+                subprocess.run(cmd, capture_output=True, timeout=120, **_hidden_subprocess_kwargs())
             except subprocess.TimeoutExpired:
                 continue
             if chunk_path.exists() and chunk_path.stat().st_size > 1024:
@@ -565,7 +596,7 @@ class ASREngine:
                 except OSError: pass
             return self._transcribe_funasr_core(audio_path)
 
-        print(f"[ASR] ⚡ 并行模式: {duration:.0f}s音频 → {len(chunk_info)}块×{len(chunk_info)}线程...")
+        print(f"[ASR] 并行模式: {duration:.0f}s音频 → {len(chunk_info)}块×{len(chunk_info)}线程...")
 
         model = self._model
         _saved_omp = os.environ.get("OMP_NUM_THREADS", "")
@@ -723,7 +754,7 @@ class ASREngine:
         return result
 
     # ═══════════════════════════════════════════════════════════════
-    # 🎙️ Whisper 降级引擎
+    # Whisper 降级引擎
     # ═══════════════════════════════════════════════════════════════
 
     def transcribe_whisper(self, audio_path: Path | str) -> ASRResult:
@@ -765,7 +796,7 @@ class ASREngine:
 
         try:
             if self._model is None or self._backend_loaded != "whisper":
-                print(f"🎙️ 正在加载 Whisper 模型: {self.whisper_model_name}")
+                print(f"正在加载 Whisper 模型: {self.whisper_model_name}")
                 self._model = whisper.load_model(self.whisper_model_name, device=self.device)
                 self._backend_loaded = "whisper"
 
@@ -813,7 +844,7 @@ class ASREngine:
             return result
 
     # ═══════════════════════════════════════════════════════════════
-    # 👥 说话人分离（pyannote.audio，Whisper 降级时使用）
+    # 说话人分离（pyannote.audio，Whisper 降级时使用）
     # FunASR 内置 cam++ 说话人分离，无需额外调用
     # ═══════════════════════════════════════════════════════════════
 
@@ -961,7 +992,7 @@ class ASREngine:
             格式化的耗时汇总文本
         """
         t = result.timing
-        lines = ["\n⏱️ 【ASR耗时详情】"]
+        lines = ["\n【ASR耗时详情】"]
         
         if download_sec > 0:
             lines.append(f"   视频下载: {download_sec:.1f}s ({download_size_mb:.1f}MB)" if download_size_mb > 0 else f"   视频下载: {download_sec:.1f}s")
@@ -994,7 +1025,7 @@ class ASREngine:
         return "\n".join(lines)
 
     # ═══════════════════════════════════════════════════════════════
-    # ⏱️ 辅助：获取音频时长
+    # 辅助：获取音频时长
     # ═══════════════════════════════════════════════════════════════
 
     def _get_audio_duration(self, audio_path: Path) -> float:
@@ -1022,7 +1053,8 @@ class ASREngine:
             str(audio_path),
         ]
         try:
-            result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=30)
+            result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=30,
+                                    **_hidden_subprocess_kwargs())
             dur = float(result.stdout.strip())
             if dur > 0:
                 return dur

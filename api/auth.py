@@ -55,7 +55,7 @@ def check_login_status():
         print(f"{Fore.CYAN}                登录状态检查{Style.RESET_ALL}")
         print(f"{Fore.CYAN}════════════════════════════════════════════════{Style.RESET_ALL}")
 
-        print(f"\n{Fore.YELLOW}📋 Cookie信息:{Style.RESET_ALL}")
+        print(f"\n{Fore.YELLOW}Cookie信息:{Style.RESET_ALL}")
         for key, value in cookies.items():
             if key in ['SESSDATA', 'bili_jct']:
                 print(f"  • {key}: {value[:10]}...{value[-5:]}")
@@ -74,7 +74,7 @@ def check_login_status():
 
 
 # ==============================================================================
-# 📚 知识库分类系统
+# 知识库分类系统
 # ==============================================================================
 
 async def login_bilibili():
@@ -99,10 +99,10 @@ async def login_bilibili():
     log(f"获取到登录链接", "LOGIN")
 
     print("\n" + "="*50)
-    print("           📱 B站登录二维码")
+    print("           B站登录二维码")
     print("="*50)
 
-    # 💾 保存高清二维码图片到独立 qr_codes 文件夹（方便管理，登录后自动删除）
+    # 保存高清二维码图片到独立 qr_codes 文件夹（方便管理，登录后自动删除）
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     qr_dir = os.path.join(base_dir, "qr_codes")
     qr_path = os.path.join(qr_dir, "bilibili_login_qr.png")
@@ -130,7 +130,7 @@ async def login_bilibili():
         except Exception as e:
             log(f"保存二维码到 {target_dir} 失败: {e}", "WARN")
 
-    # 📲 仅 Android/Termux 环境通知系统扫描图片（让相册 APP 能看到）
+    # 仅 Android/Termux 环境通知系统扫描图片（让相册 APP 能看到）
     if gallery_path:
         try:
             import subprocess
@@ -143,15 +143,15 @@ async def login_bilibili():
             log(f'相册扫描通知失败: {e}', 'WARN')
 
     if gallery_path and os.path.exists(gallery_path):
-        print(f"\n📸 二维码图片已保存到相册：")
-        print(f"   📷 {gallery_path}")
+        print(f"\n二维码图片已保存到相册：")
+        print(f"   {gallery_path}")
         print(f"   → 打开手机「相册/图库」APP 即可看到，用 B站APP 扫码登录")
         print()
-    print(f"📁 二维码已保存至: {qr_path}")
+    print(f"二维码已保存至: {qr_path}")
     print()
 
-    # 📱 终端二维码预览（纯 Unicode，无 ANSI 转义，日志/重定向友好）
-    print("📱 终端二维码预览：")
+    # 终端二维码预览（纯 Unicode，无 ANSI 转义，日志/重定向友好）
+    print("终端二维码预览：")
     print()
     qr_term = qrcode.QRCode(
         version=None,
@@ -164,7 +164,7 @@ async def login_bilibili():
     print()
 
     print("\n" + "="*50)
-    print("📱 扫描二维码后，请在手机上确认登录")
+    print("扫描二维码后，请在手机上确认登录")
     print("="*50 + "\n")
 
     scan_detected = False
@@ -182,13 +182,13 @@ async def login_bilibili():
                 break
             elif status == QrCodeLoginEvents.SCAN:
                 # SCAN = 未扫码
-                print("⏳ 等待扫码...", end="\r")
+                print("等待扫码...", end="\r")
             elif status == QrCodeLoginEvents.CONF:
                 # CONF = 已扫码，等待确认
                 if not scan_detected:
                     log("[OK] 二维码已扫描，请在手机上确认登录...", "LOGIN")
                     scan_detected = True
-                print("📱 请在手机上点击确认...", end="\r")
+                print("请在手机上点击确认...", end="\r")
             elif status == QrCodeLoginEvents.TIMEOUT:
                 # TIMEOUT = 已失效
                 log("二维码已过期，请重新运行", "ERROR")
@@ -215,9 +215,10 @@ async def login_bilibili():
         log("登录失败：未获取到凭据", "ERROR")
         return False
 
-    # 🧹 登录成功后自动删除 qr_codes 文件夹中的二维码图片
+    # 登录成功后自动删除 qr_codes 文件夹中的二维码图片
     try:
-        qr_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "qr_codes")
+        from core.user_data import QR_CODES_DIR
+        qr_dir = str(QR_CODES_DIR)
         if os.path.isdir(qr_dir):
             for fname in os.listdir(qr_dir):
                 fpath = os.path.join(qr_dir, fname)

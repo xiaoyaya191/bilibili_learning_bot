@@ -1,6 +1,6 @@
 """xingye_bot/grid_frames.py
 
-复刻 JefferyHcool/BiliNote 的「图文 + 目录」管线，作为默认视频理解逻辑。
+图文学习笔记的时间轴画面管线，作为默认视频理解逻辑。
 
 三段式流程：
 1. extract_grid_frames: 按固定时间间隔抽帧 → 相邻帧 MD5 去重 → 每 grid_size 张拼成
@@ -12,7 +12,7 @@
 3. replace_markers_with_screenshots: 扫描标记，用 ffmpeg 按精确时间戳截单图，
    替换成内联 `![](data:image/jpeg;base64,...)`（网页/本地通用，无需静态服务器）。
 
-可通过设置 frame_anchor_mode='legacy' 关闭，回退到原逻辑（帧仅作理解素材）。
+可通过设置 frame_note_mode='classic' 关闭，回退到仅理解画面的经典流程。
 """
 from __future__ import annotations
 
@@ -23,7 +23,13 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, List, Mapping, Optional, Tuple
+
+
+def _hidden_subprocess_kwargs() -> dict[str, int]:
+    """Prevent ffmpeg/ffprobe from flashing a console window on Windows."""
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    return {"creationflags": flags} if flags else {}
 
 try:
     from utils.helpers import find_ffmpeg, find_ffprobe
@@ -53,7 +59,7 @@ def _probe_duration(video_path: Path, ffmpeg: str) -> int:
             out = subprocess.run(
                 [fp, "-v", "error", "-show_entries", "format=duration",
                  "-of", "default=noprint_wrappers=1:nokey=1", str(video_path)],
-                capture_output=True, text=True, timeout=20)
+                capture_output=True, text=True, timeout=20, **_hidden_subprocess_kwargs())
             d = out.stdout.strip()
             if d:
                 return int(float(d))
@@ -62,7 +68,8 @@ def _probe_duration(video_path: Path, ffmpeg: str) -> int:
     if ffmpeg:
         try:
             out = subprocess.run([ffmpeg, "-i", str(video_path), "-f", "null", "-"],
-                                 capture_output=True, text=True, timeout=40)
+                                 capture_output=True, text=True, timeout=40,
+                                 **_hidden_subprocess_kwargs())
             m = re.search(r"Duration:\s*(\d+):(\d+):(\d+)\.(\d+)", out.stderr)
             if m:
                 h, mi, s, ms = map(int, m.groups())
@@ -98,16 +105,55 @@ def _load_font(size: int):
         return ImageFont.load_default()
 
 
+def _draw_timestamp_badge(image, timestamp: int, font) -> None:
+    """Render a readable timestamp badge in the lower-right corner of one cell."""
+    from PIL import ImageDraw
+
+    draw = ImageDraw.Draw(image)
+    label = _fmt_ts(timestamp)
+    padding_x, padding_y = 12, 8
+    bbox = draw.textbbox((0, 0), label, font=font, stroke_width=1)
+    text_width = bbox[2] - bbox[0]
+    text_height = bbox[3] - bbox[1]
+    x2 = image.width - 12
+    y2 = image.height - 12
+    x1 = x2 - text_width - padding_x * 2
+    y1 = y2 - text_height - padding_y * 2
+    draw.rounded_rectangle((x1, y1, x2, y2), radius=8, fill=(0, 0, 0))
+    # 时间戳放右下角
+    text_w = bbox[2] - bbox[0]
+    text_h = bbox[3] - bbox[1]
+    draw.text((x2 - padding_x - text_w, y2 - padding_y - text_h - bbox[1]), label,
+              fill="yellow", font=font, stroke_width=1, stroke_fill="black")
+
+
 def extract_single_frame(video_path: Path, ts: int, out_path: Path, ffmpeg: str) -> Optional[Path]:
     """在 ts 秒处截一张单帧；成功返回路径，失败返回 None。"""
     try:
         subprocess.run(
             [ffmpeg, "-ss", str(ts), "-i", str(video_path), "-frames:v", "1",
              "-q:v", "2", "-y", str(out_path), "-hide_banner", "-loglevel", "error"],
-            check=True, capture_output=True, text=True, timeout=60)
+            check=True, capture_output=True, text=True, timeout=60,
+            **_hidden_subprocess_kwargs())
         return out_path if out_path.exists() else None
     except Exception:
         return None
+
+
+def _frame_signature(path: Path) -> bytes | None:
+    """Tiny grayscale fingerprint: filters near-identical consecutive frames."""
+    try:
+        from PIL import Image
+        with Image.open(path) as image:
+            return image.convert("L").resize((16, 9), Image.Resampling.BILINEAR).tobytes()
+    except Exception:
+        return None
+
+
+def _frames_are_similar(left: bytes | None, right: bytes | None) -> bool:
+    if not left or not right or len(left) != len(right):
+        return False
+    return sum(abs(a - b) for a, b in zip(left, right)) / len(left) < 7.0
 
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -127,7 +173,7 @@ def extract_grid_frames(
     - 相邻帧画面相同（MD5 一致）则去重
     - 每 grid 张拼成一张图，单帧左上角打 mm:ss
     """
-    from PIL import Image, ImageDraw
+    from PIL import Image
     ffmpeg = _get_ffmpeg()
     if not ffmpeg:
         return []
@@ -153,6 +199,7 @@ def extract_grid_frames(
 
     frame_files: List[Tuple[int, Path]] = []
     last_hash = None
+    last_signature = None
     for ts in timestamps:
         out = tmp_dir / f"gf_{ts:06d}.jpg"
         p = extract_single_frame(video_path, ts, out, ffmpeg)
@@ -163,10 +210,12 @@ def extract_grid_frames(
                 h = hashlib.md5(Path(p).read_bytes()).hexdigest()
             except Exception:
                 h = None
-            if h == last_hash:
+            signature = _frame_signature(Path(p))
+            if h == last_hash or _frames_are_similar(last_signature, signature):
                 p.unlink(missing_ok=True)
                 continue
             last_hash = h
+            last_signature = signature
         frame_files.append((ts, Path(p)))
 
     if not frame_files:
@@ -185,9 +234,7 @@ def extract_grid_frames(
                 img = Image.open(fp).convert("RGB").resize(unit, Image.Resampling.LANCZOS)
             except Exception:
                 continue
-            draw = ImageDraw.Draw(img)
-            draw.text((10, 10), _fmt_ts(ts), fill="yellow", font=font,
-                      stroke_width=2, stroke_fill="black")
+            _draw_timestamp_badge(img, ts, font)
             cells.append(img)
         if not cells:
             continue
@@ -200,6 +247,31 @@ def extract_grid_frames(
 
     shutil.rmtree(str(tmp_dir), ignore_errors=True)
     return grid_imgs
+
+
+def visual_note_frame_options(video_config: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Build validated timeline-grid options from the shared ``video`` config."""
+    config = video_config or {}
+
+    def bounded(name: str, default: int, minimum: int, maximum: int) -> int:
+        try:
+            return max(minimum, min(maximum, int(config.get(name, default))))
+        except (TypeError, ValueError):
+            return default
+
+    return {
+        "frame_interval": bounded("visual_note_frame_interval", 6, 1, 60),
+        "max_frames": bounded("visual_note_max_frames", 240, 9, 360),
+        "grid": (
+            bounded("visual_note_grid_cols", 3, 1, 4),
+            bounded("visual_note_grid_rows", 3, 1, 4),
+        ),
+    }
+
+
+def extract_visual_note_grids(video_path, video_config: Mapping[str, Any] | None = None) -> List:
+    """Extract timestamped study-note grids using one validated configuration."""
+    return extract_grid_frames(video_path, **visual_note_frame_options(video_config))
 
 
 def grid_images_to_base64(images) -> List[str]:
@@ -244,7 +316,7 @@ def replace_markers_with_screenshots(markdown: str, video_path, inline: bool = T
         return f"![]({out})"
 
     md = _SCREENSHOT_RE.sub(shot_repl, markdown)
-    md = _CONTENT_RE.sub(lambda m: f"⏱ 原片时间点 {m.group(1)}:{m.group(2)}", md)
+    md = _CONTENT_RE.sub(lambda m: f"原片时间点 {m.group(1)}:{m.group(2)}", md)
     return md, count
 
 
@@ -254,11 +326,11 @@ def strip_image_data(markdown: str) -> str:
 
 
 # ───────────────────────────────────────────────────────────────────────────
-# 约束 prompt（复刻 BiliNote prompt_builder 的 toc/screenshot/link 三段）
+# 图文学习笔记输出约束：目录、截图和原片时间点。
 # ───────────────────────────────────────────────────────────────────────────
-def bilinote_prompt_suffix() -> str:
-    return (
-        "\n请按「Bilibili 图文笔记」风格输出 Markdown，遵循以下三点：\n"
+def visual_note_prompt_suffix(custom_prompt: str = "") -> str:
+    base = (
+        "\n请输出一份可复习的图文学习笔记，遵循以下三点：\n"
         "1. 目录：用 `##` 二级标题划分章节（至少 3 章），系统会据此生成目录。\n"
         "2. 原片截图：你看到的网格图每张是一个时间点，左上角标有 mm:ss。"
         "请在正文最合适的位置插入 `*Screenshot-[mm:ss]` 标记（例如 *Screenshot-[02:15]），"
@@ -266,3 +338,11 @@ def bilinote_prompt_suffix() -> str:
         "3. 原片时间点：如需提示读者回到原片某处，使用 `*Content-[mm:ss]` 标记。\n"
         "请直接输出 Markdown，不要使用代码块包裹整个内容。"
     )
+    prompt = (custom_prompt or "").strip()
+    if not prompt:
+        prompt = (
+            "请完整覆盖视频全过程，像教程/部署文档一样逐步讲解，"
+            "保留关键细节、命令、参数、配置和截图，不要省略步骤。"
+        )
+    base += f"\n\n【用户自定义要求】{prompt}"
+    return base

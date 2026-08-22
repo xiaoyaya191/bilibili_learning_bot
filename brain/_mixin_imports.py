@@ -8,11 +8,12 @@ import time
 import sys
 import shutil
 from datetime import datetime, timedelta
+from typing import Optional
 from io import BytesIO
 from pathlib import Path
 
 import httpx
-from openai import OpenAI
+# openai 库已全局移除，统一走 httpx 直连
 from colorama import Fore, Style
 from bilibili_api import Credential, user, homepage, comment, video, Danmaku, favorite_list
 from bilibili_api.comment import CommentResourceType
@@ -21,7 +22,13 @@ from bilibili_api.utils.network import Api
 
 from core.config import *
 from core.globals import *
-from api.subtitles import SYSTEM_PROMPT_BRAIN, SYSTEM_PROMPT_VISION, SYSTEM_PROMPT_SUMMARY
+from api.subtitles import (
+    SYSTEM_PROMPT_BRAIN,
+    SYSTEM_PROMPT_VISION,
+    SYSTEM_PROMPT_SUMMARY,
+    SYSTEM_PROMPT_COMMENT_SUMMARY,
+    SYSTEM_PROMPT_CURIOSITY_DIVE,
+)
 from persona.managers import PersonaManager, MoodManager, UserProfileManager, BotDiaryManager, SelfEvolutionManager, PrivateContextDB
 from security.guard import ReplySafetyGuard
 from services.utils import InterestManager, BiliToolbox

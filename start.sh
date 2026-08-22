@@ -43,7 +43,6 @@ check_and_install() {
 echo -e "${CYAN}[CHECK] 检查依赖...${NC}"
 check_and_install "flask" "flask"
 check_and_install "flask-cors" "flask_cors"
-check_and_install "openai" "openai"
 check_and_install "httpx" "httpx"
 check_and_install "qrcode" "qrcode"
 check_and_install "Pillow" "PIL"

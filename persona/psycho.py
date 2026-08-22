@@ -13,23 +13,25 @@
   L5 演变趋势 — 兴趣变迁、内在矛盾、成长轨迹
 
 推荐类型：
-  🎁 惊喜推荐 — AI高置信度但用户未接触过的内容
-  🔭 兴趣探索 — 用户从未涉足但可能感兴趣的新领域
-  🛡️ 内容筛选 — 识别并屏蔽低质/反感内容
-  🌐 内容拓展 — 推送与既有偏好不一致但能拓展视野的内容
-  📈 趋势推荐 — 与兴趣演变方向对齐的内容
+  惊喜推荐 — AI高置信度但用户未接触过的内容
+  兴趣探索 — 用户从未涉足但可能感兴趣的新领域
+  内容筛选 — 识别并屏蔽低质/反感内容
+  内容拓展 — 推送与既有偏好不一致但能拓展视野的内容
+  趋势推荐 — 与兴趣演变方向对齐的内容
 """
 
 import json
 import os
 import time
 import random
+import asyncio
 from datetime import datetime, timedelta
 from collections import defaultdict, Counter
 from math import log2
+from core.user_data import DATA_DIR as _SHARED_DATA_DIR
 
 # ── 文件路径 ─────────────────────────────────────────────────
-DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Data")
+DATA_DIR = str(_SHARED_DATA_DIR)
 PROFILE_FILE = os.path.join(DATA_DIR, "psycho_profile.json")
 RECOMMENDATION_LOG = os.path.join(DATA_DIR, "recommendation_log.json")
 ACTION_LOG_FILE = os.path.join(DATA_DIR, "action_log.json")
@@ -374,8 +376,8 @@ class InfoCocoonDetector:
             "content_type_entropy": round(tag_entropy, 3),
             "active_categories": active_groups,
             "total_categories": n_groups,
-            "cocoon_risk": ("🔴高风险" if diversity_score < 0.3 else
-                           ("🟡中度" if diversity_score < 0.55 else "🟢健康")),
+            "cocoon_risk": ("高风险" if diversity_score < 0.3 else
+                           ("中度" if diversity_score < 0.55 else "健康")),
             "last_detected_at": _ts(),
         }
         self.metrics = result
@@ -486,28 +488,28 @@ class PsychoProfile:
 
         lines = [
             "【用户深层画像 — 基于L1~L5五层分析】",
-            "📌 表层兴趣: " + ", ".join(f"{t}({s:.0%})" for t, s in top_tags),
-            "📁 偏好分区: " + ", ".join(f"{c}({s:.0%})" for c, s in top_cats),
-            "🧠 认知风格: " + cognitive_desc,
-            "💭 情感需求: " + ", ".join(f"{e}({s:.0%})" for e, s in top_emotions),
-            "🎯 深层动机: " + ", ".join(f"{m}({s:.0%})" for m, s in top_motivations),
-            "🌐 信息茧房: " + cocoon_risk + " | 多样性=" + str(cocoon.get("diversity_score", "?")),
+            "表层兴趣: " + ", ".join(f"{t}({s:.0%})" for t, s in top_tags),
+            "偏好分区: " + ", ".join(f"{c}({s:.0%})" for c, s in top_cats),
+            "认知风格: " + cognitive_desc,
+            "情感需求: " + ", ".join(f"{e}({s:.0%})" for e, s in top_emotions),
+            "深层动机: " + ", ".join(f"{m}({s:.0%})" for m, s in top_motivations),
+            "信息茧房: " + cocoon_risk + " | 多样性=" + str(cocoon.get("diversity_score", "?")),
         ]
 
         contradictions = L5.get("contradictions", [])
         if contradictions:
-            lines.append("⚡ 内在矛盾: " + contradictions[-1].get("insight", ""))
+            lines.append("内在矛盾: " + contradictions[-1].get("insight", ""))
 
         evolution = L5.get("interest_evolution", [])
         if evolution:
             latest = evolution[-1]
             rising = latest.get("rising", [])
             if rising:
-                lines.append("📈 新兴兴趣: " + ", ".join(rising[:3]))
+                lines.append("新兴兴趣: " + ", ".join(rising[:3]))
 
         summary = L5.get("personality_summary", "")
         if summary:
-            lines.append("💡 个性洞察: " + summary)
+            lines.append("个性洞察: " + summary)
 
         return "\n".join(lines)
 
@@ -702,7 +704,7 @@ class PsychoProfile:
                 text = text[:-3]
         start = text.find("{")
         if start >= 0:
-            # 🔧 嵌套匹配：正确找到闭合的 }，防止 AI 返回内容后有额外字符
+            # 嵌套匹配：正确找到闭合的 }，防止 AI 返回内容后有额外字符
             depth = 0
             for i in range(start, len(text)):
                 if text[i] == '{':
@@ -891,16 +893,16 @@ class RecommendationEngine:
             reasons.append("与你喜欢的「" + "/".join(matched_tags[:2]) + "」相关")
 
         if mode == "surprise":
-            reasons.insert(0, "🎁 AI高置信度惊喜推荐")
+            reasons.insert(0, "AI高置信度惊喜推荐")
             detail.append("虽不在常看范围，但基于深层画像AI认为你会非常喜欢")
         elif mode == "explore":
-            reasons.insert(0, "🔭 新领域探索")
+            reasons.insert(0, "新领域探索")
             detail.append("「" + (category or "新领域") + "」是你未接触但可能引发兴趣的方向")
         elif mode == "anticocoon":
-            reasons.insert(0, "🌐 打破信息茧房")
+            reasons.insert(0, "打破信息茧房")
             detail.append("与你常看的有点不一样，能拓展视野")
         elif mode == "trend":
-            reasons.insert(0, "📈 趋势对齐")
+            reasons.insert(0, "趋势对齐")
             detail.append("基于兴趣演变方向，可能是下一个会喜欢的领域")
 
         if L2.get("depth_preference", 0.5) > 0.6:
@@ -946,8 +948,8 @@ def create_psycho_engine(ai_caller=None):
 
 
 def get_mode_emoji(mode):
-    return {"surprise": "🎁", "explore": "🔭",
-            "anticocoon": "🌐", "trend": "📈"}.get(mode, "🎬")
+    return {"surprise": "", "explore": "",
+            "anticocoon": "", "trend": ""}.get(mode, "")
 
 
 def get_mode_label(mode):

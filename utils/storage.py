@@ -21,13 +21,27 @@ from typing import Any, Optional
 
 
 class JsonStore:
-    """线程安全的 JSON 文件读写器。每个文件一个实例，自动管理路径和锁。"""
+    """线程安全的 JSON 读写器。每个文件一个实例，自动管理路径和锁。"""
 
     def __init__(self, path: Path | str):
         if isinstance(path, str):
             path = Path(path)
         self._path = path
         self._lock = threading.Lock()
+
+    @staticmethod
+    def _atomic_dump(data: Any, tmp: Path, target: Path) -> None:
+        """写临时文件并替换目标；Windows 下文件被占用时短暂重试。"""
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        last_err: Exception | None = None
+        for attempt in range(4):
+            try:
+                tmp.replace(target)
+                return
+            except PermissionError as exc:
+                last_err = exc
+                time.sleep(0.12 * (attempt + 1))
+        raise last_err  # type: ignore[misc]
 
     @property
     def path(self) -> Path:
@@ -52,9 +66,7 @@ class JsonStore:
         with self._lock:
             try:
                 self._path.parent.mkdir(parents=True, exist_ok=True)
-                tmp = self._path.with_suffix(".tmp")
-                tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-                tmp.replace(self._path)
+                self._atomic_dump(data, self._path.with_suffix(".tmp"), self._path)
                 return True
             except Exception as e:
                 import sys
@@ -80,9 +92,7 @@ class JsonStore:
                 return False
             try:
                 self._path.parent.mkdir(parents=True, exist_ok=True)
-                tmp = self._path.with_suffix(".tmp")
-                tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-                tmp.replace(self._path)
+                self._atomic_dump(data, self._path.with_suffix(".tmp"), self._path)
                 return True
             except Exception as e:
                 import sys
@@ -107,18 +117,19 @@ class JsonStore:
 # ── API Key 脱敏 ──
 SENSITIVE_KEYS = {
     "api_key", "unified_api_key", "vision_api_key",
-    "password", "access_token", "refresh_token",
+    "password", "recovery_code", "recovery_answer", "access_token", "refresh_token",
     "sessdata", "bili_jct", "dedeuserid", "DedeUserID",
 }
 
 def sanitize_export(data: Any) -> Any:
-    """递归脱敏：将敏感字段替换为 '[已隐藏]'。
-    用于导出配置时防止 API Key 泄露。
+    """递归脱敏：将非空敏感字段替换为 '[已隐藏]'。
+    用于导出配置/面板下发配置时防止 API Key、密码哈希等泄露。
+    空值不脱敏，避免"未配置"被误显示为"已隐藏"。
     """
     if isinstance(data, dict):
         result = {}
         for key, value in data.items():
-            if key.lower() in SENSITIVE_KEYS:
+            if key.lower() in SENSITIVE_KEYS and value not in ("", None):
                 result[key] = "[已隐藏]"
             elif isinstance(value, (dict, list)):
                 result[key] = sanitize_export(value)
@@ -133,6 +144,42 @@ def sanitize_export(data: Any) -> Any:
 def sanitize_config_for_export(config: dict) -> dict:
     """对配置对象做导出脱敏，保留结构但隐藏敏感值。"""
     return sanitize_export(config)
+
+
+
+HIDDEN_PLACEHOLDER = "[已隐藏]"
+
+
+def is_hidden_placeholder(value) -> bool:
+    """判断是否为脱敏占位符（导出时写入的 '[已隐藏]'）。"""
+    return value == HIDDEN_PLACEHOLDER
+
+
+def strip_hidden_placeholders(obj, existing=None):
+    """递归移除导入数据中的 '[已隐藏]' 脱敏占位符。
+
+    导出配置时敏感字段会被替换为 '[已隐藏]'；如果直接导入会覆盖真实配置，
+    导致 API Key / Cookie 变成无效占位符。导入时应：
+    - 目标文件已有有效值时：保留现有值；
+    - 目标文件没有值时：删除该字段（缺失字段按空值处理，等待用户重新填写）。
+    """
+    if isinstance(obj, dict):
+        result = {}
+        for key, value in obj.items():
+            if value == "[已隐藏]":
+                if isinstance(existing, dict) and existing.get(key) not in (None, "", "[已隐藏]"):
+                    result[key] = existing[key]
+                continue
+            if isinstance(value, (dict, list)):
+                existing_child = existing.get(key) if isinstance(existing, dict) else None
+                result[key] = strip_hidden_placeholders(value, existing_child)
+            else:
+                result[key] = value
+        return result
+    if isinstance(obj, list):
+        return [strip_hidden_placeholders(item) for item in obj if item != "[已隐藏]"]
+    return obj
+
 
 
 # ── 路径安全校验 ──
@@ -168,8 +215,11 @@ def get_backup_dir() -> Path:
     其他 → ~/bilibili_claw_backup
     """
     import sys
+    custom_dir = os.getenv("BILI_BACKUP_DIR", "").strip()
+    if custom_dir:
+        return Path(custom_dir).expanduser()
     if sys.platform == 'win32':
-        return Path("C:/bilibili_claw_backup")
+        return Path.home() / "bilibili_claw_backup"
     # Android (Termux) 检测：使用共享存储，方便文件管理器访问/跨实例迁移
     android_storage = Path("/storage/emulated/0")
     if android_storage.exists():

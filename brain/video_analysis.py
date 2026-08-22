@@ -140,6 +140,8 @@ async def analyze_bilibili_video_input(user_input: str, force_mode: str | None =
     title = ""
     up_name = "未知"
     up_uid = 0
+    aid = 0
+    cover_url = ""
     try:
         meta = await brain.bili._wbi_get('https://api.bilibili.com/x/web-interface/view', params={'bvid': bvid})
         vinfo = meta.json()
@@ -148,12 +150,20 @@ async def analyze_bilibili_video_input(user_input: str, force_mode: str | None =
             title = vdata.get('title', '')
             up_name = vdata.get('owner', {}).get('name', '未知')
             up_uid = vdata.get('owner', {}).get('mid', 0)
+            aid = vdata.get('aid', 0)
+            cover_url = vdata.get('pic', '')
+            brain._last_video_desc = vdata.get('desc', '') or ''
+            brain._current_video_tags = vdata.get('tags', []) or []
+            brain._current_video_category = vdata.get('tname', '') or ''
+            brain._current_video_duration = vdata.get('duration', 0) or 0
         else:
             return False, f"获取视频信息失败: code={vinfo.get('code')}"
     except Exception as e:
         return False, f"获取视频信息失败: {e}"
 
     video_url = f"https://www.bilibili.com/video/{bvid}"
+    cover_desc, _cover_score = await brain.analyze_vision(cover_url)
+    brain._current_video_cover_desc = cover_desc
     success, subtitle_text = await brain.understand_video_for_decision(bvid, title=title, force_mode=force_mode)
     if not success:
         subtitle_text = f"[理解受限] {subtitle_text}"
@@ -162,18 +172,15 @@ async def analyze_bilibili_video_input(user_input: str, force_mode: str | None =
 
     comment_text = "[未读取评论]"
     danmaku_text = ""
-    aid = 0
-    try:
-        meta = await brain.bili._wbi_get('https://api.bilibili.com/x/web-interface/view', params={'bvid': bvid})
-        vinfo = meta.json()
-        aid = vinfo.get('data', {}).get('aid', 0) if vinfo.get('code') == 0 else 0
-    except Exception:
-        aid = 0
     if aid:
-        try:
-            comment_text, _c_list = await brain._get_comments_context(aid)
-        except Exception:
-            comment_text = "[未读取评论]"
+        workflow_cfg = config.get("learning_workflow", {}) if isinstance(config, dict) else {}
+        if workflow_cfg.get("read_comments", True):
+            try:
+                comment_text, _c_list = await brain._get_comments_context(aid)
+            except Exception:
+                comment_text = "[未读取评论]"
+        else:
+            comment_text = "[评论读取已在学习流程中关闭]"
         try:
             danmaku_list = await brain.maybe_read_danmaku(bvid, force=True)
             if danmaku_list:
@@ -185,7 +192,7 @@ async def analyze_bilibili_video_input(user_input: str, force_mode: str | None =
     objective_prompt += "\n\n【性格模式】客观分析模式：基于内容质量公正评分，不随机切换夸夸/吐槽。"
     if intent:
         objective_prompt += f"\n\n【用户额外要求】{intent}"
-    context = f"视频标题: {title}\nUP主: {up_name}\n【视频内容字幕】:{subtitle_text}\n{comment_text}\n{danmaku_text}"
+    context = f"视频标题: {title}\nUP主: {up_name}\n视频简介: {brain._last_video_desc}\n封面描述: {cover_desc}\n【视频内容字幕】:{subtitle_text}\n{comment_text}\n{danmaku_text}"
 
     score = 0
     thought = ""
@@ -197,9 +204,12 @@ async def analyze_bilibili_video_input(user_input: str, force_mode: str | None =
             request_timeout=120,
         )
         raw = resp.choices[0].message.content
-        start, end = raw.find("{"), raw.rfind("}")
-        if start >= 0 and end >= start:
-            decision = json.loads(raw[start:end + 1])
+        start = raw.find("{")
+        if start >= 0:
+            # Models sometimes append a second JSON block or explanatory text.
+            # Decode only the first complete object instead of consuming through
+            # the final closing brace and raising ``Extra data``.
+            decision, _ = json.JSONDecoder().raw_decode(raw[start:])
             score = float(decision.get('score', 0) or 0)
             thought = decision.get('thought', '')
             learning_topic = decision.get('learning_topic', '') or learning_topic
@@ -226,7 +236,7 @@ async def analyze_bilibili_video_input(user_input: str, force_mode: str | None =
 async def manual_video_analysis(force_platform: str | None = "bilibili"):
     """手动视频分析：用户输入链接/标题/UP主名，AI客观解析视频内容。"""
     print(f"\n{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
-    print(f"{Fore.CYAN}|               📹 手动视频分析 - 客观AI解析                    |{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}|               手动视频分析 - 客观AI解析                    |{Style.RESET_ALL}")
     print(f"{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
     print(f"{Fore.YELLOW}[INFO] 支持: B站视频链接 | BV号 | 视频标题 | UP主名字{Style.RESET_ALL}")
     print(f"{Fore.YELLOW}[INFO] 此模式下AI不带心情/人格滤镜，纯客观分析{Style.RESET_ALL}")
@@ -392,9 +402,9 @@ async def manual_video_analysis(force_platform: str | None = "bilibili"):
             title_display = r['title'][:50]
             author = r.get('author', '?')
             bvid = r.get('bvid', '')
-            tag = f"  {'📝 有字幕' if sub_status.get(bvid) else '🔇 无字幕'}" if bvid in sub_status else ""
+            tag = f"  {'有字幕' if sub_status.get(bvid) else '无字幕'}" if bvid in sub_status else ""
             print(f"  {Fore.YELLOW}{i+1:>2}.{Style.RESET_ALL} {title_display}{tag}")
-            print(f"      {Fore.LIGHTBLACK_EX}@{author}  |  ▶ {play_str}  |  ⏱ {dur}{Style.RESET_ALL}")
+            print(f"      {Fore.LIGHTBLACK_EX}@{author}  |  ▶ {play_str}  |  {dur}{Style.RESET_ALL}")
         print(f"{Fore.CYAN}{'─' * 80}{Style.RESET_ALL}")
         print(f"  {Fore.YELLOW} 0.{Style.RESET_ALL} 取消")
         print(f"  {Fore.CYAN}输入UP主名字可搜索TA的最新视频{Style.RESET_ALL}")
@@ -491,7 +501,7 @@ async def manual_video_analysis(force_platform: str | None = "bilibili"):
     print(f"\n{Fore.CYAN}选择分析模式:{Style.RESET_ALL}")
     print(f"  {Fore.GREEN}Enter (回车){Style.RESET_ALL} = 直接分析：输入一句话意图，自动看视频归档")
     print(f"  {Fore.LIGHTMAGENTA_EX}A (Agent){Style.RESET_ALL}  = Agent对话：多轮对话确定目标、搜索知识库、增删改查文件")
-    print(f"  {Fore.LIGHTBLUE_EX}S (一句话){Style.RESET_ALL}  = 🤖 一句话Agent：说一句话，AI自动规划→执行→汇报，无需多轮")
+    print(f"  {Fore.LIGHTBLUE_EX}S (一句话){Style.RESET_ALL}  = 一句话Agent：说一句话，AI自动规划→执行→汇报，无需多轮")
     mode_choice = input(f"\n{Fore.CYAN}模式 (回车=直接分析 / A-Agent对话 / S-一句话Agent): {Style.RESET_ALL}").strip().lower()
 
     if mode_choice == "a":
@@ -675,20 +685,21 @@ async def manual_video_analysis(force_platform: str | None = "bilibili"):
             print(f"\n{Fore.CYAN}[3/4] AI客观决策分析中...{Style.RESET_ALL}")
 
         objective_prompt = SYSTEM_PROMPT_BRAIN.replace("{bot_name}", get_bot_name()).replace("{memory_ups}", str(brain.get_known_up_names()))
+        # 评分标准由 config.judgment.video_decision 控制（判定提示词分区），默认与内置一致
+        from core.judgment import get_judgment
+        _jd = get_judgment()["video_decision"]
         objective_prompt = objective_prompt.replace(
             "【性格模式】掷硬币决定：- **夸夸模式**：真诚赞美。 - **吐槽模式**：犀利毒舌。",
-            "【性格模式】客观分析模式：基于内容质量公正评分，不随机切换夸夸/吐槽。\n"
-            "评分标准：\n"
-            "1. 标题与内容匹配度（是否标题党）\n"
-            "2. 信息价值——深度分析类看观点深度，新闻汇总类看信息广度/信息量，技术教程类看实用性/可操作性\n"
-            "3. 制作质量\n"
-            "⚠️ 注意：不同类型的视频有不同的价值维度。'信息差/新闻汇总'类视频的价值在于快速覆盖多个热点话题提供的信息广度，不要统一用深度分析的标准去评判。只要有真实信息量的新闻汇总就应当认可。"
+            "【性格模式】客观分析模式：基于内容质量公正评分，不随机切换夸夸/吐槽。\n" + str(_jd["objective_scoring_criteria"])
         )
+        _jd_extra = str(_jd.get("extra_requirements") or "").strip()
+        if _jd_extra:
+            objective_prompt += f"\n\n【用户额外要求】{_jd_extra}"
         if intent:
             objective_prompt += f"\n\n【用户额外要求】{intent}"
 
         context = (f"视频标题: {title}\nUP主: {up_name}\n"
-                   f"【📺 视频内容字幕】: {subtitle_text}\n"
+                   f"【视频内容字幕】: {subtitle_text}\n"
                    f"{comment_text}"
                    f"{danmaku_text}")
 
@@ -769,7 +780,7 @@ async def manual_video_analysis(force_platform: str | None = "bilibili"):
         if learn_text and len(learn_text) > 20:
             try:
                 _desc = getattr(brain, "_last_video_desc", "")
-                learn_success = await brain.learn_from_video(bvid, title, up_name, video_url, learn_text, learning_topic, video_desc=_desc, score=score)
+                learn_success = await brain.learn_from_video(bvid, title, up_name, video_url, learn_text, learning_topic, video_desc=_desc, score=score, skip_auto_export=True)
                 if learn_success:
                     print(f"{Fore.GREEN}[OK] 知识已归档到知识库！{Style.RESET_ALL}")
                 else:
@@ -794,7 +805,7 @@ async def manual_video_analysis(force_platform: str | None = "bilibili"):
             title, up_name, video_url, _ctx,
             stats=None, desc=_desc, bvid=bvid, brain=brain)
     except Exception as _ex:
-        print(f"{Fore.YELLOW}  ⚠ 附加导出已跳过: {_ex}{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}  附加导出已跳过: {_ex}{Style.RESET_ALL}")
 
     print(f"\n{Fore.GREEN}+============================================================+{Style.RESET_ALL}")
     print(f"{Fore.GREEN}|  手动视频分析完成！                                         |{Style.RESET_ALL}")
@@ -887,12 +898,12 @@ AGENT_TOOLS_HELP = """你拥有以下工具能力，在回复中使用 [TOOL:工
    例: [TOOL:open_file] C:\\Users\\用户名\\Desktop\\视频总结.md
    **仅在update_file写文件成功后使用。路径必须用双反斜杠 \\\\ 分隔。**
 
-[TASK:✗ 任务描述] 添加一个待办任务（显示为 ✗ 未完成）
-[TASK:✓ 任务描述] 标记一个任务为已完成（显示为 ✓ 已完成）
+[TASK:任务描述] 添加一个待办任务（显示为 未完成）
+[TASK:任务描述] 标记一个任务为已完成（显示为 已完成）
 
 使用说明：
-- 当你接收用户指令后，先用 [TASK:✗] 列出你规划的所有步骤，再开始调用 [TOOL:]
-- 每完成一个步骤，用 [TASK:✓ 同描述] 标记它已完成
+- 当你接收用户指令后，先用 [TASK:] 列出你规划的所有步骤，再开始调用 [TOOL:]
+- 每完成一个步骤，用 [TASK:同描述] 标记它已完成
 - 任务看板会自动渲染在对话中，让用户看到进度
 - 所有任务完成后输出 [DONE]
 
@@ -901,11 +912,20 @@ AGENT_TOOLS_HELP = """你拥有以下工具能力，在回复中使用 [TOOL:工
 - 用户提到"字幕"/"内容"/"分析视频/总结"等 → 必须先 [TOOL:fetch_subtitles]
 - 用户只要热度/评论反馈 → 可以用 [TOOL:quick_preview]
 - 拿到字幕后，按用户要求分析/总结/归档
-- 可一次调用多个工具以提高效率"""
+- 可一次调用多个工具以提高效率
+
+互动工具（需用户开启对应开关）：
+10. [TOOL:like_video] BV号 — 点赞视频
+11. [TOOL:coin_video] BV号 — 投币(可选数量)
+12. [TOOL:favorite_video] BV号 — 收藏视频
+13. [TOOL:follow_up] UID — 关注UP主
+14. [TOOL:get_video_info] BV号 — 获取视频详情
+
+你可以主动关注你感兴趣的UP主，点赞/收藏好视频。这些操作会受功能开关控制。"""
 
 
 async def _one_sentence_agent(brain, bvid, title, up_name, video_url, aid=0):
-    """🤖 一句话Agent模式：用户说一句话，AI自动规划任务→逐步执行→汇报结果。
+    """一句话Agent模式：用户说一句话，AI自动规划任务→逐步执行→汇报结果。
     
     和 _agent_video_analysis 共享相同的内核，但：
     - 用户只输入一次指令
@@ -913,7 +933,7 @@ async def _one_sentence_agent(brain, bvid, title, up_name, video_url, aid=0):
     - 无需多轮对话确认
     """
     print(f"\n{Fore.LIGHTBLUE_EX}+============================================================+{Style.RESET_ALL}")
-    print(f"{Fore.LIGHTBLUE_EX}|  🤖 一句话Agent - 全自动执行模式                          |{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTBLUE_EX}|  一句话Agent - 全自动执行模式                          |{Style.RESET_ALL}")
     print(f"{Fore.LIGHTBLUE_EX}+============================================================+{Style.RESET_ALL}")
     print(f"{Fore.CYAN}[Agent] 视频: {title[:50]}{Style.RESET_ALL}")
 
@@ -940,8 +960,8 @@ async def _one_sentence_agent(brain, bvid, title, up_name, video_url, aid=0):
 
 重要规则:
 1. 用户只说了一句话，你需要自己规划全部步骤并执行完成
-2. 用 [TASK:✗ 步骤名] 列出你的计划，逐步完成
-3. 完成一步就标记 [TASK:✓ 步骤名]
+2. 用 [TASK:步骤名] 列出你的计划，逐步完成
+3. 完成一步就标记 [TASK:步骤名]
 4. 全部完成后输出 [DONE]
 5. 不要等待用户确认，直接执行所有需要的操作"""},
         {"role": "user", "content": user_msg}
@@ -952,23 +972,23 @@ async def _one_sentence_agent(brain, bvid, title, up_name, video_url, aid=0):
     def _render_task_board():
         if not task_board:
             return ""
-        lines = ["\n" + Fore.CYAN + "📋 任务看板:" + Style.RESET_ALL]
+        lines = ["\n" + Fore.CYAN + "任务看板:" + Style.RESET_ALL]
         for t in task_board:
-            icon = Fore.GREEN + "✓" + Style.RESET_ALL if t["done"] else Fore.RED + "✗" + Style.RESET_ALL
+            icon = Fore.GREEN + "" + Style.RESET_ALL if t["done"] else Fore.RED + "" + Style.RESET_ALL
             status = Fore.LIGHTBLACK_EX + "(完成)" + Style.RESET_ALL if t["done"] else Fore.YELLOW + "(进行中)" + Style.RESET_ALL
             lines.append(f"  {icon} {t['task']} {status}")
         return "\n".join(lines)
 
     def _parse_tasks(text):
         nonlocal task_board
-        task_pattern = re.compile(r'\[TASK:([✓✗])\s*(.*?)\]')
+        task_pattern = re.compile(r'\[TASK:([])\s*(.*?)\]')
         for match in task_pattern.finditer(text):
             status = match.group(1)
             task_desc = match.group(2).strip()
-            if status == "✗":
+            if status == "":
                 if not any(t["task"] == task_desc for t in task_board):
                     task_board.append({"task": task_desc, "done": False})
-            elif status == "✓":
+            elif status == "":
                 for t in task_board:
                     if t["task"] == task_desc and not t["done"]:
                         t["done"] = True
@@ -1025,15 +1045,16 @@ async def _one_sentence_agent(brain, bvid, title, up_name, video_url, aid=0):
 
         # AI决策
         objective_prompt = SYSTEM_PROMPT_BRAIN.replace("{bot_name}", get_bot_name()).replace("{memory_ups}", str(brain.get_known_up_names()))
+        # 评分标准由 config.judgment.video_decision 控制（判定提示词分区），默认与内置一致
+        from core.judgment import get_judgment
+        _jd = get_judgment()["video_decision"]
         objective_prompt = objective_prompt.replace(
             "【性格模式】掷硬币决定：- **夸夸模式**：真诚赞美。 - **吐槽模式**：犀利毒舌。",
-            "【性格模式】客观分析模式：基于内容质量公正评分，不随机切换夸夸/吐槽。\n"
-            "评分标准：\n"
-            "1. 标题与内容匹配度（是否标题党）\n"
-            "2. 信息价值——深度分析类看观点深度，新闻汇总类看信息广度/信息量，技术教程类看实用性/可操作性\n"
-            "3. 制作质量\n"
-            "⚠️ 注意：不同类型的视频有不同的价值维度。'信息差/新闻汇总'类视频的价值在于快速覆盖多个热点话题提供的信息广度，不要统一用深度分析的标准去评判。只要有真实信息量的新闻汇总就应当认可。"
+            "【性格模式】客观分析模式：基于内容质量公正评分，不随机切换夸夸/吐槽。\n" + str(_jd["objective_scoring_criteria"])
         )
+        _jd_extra = str(_jd.get("extra_requirements") or "").strip()
+        if _jd_extra:
+            objective_prompt += f"\n\n【用户额外要求】{_jd_extra}"
         context = f"视频标题: {title}\nUP主: {up_name}\n【字幕】: {subtitle_text[:2000]}\n{comment_text}\n{danmaku_text}"
         try:
             resp = await brain._call_ai_with_retry(model=MODEL_BRAIN, messages=[{"role":"system","content":objective_prompt},{"role":"user","content":context}], request_timeout=120)
@@ -1080,7 +1101,7 @@ async def _one_sentence_agent(brain, bvid, title, up_name, video_url, aid=0):
             display_text = display_text.replace(f"[TOOL:{tn}] {tb}", "")
         if done_match:
             display_text = display_text.replace("[DONE]", "")
-        display_text = re.sub(r'\[TASK:[✓✗]\s*.*?\]', '', display_text)
+        display_text = re.sub(r'\[TASK:[]\s*.*?\]', '', display_text)
         display_text = display_text.strip()
         if display_text:
             print(f"\n{Fore.LIGHTGREEN_EX}[Agent] AI > {Style.RESET_ALL}{display_text}")
@@ -1091,7 +1112,7 @@ async def _one_sentence_agent(brain, bvid, title, up_name, video_url, aid=0):
             print(board)
 
         if done_match and not tool_matches:
-            print(f"\n{Fore.GREEN}[Agent] ✅ 一句话任务全部完成！{Style.RESET_ALL}")
+            print(f"\n{Fore.GREEN}[Agent] 一句话任务全部完成！{Style.RESET_ALL}")
             task_done = True
             break
 
@@ -1155,7 +1176,7 @@ async def _agent_video_analysis(brain, bvid, title, up_name, video_url, aid=0):
     - quick_preview: 只看标题/简介/评论/弹幕
     """
     print(f"\n{Fore.LIGHTMAGENTA_EX}+============================================================+{Style.RESET_ALL}")
-    print(f"{Fore.LIGHTMAGENTA_EX}|  🤖 Agent对话模式 - 多轮对话 + 文件CRUD + 智能分析          |{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTMAGENTA_EX}|  Agent对话模式 - 多轮对话 + 文件CRUD + 智能分析          |{Style.RESET_ALL}")
     print(f"{Fore.LIGHTMAGENTA_EX}+============================================================+{Style.RESET_ALL}")
     print(f"{Fore.CYAN}[Agent] 视频: {title[:50]}{Style.RESET_ALL}")
     print(f"{Fore.CYAN}[Agent] 输入你的要求，AI会提问/搜索知识库/增删改查文件/决定如何分析{Style.RESET_ALL}")
@@ -1184,25 +1205,25 @@ async def _agent_video_analysis(brain, bvid, title, up_name, video_url, aid=0):
         """渲染任务看板为字符串"""
         if not task_board:
             return ""
-        lines = ["\n" + Fore.CYAN + "📋 任务看板:" + Style.RESET_ALL]
+        lines = ["\n" + Fore.CYAN + "任务看板:" + Style.RESET_ALL]
         for t in task_board:
-            icon = Fore.GREEN + "✓" + Style.RESET_ALL if t["done"] else Fore.RED + "✗" + Style.RESET_ALL
+            icon = Fore.GREEN + "" + Style.RESET_ALL if t["done"] else Fore.RED + "" + Style.RESET_ALL
             status = Fore.LIGHTBLACK_EX + "(完成)" + Style.RESET_ALL if t["done"] else Fore.YELLOW + "(进行中)" + Style.RESET_ALL
             lines.append(f"  {icon} {t['task']} {status}")
         return "\n".join(lines)
 
     def _parse_tasks(text):
-        """从AI回复中解析 [TASK:✗ 描述] 和 [TASK:✓ 描述] 标记"""
+        """从AI回复中解析 [TASK:描述] 和 [TASK:描述] 标记"""
         nonlocal task_board
-        task_pattern = re.compile(r'\[TASK:([✓✗])\s*(.*?)\]')
+        task_pattern = re.compile(r'\[TASK:([])\s*(.*?)\]')
         for match in task_pattern.finditer(text):
             status = match.group(1)
             task_desc = match.group(2).strip()
-            if status == "✗":
+            if status == "":
                 # 添加新任务（去重）
                 if not any(t["task"] == task_desc for t in task_board):
                     task_board.append({"task": task_desc, "done": False})
-            elif status == "✓":
+            elif status == "":
                 # 标记完成
                 for t in task_board:
                     if t["task"] == task_desc and not t["done"]:
@@ -1627,7 +1648,7 @@ UP主: {up_name}
             "1. 标题与内容匹配度（是否标题党）\n"
             "2. 信息价值——深度分析类看观点深度，新闻汇总类看信息广度/信息量，技术教程类看实用性/可操作性\n"
             "3. 制作质量\n"
-            "⚠️ 注意：不同类型的视频有不同的价值维度。'信息差/新闻汇总'类视频的价值在于快速覆盖多个热点话题提供的信息广度，不要统一用深度分析的标准去评判。只要有真实信息量的新闻汇总就应当认可。"
+            "注意：不同类型的视频有不同的价值维度。'信息差/新闻汇总'类视频的价值在于快速覆盖多个热点话题提供的信息广度，不要统一用深度分析的标准去评判。只要有真实信息量的新闻汇总就应当认可。"
         )
 
         context = (f"视频标题: {title}\nUP主: {up_name}\n"
@@ -1797,7 +1818,7 @@ AI判断: {thought}
                 display_text = display_text.replace(f"[TOOL:{tool_name}] {tool_body}", "")
             if done_match:
                 display_text = display_text.replace("[DONE]", "")
-            display_text = re.sub(r'\[TASK:[✓✗]\s*.*?\]', '', display_text)
+            display_text = re.sub(r'\[TASK:[]\s*.*?\]', '', display_text)
             display_text = display_text.strip()
             if display_text:
                 print(f"\n{Fore.LIGHTGREEN_EX}[Agent] AI > {Style.RESET_ALL}{display_text}")
@@ -1916,7 +1937,7 @@ AI判断: {thought}
 async def up_homepage_learn():
     """UP主主页批量学习：输入UP主名字/UID，获取主页视频列表，用户设置数量后逐个AI学习。"""
     print(f"\n{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
-    print(f"{Fore.CYAN}|               📚 UP主主页批量学习                            |{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}|               UP主主页批量学习                            |{Style.RESET_ALL}")
     print(f"{Fore.CYAN}+============================================================+{Style.RESET_ALL}")
     print(f"{Fore.YELLOW}[INFO] 输入UP主名字或UID，获取TA主页的视频进行AI学习{Style.RESET_ALL}")
 
@@ -2162,7 +2183,7 @@ async def up_homepage_learn():
             )
 
             context = (f"视频标题: {title}\nUP主: {up_name}\n"
-                       f"【📺 视频内容字幕】: {subtitle_text[:3000]}\n")
+                       f"【视频内容字幕】: {subtitle_text[:3000]}\n")
 
             resp = await brain._call_ai_with_retry(
                 model=MODEL_BRAIN,
@@ -2203,7 +2224,7 @@ async def up_homepage_learn():
                     _desc = getattr(brain, "_last_video_desc", "")
                     learn_ok = await brain.learn_from_video(bvid, title, up_name, video_url, learn_text, learning_topic, video_desc=_desc, score=score)
                     if learn_ok:
-                        print(f"{Fore.GREEN}[OK] ✓ 已归档 (评分 {score}){Style.RESET_ALL}")
+                        print(f"{Fore.GREEN}[OK] 已归档 (评分 {score}){Style.RESET_ALL}")
                         success_count += 1
                     else:
                         print(f"{Fore.YELLOW}[INFO] 知识已存在，跳过{Style.RESET_ALL}")
