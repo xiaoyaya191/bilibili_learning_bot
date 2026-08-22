@@ -3,7 +3,7 @@ import asyncio
 import hashlib
 import json
 import os
-import msvcrt
+import sys
 import random
 import re
 import time
@@ -108,8 +108,9 @@ class PrivateMessageManager:
                 log(f"[WARN] 私信日志加载失败: {e}", "WARN")
         return {"processed_msg_ids": [], "history": []}
 
+    # ==================== 修改开始 ====================
     def _save_log(self):
-        """跨进程安全保存私信日志。
+        """跨进程安全保存私信日志（Windows/Linux 通用）。
 
         所有 PrivateMessageManager 实例都用同一个 ``.lock`` 文件串行化：持锁后
         才重读磁盘、合并本进程条目、原子替换文件。这样两个进程即使同时进入保存，
@@ -124,12 +125,13 @@ class PrivateMessageManager:
             lock_file.seek(0)
             lock_file.write(b"0")
             lock_file.flush()
-            # Windows msvcrt byte-range lock is released automatically if a
-            # process exits unexpectedly; it protects the full read/merge/write
-            # critical section, while os.replace keeps readers from seeing JSON
-            # half-written.
-            lock_file.seek(0)
-            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+            # ----- 跨平台文件锁 -----
+            if sys.platform == 'win32':
+                import msvcrt
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
             locked = True
 
             self.log_data["processed_msg_ids"] = list(self.processed_msg_ids)
@@ -165,10 +167,15 @@ class PrivateMessageManager:
             if lock_file is not None:
                 try:
                     if locked:
-                        lock_file.seek(0)
-                        msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                        if sys.platform == 'win32':
+                            import msvcrt
+                            msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                        else:
+                            import fcntl
+                            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
                 finally:
                     lock_file.close()
+    # ==================== 修改结束 ====================
 
     def _mark_processed(self, msg_id):
         self.processed_msg_ids.add(str(msg_id))
