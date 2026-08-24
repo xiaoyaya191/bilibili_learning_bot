@@ -137,6 +137,15 @@ def _is_fast_fail_error(error: Exception) -> bool:
     ))
 
 
+def _openai_available() -> bool:
+    """openai ??????????? httpx ???"""
+    try:
+        from openai import OpenAI
+        return True
+    except Exception:
+        return False
+
+
 def _live_config() -> dict:
     """实时读取 API 配置（绕过 import * 导致的模块级变量缓存问题）。
     每次调用都从 config 字典重新读取，确保用户通过菜单修改后即时生效。"""
@@ -317,9 +326,12 @@ async def call_ai_raw(
 
     async def _attempt_with_model(_m):
         # 用指定模型跑完整重试循环；成功返回 resp，失败抛最后一个错误。
-        backends = [
-            ("httpx", _call_ai_via_httpx),
-        ]
+        # Both historical entry points now use the same native httpx
+        # transport.  Do not fan out to a second network call merely because
+        # the optional ``openai`` package happens to be installed: that makes
+        # fast-fail gateway errors retry against the same endpoint and can
+        # unexpectedly delay callers.
+        backends = [("httpx", _call_ai_via_httpx)]
 
         last_error = None
         max_attempts = 3
@@ -440,6 +452,57 @@ async def call_ai(
         return ""
 
 
+
+async def _call_ai_with_tools_via_httpx(
+    messages: list[dict], tools: list[dict], *, model: str, temperature: float, max_tokens: int,
+    timeout: float, verbose: bool, max_tool_rounds: int, tool_handler: Any,
+) -> str:
+    """openai ?????? httpx ???????"""
+    allowed = {str(tool.get("function", {}).get("name", "")) for tool in tools}
+
+    async def execute_tool(name: str, args: dict) -> str:
+        try:
+            result=tool_handler(name,args)
+            if inspect.isawaitable(result):result=await result
+            return result if isinstance(result,str) else json.dumps(result,ensure_ascii=False)
+        except Exception as exc:return f"??????: {exc}"
+
+    for round_no in range(max_tool_rounds):
+        try:
+            resp=await call_ai_raw(messages=messages,model=model,temperature=temperature,max_tokens=max_tokens,
+                timeout=timeout,verbose=False,tools=tools,tool_choice="auto")
+        except Exception as exc:
+            if verbose:print(f"{Fore.YELLOW}[AI-tools][httpx] ?{round_no+1}?????: {exc}{Style.RESET_ALL}")
+            break
+        msg=resp.choices[0].message;calls=getattr(msg,"tool_calls",None) or []
+        if not calls:
+            parsed=_extract_text_tool_call(msg.content or "",allowed)
+            if not parsed:return msg.content or ""
+            name,args=parsed;result=await execute_tool(name,args)
+            messages.append({"role":"assistant","content":msg.content or ""})
+            messages.append({"role":"user","content":f"?? {name} ?????????\n{result}\n\n????????????? finalize ???"})
+            continue
+        normalized=[]
+        for index,item in enumerate(calls):
+            if isinstance(item,dict):
+                fn=item.get("function") or {};name=str(fn.get("name") or "");raw=str(fn.get("arguments") or "{}");cid=str(item.get("id") or f"call_{round_no}_{index}")
+            else:name=item.function.name;raw=item.function.arguments;cid=item.id
+            normalized.append({"id":cid,"type":"function","function":{"name":name,"arguments":raw}})
+        messages.append({"role":"assistant","content":msg.content or "","tool_calls":normalized})
+        for item in normalized:
+            name=item["function"]["name"]
+            try:args=json.loads(item["function"]["arguments"])
+            except (json.JSONDecodeError,TypeError):args={}
+            result=await execute_tool(name,args);messages.append({"role":"tool","tool_call_id":item["id"],"content":result})
+            if verbose:print(f"{Fore.CYAN}[AI-tools][httpx] ?? {name}({json.dumps(args,ensure_ascii=False)[:120]}) ? {result[:80]}...{Style.RESET_ALL}")
+    try:
+        resp=await call_ai_raw(messages=messages,model=model,temperature=temperature,max_tokens=max_tokens,timeout=timeout,verbose=False)
+        return resp.choices[0].message.content or ""
+    except Exception as exc:
+        if verbose:print(f"{Fore.YELLOW}[AI-tools][httpx] ????????: {exc}{Style.RESET_ALL}")
+        return ""
+
+
 async def call_ai_with_tools(
     messages: list[dict],
     tools: list[dict],
@@ -478,6 +541,13 @@ async def call_ai_with_tools(
     _model = model or live.get("model_brain", "")
     if not _model:
         raise RuntimeError("未配置 model_brain，请在配置菜单中设置 AI 模型")
+
+    if not _openai_available():
+        return await _call_ai_with_tools_via_httpx(
+            messages=messages, tools=tools, model=_model, temperature=temperature,
+            max_tokens=max_tokens, timeout=timeout, verbose=verbose,
+            max_tool_rounds=max_tool_rounds, tool_handler=tool_handler,
+        )
 
     # 纯 httpx 直连执行 Function Calling 循环（不依赖 openai 库）
     import httpx as _httpx

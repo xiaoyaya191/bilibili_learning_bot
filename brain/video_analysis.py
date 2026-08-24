@@ -981,10 +981,10 @@ async def _one_sentence_agent(brain, bvid, title, up_name, video_url, aid=0):
 
     def _parse_tasks(text):
         nonlocal task_board
-        task_pattern = re.compile(r'\[TASK:([])\s*(.*?)\]')
+        task_pattern = re.compile(r'\[TASK:([^\]]*)\]')
         for match in task_pattern.finditer(text):
-            status = match.group(1)
-            task_desc = match.group(2).strip()
+            status = ""
+            task_desc = match.group(1).strip()
             if status == "":
                 if not any(t["task"] == task_desc for t in task_board):
                     task_board.append({"task": task_desc, "done": False})
@@ -1101,7 +1101,7 @@ async def _one_sentence_agent(brain, bvid, title, up_name, video_url, aid=0):
             display_text = display_text.replace(f"[TOOL:{tn}] {tb}", "")
         if done_match:
             display_text = display_text.replace("[DONE]", "")
-        display_text = re.sub(r'\[TASK:[]\s*.*?\]', '', display_text)
+        display_text = re.sub(r'\[TASK:[^\]]*\]', '', display_text)
         display_text = display_text.strip()
         if display_text:
             print(f"\n{Fore.LIGHTGREEN_EX}[Agent] AI > {Style.RESET_ALL}{display_text}")
@@ -1215,10 +1215,10 @@ async def _agent_video_analysis(brain, bvid, title, up_name, video_url, aid=0):
     def _parse_tasks(text):
         """从AI回复中解析 [TASK:描述] 和 [TASK:描述] 标记"""
         nonlocal task_board
-        task_pattern = re.compile(r'\[TASK:([])\s*(.*?)\]')
+        task_pattern = re.compile(r'\[TASK:([^\]]*)\]')
         for match in task_pattern.finditer(text):
-            status = match.group(1)
-            task_desc = match.group(2).strip()
+            status = ""
+            task_desc = match.group(1).strip()
             if status == "":
                 # 添加新任务（去重）
                 if not any(t["task"] == task_desc for t in task_board):
@@ -1818,7 +1818,7 @@ AI判断: {thought}
                 display_text = display_text.replace(f"[TOOL:{tool_name}] {tool_body}", "")
             if done_match:
                 display_text = display_text.replace("[DONE]", "")
-            display_text = re.sub(r'\[TASK:[]\s*.*?\]', '', display_text)
+            display_text = re.sub(r'\[TASK:[^\]]*\]', '', display_text)
             display_text = display_text.strip()
             if display_text:
                 print(f"\n{Fore.LIGHTGREEN_EX}[Agent] AI > {Style.RESET_ALL}{display_text}")

@@ -31,16 +31,15 @@ def sanitize_filename(name, is_folder=False):
 
 
 def ensure_ai_marker(text):
+    """Append the configured AI disclosure unless the reply is empty or already marked."""
     text = (text or "").strip()
-    marker = config.get("behavior", {}).get("ai_marker", "（内容由AI生成并由AI回复）")
+    marker = config.get("behavior", {}).get("ai_marker", "????AI????AI???")
+    legacy_marker = "(???AI????AI??)"
     if not text:
         return ""
-    if text == marker or text == "(内容由AI生成并由AI回复)":
-        return ""
-    if marker in text or "(内容由AI生成并由AI回复)" in text:
+    if marker in text or legacy_marker in text:
         return text
     return f"{text}{marker}"
-
 
 def unix_to_iso(ts):
     try:

@@ -173,7 +173,23 @@ def _write_recovery_file(username: str, recovery_code: str) -> bool:
             encoding="utf-8",
         )
         os.chmod(temp_path, 0o600)
-        os.replace(temp_path, path)
+        # Windows Defender/indexers can briefly hold the previous recovery
+        # file during account rotation. Retry the atomic replacement, then
+        # fall back to a direct write so a successful password reset never
+        # leaves the old one-time code on disk.
+        for attempt in range(3):
+            try:
+                os.replace(temp_path, path)
+                return True
+            except PermissionError:
+                if attempt == 2:
+                    break
+                time.sleep(0.05 * (attempt + 1))
+        path.write_text(temp_path.read_text(encoding="utf-8"), encoding="utf-8")
+        try:
+            temp_path.unlink()
+        except OSError:
+            pass
         return True
     except OSError as exc:
         log_line(f"账号恢复文件写入失败: {exc}")
@@ -421,13 +437,13 @@ def _append_runtime_log(path: Path, line: str) -> None:
         pass
 
 
-_LOG_CLOCK_RE = re.compile(r"(\d{2}:\d{2}:\d{2})")
+_LOG_CLOCK_RE = re.compile(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}|\d{2}:\d{2}:\d{2})")
 
 
 def _normalize_platform_result_line(line: str) -> str:
     """Turn raw Bilibili result dictionaries into a useful, safe log record."""
     text = str(line or "").strip()
-    prefix_match = re.match(r"^(\[[0-9:]+\]\s*)", text)
+    prefix_match = re.match(r"^(\[[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9:]+\]\s*|\[[0-9:]+\]\s*)", text)
     prefix = prefix_match.group(1) if prefix_match else ""
     candidate = text[len(prefix):]
     if not (candidate.startswith("{") and candidate.endswith("}")):
@@ -455,14 +471,19 @@ def _timestamp_runtime_line(line: str) -> str:
         return ""
     if _LOG_CLOCK_RE.search(text):
         return text
-    return f"[{datetime.now().strftime('%H:%M:%S')}] {text}"
+    return f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {text}"
 
 
 def _runtime_log_sort_key(line: str, index: int) -> tuple[str, int]:
     """Keep the complete log chronological across bot, monitor and review sources."""
-    match = _LOG_CLOCK_RE.search(str(line or ""))
-    return (match.group(1) if match else "99:99:99", index)
-
+    text = str(line or "")
+    full = re.search(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", text)
+    if full:
+        return (full.group(1), index)
+    time_only = re.search(r"(\d{2}:\d{2}:\d{2})", text)
+    if time_only:
+        return (f"{datetime.now().date().isoformat()} {time_only.group(1)}", index)
+    return ("9999-12-31 99:99:99", index)
 
 def _read_runtime_log(path: Path, memory_lines, limit: int = 1200) -> list[str]:
     """Read the persisted tail, using process memory when no file exists yet."""
@@ -811,6 +832,18 @@ def _fetch_watch_history_metadata(bvid: str) -> dict:
     }
 
 
+def _normalize_cover_url(value) -> str:
+    """Normalize Bilibili covers to https so https pages do not block them."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text.startswith("//"):
+        return "https:" + text
+    if text.lower().startswith("http://") and re.search(r"hdslb\.com", text, re.I):
+        return "https://" + text[len("http://"):]
+    return text
+
+
 def _cache_watch_history_metadata(bvids: list[str], maximum: int = 8) -> tuple[int, int]:
     """Fetch a small, deduplicated batch of public video cards into the local cache."""
     wanted = []
@@ -855,6 +888,41 @@ def _cache_watch_history_metadata(bvids: list[str], maximum: int = 8) -> tuple[i
     return fetched, failed
 
 
+_observation_cover_backfill_queued: set = set()
+_observation_cover_backfill_lock = threading.Lock()
+
+
+def _run_observation_cover_backfill(bvids: list[str]) -> None:
+    try:
+        _cache_watch_history_metadata(bvids, maximum=len(bvids))
+    except Exception:
+        pass
+    finally:
+        with _observation_cover_backfill_lock:
+            _observation_cover_backfill_queued.difference_update(bvids)
+
+
+def _ensure_observation_cover_backfill(bvid: str, recent_bvids: list[str]) -> None:
+    """Queue a small background metadata fetch for observation cards without covers."""
+    candidates = ([bvid] if bvid else [])
+    candidates += [value for value in recent_bvids or [] if value and value != bvid]
+    wanted = []
+    with _observation_cover_backfill_lock:
+        for value in candidates:
+            safe = _safe_watch_bvid(value)
+            if safe and safe not in _observation_cover_backfill_queued and len(wanted) < 5:
+                wanted.append(safe)
+                _observation_cover_backfill_queued.add(safe)
+    if not wanted:
+        return
+    threading.Thread(
+        target=_run_observation_cover_backfill,
+        args=(wanted,),
+        name="observe-cover-backfill",
+        daemon=True,
+    ).start()
+
+
 def _watch_history_is_archived(bvid: str) -> bool:
     if not bvid:
         return False
@@ -867,18 +935,18 @@ def _watch_history_is_archived(bvid: str) -> bool:
         return False
 
 
-_archive_bvid_cache: tuple[float, set[str]] = (0.0, set())
+_archive_bvid_cache: tuple[float, set[str], str] = (0.0, set(), "")
 _watch_history_card_cache: tuple[tuple[int, int], list[dict]] | None = None
 
 
 def _archived_bvids() -> set[str]:
     """Cache archive lookup so list-files does not walk the KB for every request."""
     global _archive_bvid_cache
-    cached_at, cached = _archive_bvid_cache
-    if time.monotonic() - cached_at < 15.0:
+    cached_at, cached, cached_root = _archive_bvid_cache
+    kb_dir = active_knowledge_base_dir()
+    if time.monotonic() - cached_at < 15.0 and cached_root == str(kb_dir):
         return cached
     found: set[str] = set()
-    kb_dir = active_knowledge_base_dir()
     if kb_dir.exists():
         try:
             for root, _, files in os.walk(kb_dir):
@@ -886,7 +954,7 @@ def _archived_bvids() -> set[str]:
                     found.update(match.upper() for match in re.findall(r"BV[0-9A-Za-z]{10}", filename, re.I))
         except OSError:
             pass
-    _archive_bvid_cache = (time.monotonic(), found)
+    _archive_bvid_cache = (time.monotonic(), found, str(kb_dir))
     return found
 
 
@@ -962,7 +1030,7 @@ def _watch_history_cards() -> list[dict]:
             "title": item["title"] or bvid,
             "up": item["up"] or "未知 UP",
             "aid": item["aid"],
-            "cover": item["pic"],
+            "cover": _normalize_cover_url(item["pic"]),
             "duration": _watch_history_duration_label(item["duration"]),
             "category": item["category"],
             "watched_at": _watch_history_time(item["time"]),
@@ -1554,7 +1622,7 @@ _DEFAULT_HTML = r'''<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover,user-scalable=yes">
 <meta name="color-scheme" content="light dark">
 <title>{{ACCOUNT_TITLE}}</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
@@ -6639,7 +6707,7 @@ def _video_observation_payload() -> dict:
     running = _refresh_bot_state()
     # The runtime file can retain the last target after a clean stop. Never
     # present that stale target as the video currently being processed.
-    if not running and (runtime.get("current_heartbeat_at") or runtime.get("activity")):
+    if not running and runtime.get("current_heartbeat_at"):
         for key in ("bvid", "title", "up", "cover", "url", "description", "stage", "thought", "score"):
             observation.pop(key, None)
     bvid = _safe_watch_bvid(observation.get("bvid"))
@@ -6650,7 +6718,7 @@ def _video_observation_payload() -> dict:
         observation["bvid"] = bvid
     observation["title"] = str(observation.get("title") or card.get("title") or bvid or "")
     observation["up"] = str(observation.get("up") or card.get("up") or "")
-    observation["cover"] = str(observation.get("cover") or card.get("cover") or detail.get("pic") or "")
+    observation["cover"] = _normalize_cover_url(observation.get("cover") or card.get("cover") or detail.get("pic") or "")
     raw_duration = observation.get("duration") or detail.get("duration") or 0
     observation["duration"] = _watch_history_duration_label(raw_duration)
     observation["category"] = str(observation.get("category") or card.get("category") or detail.get("category") or "")
@@ -6660,6 +6728,7 @@ def _video_observation_payload() -> dict:
         observation[key] = int(observation.get(key) or detail.get(key) or card.get(key) or 0)
     observation["score"] = observation.get("score", card.get("score", 0))
     recent_cards = _watch_history_cards()
+    _ensure_observation_cover_backfill(bvid, [item.get("bvid") for item in recent_cards])
     observation["recent"] = [item for item in recent_cards if item.get("bvid") != bvid][:8]
     observation["running"] = running
     logs = _read_runtime_log(BOT_RUNTIME_LOG_FILE, bot_output_lines, limit=140)
@@ -11744,6 +11813,7 @@ def account_security_page():
 
 # ── 认证 API ──
 _PASSWORD_RESET_ATTEMPTS = {}
+_LOGIN_ATTEMPTS = {}
 _PASSWORD_RESET_LOCK = threading.Lock()
 
 
@@ -11757,6 +11827,23 @@ def _password_reset_rate_limited(client_key: str) -> bool:
         recent.append(now)
         _PASSWORD_RESET_ATTEMPTS[client_key] = recent
         return False
+
+
+def _login_rate_limited(client_key: str) -> bool:
+    """Return whether ten failed login attempts occurred in the last ten minutes."""
+    now = time.time()
+    with _PASSWORD_RESET_LOCK:
+        recent = [stamp for stamp in _LOGIN_ATTEMPTS.get(client_key, []) if now - stamp < 600]
+        _LOGIN_ATTEMPTS[client_key] = recent
+        return len(recent) >= 10
+
+
+def _record_login_failure(client_key: str) -> None:
+    now = time.time()
+    with _PASSWORD_RESET_LOCK:
+        recent = [stamp for stamp in _LOGIN_ATTEMPTS.get(client_key, []) if now - stamp < 600]
+        recent.append(now)
+        _LOGIN_ATTEMPTS[client_key] = recent
 
 
 @app.route('/api/auth/setup', methods=['POST'])
@@ -11811,6 +11898,9 @@ def api_auth_setup():
 @app.route('/api/auth/login', methods=['POST'])
 def api_auth_login():
     """登录验证"""
+    client_key = request.remote_addr or "local"
+    if _login_rate_limited(client_key):
+        return jsonify(dict(ok=False, message='尝试次数过多，请10分钟后再试')), 429
     data = request.get_json(force=True) if request.is_json else {}
     username = (data.get('username') or '').strip()
     password = data.get('password', '')
@@ -11824,6 +11914,8 @@ def api_auth_login():
     recovery_hash = web_cfg.get('recovery_code', '')
     recovery_ok = username == saved_user and bool(recovery_hash) and _verify_password(password, recovery_hash)
     if password_ok or recovery_ok:
+        with _PASSWORD_RESET_LOCK:
+            _LOGIN_ATTEMPTS.pop(client_key, None)
         session['panel_authenticated'] = True
         if recovery_ok:
             rotated = _rotate_recovery_code(config, saved_user)
@@ -11843,6 +11935,7 @@ def api_auth_login():
             security_question_configured=bool(web_cfg.get('recovery_question') and web_cfg.get('recovery_answer')),
         ))
     import time as _time
+    _record_login_failure(client_key)
     _time.sleep(0.8)
     return jsonify(dict(ok=False, message='用户名或密码错误'))
 

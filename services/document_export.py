@@ -158,12 +158,34 @@ def export_pdf(md_path: str | Path, kb_root: str | Path | None = None, out_dir: 
     return str(out)
 
 
+def export_txt(md_path: str | Path, kb_root: str | Path | None = None, out_dir: str | Path | None = None) -> str:
+    target = _read_md(md_path, kb_root)
+    output_dir = _resolve_out_dir(out_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out = output_dir / f"{_safe_name(target)}.txt"
+    out.write_text(target.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+    return str(out)
+
+
+def export_md_copy(md_path: str | Path, kb_root: str | Path | None = None, out_dir: str | Path | None = None) -> str:
+    target = _read_md(md_path, kb_root)
+    output_dir = _resolve_out_dir(out_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out = output_dir / f"{_safe_name(target)}.md"
+    out.write_text(target.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+    return str(out)
+
+
 def export_document(md_path: str | Path, fmt: str, kb_root: str | Path | None = None, out_dir: str | Path | None = None) -> str:
     fmt = (fmt or "").lower().strip()
     if fmt in {"docx", "word"}:
         return export_docx(md_path, kb_root=kb_root, out_dir=out_dir)
     if fmt == "pdf":
         return export_pdf(md_path, kb_root=kb_root, out_dir=out_dir)
+    if fmt in {"txt", "text"}:
+        return export_txt(md_path, kb_root=kb_root, out_dir=out_dir)
+    if fmt in {"md", "markdown"}:
+        return export_md_copy(md_path, kb_root=kb_root, out_dir=out_dir)
     raise ValueError("仅支持 pdf/docx")
 
 
@@ -198,6 +220,24 @@ def export_docx_text(text: str, title: str, out_dir: str | Path | None = None) -
         doc.add_paragraph("")
     out = output_dir / f"{_safe_title(title)}.docx"
     doc.save(str(out))
+    return str(out)
+
+
+def export_txt_text(text: str, title: str, out_dir: str | Path | None = None) -> str:
+    """???????? .txt?????????????????"""
+    output_dir = _resolve_out_dir(out_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out = output_dir / f"{_safe_title(title)}.txt"
+    out.write_text(str(text or ""), encoding="utf-8")
+    return str(out)
+
+
+def export_md_text(text: str, title: str, out_dir: str | Path | None = None) -> str:
+    """??? Markdown ????? .md ???"""
+    output_dir = _resolve_out_dir(out_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out = output_dir / f"{_safe_title(title)}.md"
+    out.write_text(str(text or ""), encoding="utf-8")
     return str(out)
 
 
@@ -263,6 +303,17 @@ async def export_video_content(title: str, up_name: str, video_url: str, ctx: st
     note += f"## 内容\n\n{ctx}\n"
 
     fmt_set = {str(f).lower() for f in (formats or [])}
+    # TXT / Markdown?????????????
+    if 'txt' in fmt_set or 'text' in fmt_set:
+        try:
+            results['txt'] = {'path': export_txt_text(note, title)}
+        except Exception as _e:
+            results['txt'] = {'error': str(_e)}
+    if 'md' in fmt_set or 'markdown' in fmt_set:
+        try:
+            results['md'] = {'path': export_md_text(note, title)}
+        except Exception as _e:
+            results['md'] = {'error': str(_e)}
     # Word
     if 'docx' in fmt_set or 'word' in fmt_set:
         try:

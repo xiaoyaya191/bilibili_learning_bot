@@ -19,15 +19,24 @@ from utils.display import log
 from datetime import datetime
 from utils.helpers import _mask_urls, parse_iso_datetime, ensure_ai_marker
 from api.throttle import _bili_throttle, _bili_trigger_cooldown
+from core.user_data import DATA_DIR
 from core.platform_actions import public_commenting_enabled
 from services.utils import BiliToolbox
 
 # bilibili_api imports (used by the class)
-from bilibili_api import comment, session, user
+from bilibili_api import comment, session, user, video
 from bilibili_api.comment import CommentResourceType
 
 
 COMMENT_THREAD_MAX_TURNS = 1000
+
+
+def _processed_ids_from_log(comment_log) -> set:
+    """???/???/?????? ID ??????"""
+    ids = set(comment_log.get("processed_comments", []))
+    ids.update(str(cid) for cid in comment_log.get("replied_comments", []))
+    ids.update(str(cid) for cid in comment_log.get("liked_comments", []))
+    return ids
 
 # Optional xingye_bot imports
 try:
@@ -86,7 +95,7 @@ class CommentInteractionManager:
         self.uid = uid
         self.since_ts = int(since_ts or 0)
         self.comment_log = self._load_comment_log()
-        self.processed_comments = set(self.comment_log.get("processed_comments", []))
+        self.processed_comments = _processed_ids_from_log(self.comment_log)
         self.last_check_time = None
         self.persona_mgr = PersonaManager()
         self.mood_mgr = MoodManager()
@@ -246,7 +255,9 @@ class CommentInteractionManager:
             "knowledge_search": "",
         }
         asks_for_video_evidence = any(marker in text for marker in (
-            "简介", "内容", "讲了什么", "字幕", "评论区", "弹幕", "分析", "评价", "看看这个", "看下这个",
+            "简介", "内容", "讲了什么", "讲的什么", "说了什么", "字幕", "评论区", "弹幕",
+            "分析", "评价", "总结", "概括", "重点", "看不懂",
+            "看看这个", "看下这个", "这个视频", "该视频", "本视频", "视频内容", "视频讲了", "视频讲",
         ))
         if explicit_bvid and (asks_for_video_evidence or "视频" in text):
             plan["inspect_video"] = explicit_bvid
@@ -276,7 +287,7 @@ class CommentInteractionManager:
             plan["knowledge_search"] = text[:80]
         return plan
 
-    async def _run_comment_tools(self, comment_data):
+    async def _run_comment_tools(self, comment_data, bili_client=None):
         """Gather only public/local read evidence before an AI comment reply."""
         if config.get("interaction", {}).get("comment_agent_tools_enabled", True) is False:
             return {}, {}
@@ -456,6 +467,92 @@ class CommentInteractionManager:
                 else:
                     raise e
 
+    @staticmethod
+    def _collect_video_comment_candidates(replies, aid, bvid, uid, since_ts, is_processed):
+        """?????????????????????????????"""
+        candidates = []
+        for comment_item in replies or []:
+            if not isinstance(comment_item, dict):
+                continue
+            comment_id = comment_item.get('rpid') or comment_item.get('id')
+            if not comment_id:
+                continue
+            if comment_item.get('member', {}).get('mid') == uid:
+                continue
+            created_at = int(comment_item.get('ctime') or 0)
+            if since_ts and created_at and created_at <= since_ts:
+                continue
+            if is_processed(comment_id):
+                continue
+            candidates.append({
+                "id": comment_id,
+                "aid": aid,
+                "bvid": bvid,
+                "content": comment_item.get('content', {}).get('message', ''),
+                "user": comment_item.get('member', {}).get('uname', '??'),
+                "user_id": comment_item.get('member', {}).get('mid'),
+                "time": created_at,
+                "replies": comment_item.get('replies', []),
+            })
+        return candidates
+
+    @staticmethod
+    def _three_action_config() -> dict:
+        cfg = config.get("interaction", {}).get("comment_reply_three_actions", {})
+        if not isinstance(cfg, dict):
+            cfg = {}
+        defaults = {"enabled": True, "like": True, "coin": True, "favorite": True}
+        return {key: cfg.get(key, default) for key, default in defaults.items()}
+
+    def _three_action_coin_used_today(self) -> int:
+        today = datetime.now().date().isoformat()
+        done = self.comment_log.get("three_action_done", {})
+        done = done if isinstance(done, dict) else {}
+        return sum(1 for row in done.values() if isinstance(row, dict) and row.get("date") == today and row.get("coin") == "ok")
+
+    async def _one_click_three_for_video(self, comment_data, reason="????"):
+        cfg = self._three_action_config()
+        if not cfg.get("enabled", True):
+            return {}
+        bvid = str(comment_data.get("bvid") or "").strip()
+        aid = comment_data.get("aid")
+        if not bvid and aid:
+            try:
+                info = await asyncio.wait_for(video.Video(aid=int(aid), credential=self.credential).get_info(), timeout=20)
+                bvid = str((info or {}).get("bvid") or "")
+            except Exception as exc:
+                log(f"[????] ?????? BV ? aid={aid}: {_safe_platform_error(exc)}", "WARN");return {}
+        if not bvid:return {}
+        done=self.comment_log.setdefault("three_action_done", {});key=f"three:{bvid}"
+        if done.get(key):return {"skipped":"already_done"}
+        from services.like_review import ActionReviewInbox, requires_review
+        from core.config import MAX_COINS_DAILY
+        results={};review_type={"like":"video_like","coin":"coin","favorite":"favorite"}
+        for action in ("like","coin","favorite"):
+            if not cfg.get(action,True):continue
+            if action=="coin":
+                daily_limit=max(0,int(MAX_COINS_DAILY or 0))
+                if self._three_action_coin_used_today()>=daily_limit:results[action]="daily_limit";continue
+            if requires_review(config,review_type[action]):
+                inbox=ActionReviewInbox(DATA_DIR);row=inbox.propose(review_type[action],f"????????? {bvid}",reason,payload={"bvid":bvid,"num":1},metadata={"source":"comment_reply"},dedupe_key=f"comment_three:{review_type[action]}:{bvid}")
+                results[action]="queued_for_review" if row else "already_queued";continue
+            try:
+                await _bili_throttle(f"????-{action}");from bilibili_api.video import Video as BiliVideo;video_obj=BiliVideo(bvid=bvid,credential=self.credential)
+                if action=="like":
+                    if await video_obj.has_liked():results[action]="already_liked"
+                    else:await video_obj.like(True);results[action]="ok"
+                elif action=="coin":await video_obj.pay_coin(num=1, like=False);results[action]="ok"
+                else:
+                    if await video_obj.has_favoured():results[action]="already_favoured"
+                    else:
+                        from bilibili_api import favorite_list;folders=await favorite_list.get_video_favorite_list(uid=int(self.credential.dedeuserid), video=video_obj, credential=self.credential);items=(folders or {}).get("list") or []
+                        if not items:results[action]="no_folder"
+                        else:await video_obj.set_favorite(add_media_ids=[items[0]["id"]]);results[action]="ok"
+            except Exception as exc:results[action]=f"error:{_safe_platform_error(exc)}"
+        if any(str(value)=="ok" for value in results.values()):
+            done[key]={"date":datetime.now().date().isoformat(),"coin":results.get("coin"),"like":results.get("like"),"favorite":results.get("favorite")};self._save_comment_log()
+        log(f"[????] {bvid}: {json.dumps(results, ensure_ascii=False)}","COMMENT");return results
+
     async def get_new_comments(self, bili_client):
         """获取账号的新评论（别人评论我的）"""
         try:
@@ -532,26 +629,11 @@ class CommentInteractionManager:
                             continue
                          
                         if comments and isinstance(comments.get('replies'), list):
-                            for cmt in comments['replies']:
-                                cmt_id = cmt.get('rpid')
-                                
-                                # 只处理别人对我的评论（不是自己的评论）
-                                if cmt.get('member', {}).get('mid') != uid:
-                                    ctime = int(cmt.get('ctime') or 0)
-                                    if self.since_ts and ctime and ctime <= self.since_ts:
-                                        continue
-                                if not self._is_comment_processed(cmt_id):
-                                    new_comments.append({
-                                            "id": cmt_id,
-                                            "aid": aid,
-                                            "bvid": v.get('bvid'),
-                                            "content": cmt.get('content', {}).get('message', ''),
-                                            "user": cmt.get('member', {}).get('uname', '未知'),
-                                            "user_id": cmt.get('member', {}).get('mid'),
-                                            "time": ctime,
-                                            "replies": cmt.get('replies', [])
-                                        })
-            
+                            new_comments.extend(self._collect_video_comment_candidates(
+                                comments['replies'], aid, v.get('bvid'), uid, self.since_ts,
+                                self._is_comment_processed,
+                            ))
+
             deduped = {}
             for item in new_comments:
                 deduped.setdefault(str(item.get("id")), item)

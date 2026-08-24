@@ -102,10 +102,10 @@ def _version_tuple(raw):
     return tuple(parts[:4])
 
 
-_app_version = '3.1.3'
+_app_version = '0.0.0'
 try:
     with open('VERSION', 'r', encoding='utf-8') as _vf:
-        _app_version = _vf.read().strip() or '3.1.3'
+        _app_version = _vf.read().strip() or '0.0.0'
 except OSError:
     pass
 _vers = _version_tuple(_app_version)

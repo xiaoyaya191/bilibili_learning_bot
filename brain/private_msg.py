@@ -3,7 +3,6 @@ import asyncio
 import hashlib
 import json
 import os
-import msvcrt
 import random
 import re
 import time
