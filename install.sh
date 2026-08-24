@@ -1,7 +1,7 @@
 #!/data/data/com.termux/files/usr/bin/bash
 set -Eeuo pipefail
 
-VERSION="3.1.4"
+VERSION="3.1.5"
 REPO_URL="${BILILEARN_REPO_URL:-https://github.com/xiaoyaya191/bilibili_learning_bot.git}"
 INSTALL_DIR="${BILILEARN_INSTALL_DIR:-$PWD}"
 if [ ! -f "$INSTALL_DIR/web_panel.py" ]; then INSTALL_DIR="${HOME}/bililearn"; fi

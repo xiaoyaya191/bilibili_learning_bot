@@ -1713,11 +1713,12 @@ a:hover{color:var(--purple)}
 .sb-av{width:40px;height:40px;border-radius:12px;background:var(--accent-g);display:flex;align-items:center;justify-content:center;font-size:20px;box-shadow:0 4px 15px rgba(108,159,255,.3)}
 .sb-tt{font-size:15px;font-weight:700;line-height:1.2;background:var(--accent-g);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
 .sb-sub{font-size:10px;color:var(--text3);margin-top:2px}
-.sb-nav{flex:1;overflow-y:auto;padding:10px 8px}
-.ns{font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1.5px;padding:16px 12px 6px;font-weight:600}
-.ni{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:var(--rs);cursor:pointer;color:var(--text2);font-size:13px;border:none;background:none;width:100%;transition:all .2s;position:relative;font-weight:500}
+.sb-nav{flex:1;overflow-y:auto;padding:12px 10px 18px}
+.ns{font-size:10px;color:var(--accent);text-transform:uppercase;letter-spacing:1.2px;padding:18px 10px 7px;font-weight:700;border-top:1px solid rgba(148,163,184,.12);margin-top:8px}
+.ns:first-child{border-top:0;margin-top:0;padding-top:6px}
+.ni{display:flex;align-items:center;gap:10px;min-height:42px;padding:10px 12px;border-radius:10px;cursor:pointer;color:var(--text2);font-size:13px;border:1px solid transparent;background:none;width:100%;transition:all .2s;position:relative;font-weight:500}
 .ni:hover{background:var(--bg3);color:var(--text);transform:translateX(3px)}
-.ni.ac{background:linear-gradient(135deg,rgba(108,159,255,.15),rgba(167,139,250,.1));color:var(--accent);font-weight:600;box-shadow:inset 3px 0 0 var(--accent)}
+.ni.ac{background:linear-gradient(135deg,rgba(108,159,255,.18),rgba(167,139,250,.12));border-color:rgba(108,159,255,.24);color:var(--accent);font-weight:700;box-shadow:inset 3px 0 0 var(--accent),0 4px 14px rgba(0,0,0,.12)}
 .ni .ic{font-size:17px;width:24px;text-align:center;flex-shrink:0}
 .ni .bd{margin-left:auto;background:var(--red);color:#fff;font-size:9px;padding:2px 7px;border-radius:10px;font-weight:700;display:none;animation:badgePop .3s}
 .sb-ft{padding:12px;border-top:1px solid var(--border);font-size:10px;color:var(--text3);text-align:center;line-height:1.5}
