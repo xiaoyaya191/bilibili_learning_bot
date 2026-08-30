@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<data-extraction-rules>
+    <cloud-backup>
+        <include domain="sharedpref" path="."/>
+        <exclude domain="sharedpref" path="bililearn_secrets.xml"/>
+        <include domain="database" path="."/>
+        <include domain="file" path="backups/"/>
+        <include domain="file" path="custom_background"/>
+        <include domain="file" path="logs/"/>
+    </cloud-backup>
+    <device-transfer>
+        <include domain="sharedpref" path="."/>
+        <exclude domain="sharedpref" path="bililearn_secrets.xml"/>
+        <include domain="database" path="."/>
+        <include domain="file" path="backups/"/>
+        <include domain="file" path="custom_background"/>
+        <include domain="file" path="logs/"/>
+    </device-transfer>
+</data-extraction-rules>

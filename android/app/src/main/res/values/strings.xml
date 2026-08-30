@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">BiliLearn \u5168\u529f\u80fd\u7248 3.1.5</string>
+    <string name="channel_name_bot">BiliLearn 机器人运行状态</string>
+    <string name="channel_desc_bot">常驻通知，显示机器人后台学习与巡检状态</string>
+</resources>

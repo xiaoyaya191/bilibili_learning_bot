@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="primary_orange">#D97757</color>
+    <color name="primary_orange_dark">#C56545</color>
+    <color name="bili_pink">#FB7299</color>
+    <color name="bili_blue">#00AEEC</color>
+    <color name="bg_dark">#0D0D0D</color>
+    <color name="bg_light">#FFFFFF</color>
+</resources>

@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=3.0, user-scalable=yes">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body, html { width: 100%; height: 100%; overflow: hidden; background: #FAF9F6; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+        #mindmap { width: 100%; height: 100%; }
+        .markmap { width: 100%; height: 100%; }
+    </style>
+    <script src="d3.js"></script>
+    <script src="markmap-lib.js"></script>
+    <script src="markmap-view.js"></script>
+</head>
+<body>
+    <svg id="mindmap"></svg>
+    <script>
+        let mm = null;
+        function renderMarkmap(markdown) {
+            try {
+                const { Transformer } = window.markmap;
+                const transformer = new Transformer();
+                const { root } = transformer.transform(markdown);
+                const svg = document.getElementById('mindmap');
+                svg.innerHTML = '';
+                const { Markmap } = window.markmap;
+                mm = Markmap.create(svg, {
+                    autoFit: true,
+                    duration: 300,
+                    color: (node) => {
+                        const colors = ['#D97757', '#4A90D9', '#2D8A4E', '#7B61FF', '#E0558A'];
+                        return colors[(node.depth || 0) % colors.length];
+                    }
+                }, root);
+            } catch (e) {
+                console.error("Markmap render error:", e);
+            }
+        }
+    </script>
+</body>
+</html>

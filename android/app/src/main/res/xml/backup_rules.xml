@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <include domain="sharedpref" path="."/>
+    <exclude domain="sharedpref" path="bililearn_secrets.xml"/>
+    <include domain="database" path="."/>
+    <include domain="file" path="backups/"/>
+    <include domain="file" path="custom_background"/>
+    <include domain="file" path="logs/"/>
+</full-backup-content>

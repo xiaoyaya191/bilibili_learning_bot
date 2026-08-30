@@ -1,0 +1,20 @@
+# Gradle and Kotlin caches
+.gradle/
+.kotlin/
+**/build/
+
+# Android Studio and local machine configuration
+.idea/
+*.iml
+local.properties
+keystore.properties
+*.jks
+*.keystore
+
+# Native build output
+.cxx/
+captures/
+
+# OS files
+.DS_Store
+Thumbs.db
