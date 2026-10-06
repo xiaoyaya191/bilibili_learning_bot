@@ -6,6 +6,7 @@ records contain only the minimum action payload and never credentials.
 from __future__ import annotations
 
 import json
+from utils.storage import JsonStore
 import threading
 import uuid
 from datetime import datetime
@@ -18,14 +19,20 @@ ACTION_TYPES = {
     "follow_up": {"label": "关注 UP 主", "scope": "platform", "default": True},
     "unfollow_user": {"label": "取消关注用户", "scope": "platform", "default": True},
     "send_danmaku": {"label": "发送弹幕", "scope": "platform", "default": True},
-    "public_comment": {"label": "公开评论/回复", "scope": "platform", "default": True, "disabled": True},
+    "public_comment": {"label": "公开评论/回复", "scope": "platform", "default": True},
     "private_reply": {"label": "私信回复", "scope": "platform", "default": True},
     "coin": {"label": "投币", "scope": "platform", "default": True},
     "favorite": {"label": "收藏视频", "scope": "platform", "default": True},
     "dynamic_publish": {"label": "发布动态", "scope": "platform", "default": True},
-    "knowledge_write": {"label": "写入知识库", "scope": "local", "default": False},
-    "file_export": {"label": "生成或导出文件", "scope": "local", "default": False},
+    "knowledge_write": {"label": "写入知识库", "scope": "local", "default": True},
+    "file_export": {"label": "生成或导出文件", "scope": "local", "default": True},
 }
+
+
+from services.action_permissions import ACTIONS as PERMISSION_ACTIONS
+for permission_name, permission_meta in PERMISSION_ACTIONS.items():
+    if permission_meta[1] == 'platform':
+        ACTION_TYPES.setdefault(permission_name, {'label': permission_meta[0], 'scope': 'platform', 'default': True})
 
 
 def default_review_settings() -> dict:
@@ -64,13 +71,15 @@ class ActionReviewInbox:
 
     def _read(self) -> list[dict]:
         try:
-            rows = json.loads(self.path.read_text(encoding="utf-8-sig"))
+            if not self.path.exists():
+                raise FileNotFoundError(self.path)
+            rows = JsonStore(self.path).read([])
             return rows if isinstance(rows, list) else []
         except Exception:
             rows = []
         if not self.path.exists() and self.legacy_path.exists():
             try:
-                legacy = json.loads(self.legacy_path.read_text(encoding="utf-8-sig"))
+                legacy = JsonStore(self.legacy_path).read([])
                 for row in legacy if isinstance(legacy, list) else []:
                     row = dict(row)
                     row.setdefault("action_type", "video_like")
@@ -86,13 +95,12 @@ class ActionReviewInbox:
 
     def _write(self, rows: list[dict]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(self.path)
+        if not JsonStore(self.path).write(rows):
+            raise OSError('行为审核数据库保存失败')
 
     def _current_account_uid(self) -> str:
         try:
-            cookies = json.loads((self.path.parent / "bilibili_cookies.json").read_text(encoding="utf-8-sig"))
+            cookies = JsonStore(self.path.parent / "bilibili_cookies.json").read({})
             return str((cookies or {}).get("DedeUserID") or "").strip()
         except (OSError, json.JSONDecodeError, AttributeError):
             return ""
@@ -138,11 +146,8 @@ class ActionReviewInbox:
                 count = len(self.audit_path.read_text(encoding="utf-8").splitlines())
             except OSError:
                 count = 0
-            try:
-                self.audit_path.parent.mkdir(parents=True, exist_ok=True)
-                self.audit_path.write_text("", encoding="utf-8")
-            except OSError:
-                return 0
+            self.audit_path.parent.mkdir(parents=True, exist_ok=True)
+            self.audit_path.write_text("", encoding="utf-8")
         return count
 
     def propose(self, action_type: str, title: str, summary: str = "", payload: dict | None = None,
@@ -215,11 +220,17 @@ class ActionReviewInbox:
         with _LOCK:
             rows = self._read()
             for row in rows:
-                if row.get("id") == item_id and row.get("status") == "pending":
-                    row["status"] = status
+                current = row.get("status")
+                can_decide = current == "pending" or (status == "approved" and current == "failed")
+                if row.get("id") == item_id and can_decide:
+                    row["decision"] = status
+                    row["status"] = "executing" if status == "approved" else status
+                    if status == "approved":
+                        row["execution_attempts"] = int(row.get("execution_attempts") or 0) + 1
                     row["decided_at"] = datetime.now().isoformat(timespec="seconds")
                     self._write(rows)
-                    self._audit(status, row, decision_at=row["decided_at"])
+                    self._audit(status, row, decision_at=row["decided_at"], previous_status=current,
+                                attempt=row.get("execution_attempts"))
                     return dict(row)
         return None
 

@@ -17,6 +17,48 @@ _CLIENT = None
 _OPS = None
 
 
+@tool(name='manage_platform_action', description='明确目标的平台管理：点赞/取消点赞、投币、关注/取关、评论/删除/点赞、私信、弹幕及动态删除/点赞/转发。只提交人工审核，不直接执行。',
+      parameters={'type': 'object', 'properties': {'action': {'type': 'string', 'enum': ['video_like', 'video_unlike', 'coin', 'follow_up', 'unfollow_user', 'public_comment', 'comment_like', 'comment_delete', 'private_reply', 'send_danmaku', 'danmaku_like', 'dynamic_delete', 'dynamic_like', 'dynamic_repost']}, 'payload': {'type': 'object'}}, 'required': ['action', 'payload']},
+      risk='write', category='builtin:bili')
+async def manage_platform_action(action: str, payload: dict) -> dict:
+    from services.platform_management import propose
+    return propose(action, payload, _data_dir())
+
+
+@tool(name='local_favorite_add', description='将视频收藏到项目内 AI 精选，不调用 B 站写接口。',
+      parameters={'type': 'object', 'properties': {'bvid': {'type': 'string'}, 'title': {'type': 'string'}, 'score': {'type': 'number'}}, 'required': ['bvid', 'title', 'score']},
+      risk='write', category='builtin:kb')
+async def local_favorite_add(bvid: str, title: str, score: float) -> dict:
+    from core.config import load_config
+    from services.local_favorites import auto_collect_video
+    return auto_collect_video(load_config(), {'bvid': bvid, 'title': title, 'score': score}, interested=True)
+
+
+@tool(name='manage_platform_favorites', description='管理 B 站收藏夹：增加/移除视频，创建/修改/删除收藏夹，复制/移动视频及清理失效内容。所有写操作仅提交人工审核，不直接执行。',
+      parameters={'type': 'object', 'properties': {'operation': {'type': 'string', 'enum': ['add', 'remove', 'create', 'edit', 'delete', 'copy', 'move', 'clean']}, 'payload': {'type': 'object'}}, 'required': ['operation', 'payload']},
+      risk='write', category='builtin:bili')
+async def manage_platform_favorites(operation: str, payload: dict) -> dict:
+    from services.platform_favorites import propose
+    return propose(operation, payload, _data_dir())
+
+
+@tool(name='list_platform_favorites', description='只读查看当前账号平台收藏夹及指定收藏夹中的视频。',
+      parameters={'type': 'object', 'properties': {'media_id': {'type': 'integer'}, 'page': {'type': 'integer'}}}, category='builtin:bili')
+async def list_platform_favorites(media_id: int = 0, page: int = 1) -> dict:
+    from bilibili_api import favorite_list
+    client = _get_client()
+    client._load_credential()
+    if not client.credential:
+        return {'ok': False, 'error': '请先登录 B 站'}
+    if media_id:
+        if media_id <= 0 or not 1 <= page <= 10000:
+            return {'ok': False, 'error': '收藏夹 ID 或页码无效'}
+        data = await favorite_list.FavoriteList(media_id=media_id, credential=client.credential).get_content_video(page=page)
+    else:
+        data = await favorite_list.get_video_favorite_list(uid=int(client.credential.dedeuserid), credential=client.credential)
+    return {'ok': True, 'data': data}
+
+
 def _data_dir() -> Path:
     from core.user_data import DATA_DIR
     return DATA_DIR
@@ -293,6 +335,18 @@ async def memory_search(keyword: str = "", limit: int = 10) -> dict:
     risk="write", category="builtin:bili",
 )
 async def video_interact(bvid: str, action: str, text: str = "", dry_run: bool = False, allow_write: bool = True) -> dict:
+    from core.config import load_config
+    preferences = load_config()
+    if action == 'favorite' and preferences.get('local_favorites', {}).get('destination', 'local') == 'local':
+        if not allow_write or dry_run:
+            return {'ok': True, 'executed': False, 'dry_run': True}
+        from services.action_permissions import require
+        from services.local_favorites import add_video
+        require('local_favorite')
+        info = await _get_client().get_video_info(bvid)
+        result = add_video(preferences.get('local_favorites', {}).get('folder_name', 'AI 精选'),
+                           {'bvid': bvid, 'title': info.get('title', bvid)}, source='AI 收藏意图')
+        return {'ok': True, 'destination': 'local', 'detail': result}
     res = await _get_ops().video_action(
         bvid=bvid, action=action, text=text,
         dry_run=not allow_write or bool(dry_run),
@@ -336,8 +390,7 @@ async def reply_comment(oid: int, root: int, parent: int, text: str, allow_write
     risk="write", category="builtin:bili",
 )
 async def follow_up(uid: int) -> dict:
-    res = await _get_client().follow_up(int(uid))
-    return {"ok": True, "detail": res}
+    return {"ok": False, "error": "关注必须在UP主分区由用户确认，本工具不会直接发送关注请求", "uid": int(uid)}
 
 
 @tool(
@@ -393,6 +446,37 @@ async def memory_write(content: str, kind: str = "fact") -> dict:
             fn(**kwargs)
             return {"ok": True, "via": meth}
     return {"ok": False, "error": "MemoryBank 无可用写入方法"}
+
+
+@tool(
+    name="panel_config_get",
+    description="读取网页面板的非敏感配置。可指定顶层 section；密钥、密码和 Cookie 永不返回。",
+    parameters={"type": "object", "properties": {
+        "section": {"type": "string", "description": "顶层配置节，留空返回全部非敏感配置"},
+    }, "required": []},
+    risk="read", category="builtin:system",
+)
+async def panel_config_get(section: str = "") -> dict:
+    from core.config import load_config
+    from services.agent_workspace import scrub
+
+    cfg = load_config()
+    section = str(section or "").strip()
+    if section:
+        return {"ok": True, "section": section, "config": scrub(cfg.get(section, {}))}
+    return {"ok": True, "config": scrub(cfg)}
+
+
+@tool(
+    name="panel_config_update",
+    description="更新网页面板配置。输入顶层 section 和要合并的 patch；需开启 Agent 写操作。禁止修改登录凭据、Cookie 和 API 密钥。",
+    parameters={"type": "object", "properties": {
+        "section": {"type": "string"}, "patch": {"type": "object"},
+    }, "required": ["section", "patch"]},
+    risk="write", category="builtin:system",
+)
+async def panel_config_update(section: str, patch: dict) -> dict:
+    return {"ok": False, "error": "配置修改须在对应设置分区由用户确认；Agent不可修改安全、API、账号或互动开关"}
 
 
 @tool(

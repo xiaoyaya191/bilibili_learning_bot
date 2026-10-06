@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -36,6 +37,8 @@ def _read_doc_cfg() -> dict:
 
 def _resolve_out_dir(out_dir=None) -> Path:
     """解析 Word/PDF 导出目录：优先参数，其次配置中的 document_export.output_dir/folder_name，回退默认。"""
+    if os.getenv("BILI_ACCOUNT_ID"):
+        return WORD_DIR
     if out_dir:
         p = Path(out_dir)
         return p if p.is_absolute() else (WORD_DIR if getattr(sys, "frozen", False) else BASE_DIR / p)
@@ -288,7 +291,7 @@ def export_pdf_text(text: str, title: str, out_dir: str | Path | None = None) ->
 async def export_video_content(title: str, up_name: str, video_url: str, ctx: str,
                                 formats: list[str], stats: dict | None = None, desc: str = "",
                                 bvid: str | None = None, brain=None, ppt_theme: str = "dark",
-                                ppt_detail: str = "medium") -> dict:
+                                ppt_detail: str = "medium", image_background: str = "") -> dict:
     """非交互：把视频内容导出为指定格式列表（formats ∈ {'docx','pdf','ppt','mindmap'}）。
     ppt_detail: 'simple' 简单 | 'medium' 中长(默认) | 'detailed' 详细
     返回 {fmt: {'path': str} | {'error': str}}，供 CLI 与 Web 共用。"""
@@ -314,6 +317,11 @@ async def export_video_content(title: str, up_name: str, video_url: str, ctx: st
             results['md'] = {'path': export_md_text(note, title)}
         except Exception as _e:
             results['md'] = {'error': str(_e)}
+    if fmt_set.intersection({'png', 'image', 'images'}):
+        try:
+            results['png'] = {'path': export_text_images(note, title, image_background)}
+        except Exception as _e:
+            results['png'] = {'error': str(_e)}
     # Word
     if 'docx' in fmt_set or 'word' in fmt_set:
         try:
@@ -362,12 +370,23 @@ async def export_video_content(title: str, up_name: str, video_url: str, ctx: st
     return results
 
 
+def export_text_images(content: str, filename: str, background: str = '') -> str:
+    from services.image_export import render_images
+    from core.user_data import ARTIFACTS_DIR
+    from core.config import load_config
+    options = load_config().get('image_export', {})
+    result = render_images(content, filename, ARTIFACTS_DIR / 'exports' / 'images', options,
+                           background if background else None)
+    return result['paths'][0] if result['pages'] == 1 else result['path']
+
+
 async def export_video_content_interactive(title: str, up_name: str, video_url: str, ctx: str,
                                             stats: dict | None = None, desc: str = "",
                                             bvid: str | None = None, brain=None):
     """CLI 交互版：提示用户选择格式后调用 export_video_content。W/V 命令共用。"""
     try:
         print(f"\n{Fore.CYAN}是否同时把该视频内容导出为其他格式？(基于同一份视频内容){Style.RESET_ALL}")
+        print(f"  {Fore.YELLOW}0.{Style.RESET_ALL} PNG 图片卡片（自动分页）")
         print(f"  {Fore.YELLOW}1.{Style.RESET_ALL} Word 文档 (.docx)")
         print(f"  {Fore.YELLOW}2.{Style.RESET_ALL} PDF 文档 (.pdf)")
         print(f"  {Fore.YELLOW}3.{Style.RESET_ALL} PPT 演示 (.html)")
@@ -378,6 +397,8 @@ async def export_video_content_interactive(title: str, up_name: str, video_url: 
         if not fmt_choice:
             return
         fm: list[str] = []
+        if '0' in fmt_choice:
+            fm.append('png')
         if '1' in fmt_choice:
             fm.append('docx')
         if '2' in fmt_choice:
@@ -438,13 +459,16 @@ def export_text(content, filename, fmt="txt"):
     safe_name = filename.replace(" ", "_")[:50]
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
+    if fmt in ("png", "image", "images"):
+        return export_text_images(content, filename)
     if fmt == "json":
         import json
         data = {"content": content, "exported_at": datetime.now().isoformat()}
         filepath = export_dir / f"{safe_name}_{timestamp}.json"
         filepath.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     elif fmt == "html":
-        html = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>{filename}</title></head><body><pre>{content}</pre></body></html>"""
+        from services.html_renderer import markdown_to_reading_html
+        html = markdown_to_reading_html(content, filename)
         filepath = export_dir / f"{safe_name}_{timestamp}.html"
         filepath.write_text(html, encoding="utf-8")
     elif fmt == "md":

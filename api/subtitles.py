@@ -103,6 +103,9 @@ async def fetch_bilibili_subtitles(bvid, cookies_obj=None, title=None, ai_verify
     启用后，每个通过的轨都会先经过AI语义验证，不匹配则自动尝试下一轨。
     """
     video_desc = ""
+    from core.config import load_config
+    if load_config().get('subtitles', {}).get('enabled', True) is not True:
+        return False, '用户已关闭字幕获取', video_desc, False
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Referer': f'https://www.bilibili.com/video/{bvid}'
@@ -244,6 +247,7 @@ async def fetch_bilibili_subtitles(bvid, cookies_obj=None, title=None, ai_verify
             sorted_subs = sorted(subs, key=subtitle_priority)
             _ai_mismatch_count = 0  # 连续AI验证不匹配计数
 
+            semantic_mismatch = False
             for sub_idx, sub_info in enumerate(sorted_subs):
                 sub_url = sub_info.get('subtitle_url', '')
                 # [FIX] 优先 subtitle_url，fallback subtitle_url_v2 (player/wbi/v2 专有)
@@ -257,64 +261,43 @@ async def fetch_bilibili_subtitles(bvid, cookies_obj=None, title=None, ai_verify
                     sub_url = 'https://api.bilibili.com' + sub_url
 
                 lan = sub_info.get('lan', '?')
-                clean_text = None
-                for _fetch_retry in range(8):  # 同一轨不匹配时重新下载, 最多8次
-                    if _fetch_retry > 0:
-                        log(f"[RETRY] 重新获取字幕轨[{lan}], 第{_fetch_retry+1}/8次", "SUBTITLE")
-                        await asyncio.sleep(1.0)
-                    for url_retry in range(8):  # 最多重新获取8次
-                        try:
-                            # CDN缓存可能返回错误内容, 重试时加随机参数破坏缓存
-                            fetch_url = sub_url
-                            if url_retry > 0:
-                                sep = '&' if '?' in sub_url else '?'
-                                fetch_url = f"{sub_url}{sep}_retry={url_retry}&_r={hash(sub_url) % 100000}"
-                            s_res = await client.get(fetch_url)
-                            s_res.raise_for_status()
-                            s_data = s_res.json()
-
-                            subtitle_body = s_data.get('body', [])
-                            full_text = " ".join([item.get('content', '') for item in subtitle_body])
-                            clean_text = re.sub(r'\s+', ' ', full_text).strip()
-                            break
-                        except httpx.HTTPStatusError as e:
-                            if url_retry < 2:
-                                log(f"[RETRY] 字幕轨[{lan}]HTTP{e.response.status_code}, 第{url_retry+1}次重试...", "SUBTITLE")
-                                await asyncio.sleep(1.5)
-                            else:
-                                log(f"[RETRY] 字幕轨[{lan}]HTTP{e.response.status_code}, 3次均失败，尝试下一轨", "SUBTITLE")
-                                clean_text = None
-                                break
-                        except Exception as e:
-                            if url_retry < 2:
-                                log(f"[RETRY] 字幕轨[{lan}]异常: {e}, 第{url_retry+1}次重试...", "SUBTITLE")
-                                await asyncio.sleep(1.5)
-                            else:
-                                log(f"[RETRY] 字幕轨[{lan}]3次下载均异常: {e}, 尝试下一轨", "SUBTITLE")
-                                clean_text = None
-                                break
-
+                from services.subtitle_candidates import fetch_candidates
+                attempts = config.get('subtitle_alignment', {}).get('fetch_attempts', 3)
+                from services.semantic_vectors import alignment
+                def evaluate_candidate(candidate_text):
+                    return alignment(title or '', video_desc, candidate_text, config.get('subtitle_alignment', {}))
+                subtitle_body = await fetch_candidates(client, sub_url, attempts, evaluate_candidate)
+                clean_text = ' '.join(item['content'] for item in subtitle_body)
+                for _fetch_retry in range(1):
                     if not clean_text:
                         log(f"[RETRY] 字幕轨[{lan}]内容为空，尝试下一轨...", "SUBTITLE")
                         continue
 
                     # ── 字幕内容与标题关联校验 ──
                     if clean_text and title:
+                        semantic = await asyncio.to_thread(evaluate_candidate, clean_text)
+                        if semantic.get('status') == 'mismatch':
+                            semantic_mismatch = True
+                            log(f"[WARN] 字幕轨[{lan}]语义校验不匹配(score={semantic.get('score', 0):.3f})，继续其他候选", "SUBTITLE")
+                            continue
                         overlap, mismatch = _check_subtitle_mismatch(title, clean_text) if SUBTITLE_STRICT_CHECK else (0.5, None)
-                        if mismatch:
-                            log(f"[WARN] 字幕轨[{lan}]校验失败: {mismatch[:80]}，跳过此轨...", "SUBTITLE")
-                            break  # 关键词完全不匹配 → 跳下一轨，不重试（重试同一URL无意义）
-
+                        if mismatch and semantic.get('status') != 'match':
+                            semantic_mismatch = True
+                            log(f"[WARN] 字幕轨[{lan}]校验失败: {mismatch[:80]}，继续其他轨", "SUBTITLE")
+                            continue
+                        if semantic.get('status') == 'match':
+                            overlap = max(overlap or 0, 0.5)
                         ai_verified = False
                         if overlap is not None and overlap < 0.3:
                             if ai_verify_func is not None:
                                 try:
                                     is_match, ai_conf, ai_reason = await ai_verify_func(title, clean_text, video_desc)
                                     if not is_match:
+                                        semantic_mismatch = True
                                         _ai_mismatch_count += 1
                                         log(f"[AI-VERIFY] 字幕轨[{lan}]AI判定内容不匹配: {ai_reason} (conf={ai_conf:.2f})，尝试下一轨... (连续{_ai_mismatch_count}次)", "SUBTITLE")
                                         if _ai_mismatch_count >= 2 and ai_conf and ai_conf > 0.9:
-                                            log(f"[AI-VERIFY] 连续{_ai_mismatch_count}轨高置信度不匹配，跳过剩余字幕轨，直接走视觉分析", "SUBTITLE")
+                                            log(f"[AI-VERIFY] 连续{_ai_mismatch_count}轨高置信度不匹配，继续比较字幕候选，均失败后走本地 Whisper", "SUBTITLE")
                                             continue
                                         continue
                                     else:
@@ -337,10 +320,11 @@ async def fetch_bilibili_subtitles(bvid, cookies_obj=None, title=None, ai_verify
                                 try:
                                     is_match, ai_conf, ai_reason = await ai_verify_func(title, clean_text, video_desc)
                                     if not is_match:
+                                        semantic_mismatch = True
                                         _ai_mismatch_count += 1
                                         log(f"[AI-VERIFY] 字幕轨[{lan}]关键词通过但AI判定不匹配: {ai_reason} (conf={ai_conf:.2f})，尝试下一轨... (连续{_ai_mismatch_count}次)", "SUBTITLE")
                                         if _ai_mismatch_count >= 2 and ai_conf and ai_conf > 0.9:
-                                            log(f"[AI-VERIFY] 连续{_ai_mismatch_count}轨高置信度不匹配，跳过剩余字幕轨，直接走视觉分析", "SUBTITLE")
+                                            log(f"[AI-VERIFY] 连续{_ai_mismatch_count}轨高置信度不匹配，继续比较字幕候选，均失败后走本地 Whisper", "SUBTITLE")
                                             _ai_mismatch_count = 999
                                             break
                                         break
@@ -362,7 +346,7 @@ async def fetch_bilibili_subtitles(bvid, cookies_obj=None, title=None, ai_verify
                         return True, clean_text, video_desc, False
 
                 # ── 所有轨均未通过验证，跳过该视频 ──
-                return False, "[所有字幕轨均无有效内容]", "", False
+                return False, "[字幕语义不匹配:WHISPER_FALLBACK]" if semantic_mismatch else "[所有字幕轨均无有效内容]", video_desc, False
 
         except httpx.HTTPStatusError as e:
             return False, f"[字幕下载失败: HTTP {e.response.status_code}]", "", False
@@ -563,22 +547,27 @@ SYSTEM_PROMPT_BRAIN = f"""你叫 **"{{bot_name}}"**。
     ]
 }}"""
 
-SYSTEM_PROMPT_SUMMARY = """你是一个知识总结大师。你的任务是根据下面提供的视频标题和字幕文本，提炼出最核心的知识点、关键信息和实用结论。
-请遵循以下要求：
-1.  **结构清晰**：使用Markdown格式，如标题、列表（-）、加粗（**）等，让内容易于阅读。
-2.  **内容精炼**：去除口语化、无关紧要的闲聊，只保留干货。
-3.  **客观中立**：准确反映视频内容，不要添加自己的主观臆断。
-4.  **详细完整**：确保总结覆盖视频的主要知识点，内容要详细且结构完整。
+SYSTEM_PROMPT_SUMMARY = """你是一个严谨的中文视频学习笔记编辑器。输入包含视频标题、简介和字幕。
+只总结输入中确实出现的内容，不把推测写成事实；字幕缺失或听不清时明确标注“原文未提供/无法确认”。
+不要重复视频元数据，不要输出“视频信息”、标题、UP主、链接、归档时间或分类，这些字段由程序统一写入文件头。
+不要输出 Markdown 代码围栏、前言、致歉或“以下是总结”等套话。直接从“## 核心结论”开始，并严格使用以下固定结构：
 
-总结完成后，请在内容最上方添加以下元数据：
-【视频信息】
-- 标题: [视频标题]
-- UP主: [UP主名称]
-- 链接: [视频链接]
-- 归档时间: [当前时间]
-- 分类: [知识分类]
+## 核心结论
+用 2-4 句话说明视频解决什么问题、最重要的结论是什么。
 
-请直接开始总结，不要说任何无关的话。"""
+## 关键知识点
+使用编号列表，列出 3-8 个可验证知识点；每项包含“概念/方法 + 具体解释 +（如有）字幕证据”。
+
+## 操作步骤或案例
+仅在视频确实包含步骤、代码或案例时输出；按顺序列出，缺失部分不要补写。
+
+## 易错点与边界
+列出视频明确提到的限制、风险、常见误区；没有可靠内容时写“视频未说明”。
+
+## 一句话复习
+用一句可用于复习的结论收尾。
+
+要求：去除口语、重复和无关闲聊；保留关键数字、条件、例子和术语；篇幅适中，优先准确而不是凑字数。"""
 
 SYSTEM_PROMPT_COMMENT_SUMMARY = """你是一个评论区知识挖掘专家。你的任务是从视频评论区讨论中提取有价值的知识点、实用信息和独到见解。
 

@@ -103,6 +103,7 @@ class ASREngine:
     def __init__(self, config: dict[str, Any] | None = None):
         cfg = config or {}
         self.enabled = cfg.get("enabled", True)
+        self.local_only = cfg.get("local_only", False)
         self.backend = cfg.get("backend", "funasr")  # funasr / whisper
         self.whisper_model_name = cfg.get("whisper_model", "base")
         self.language = cfg.get("language", "zh")
@@ -797,7 +798,17 @@ class ASREngine:
         try:
             if self._model is None or self._backend_loaded != "whisper":
                 print(f"正在加载 Whisper 模型: {self.whisper_model_name}")
-                self._model = whisper.load_model(self.whisper_model_name, device=self.device)
+                model_target = self.whisper_model_name
+                if self.local_only:
+                    if not Path(model_target).is_file():
+                        filename = model_target + '.pt'
+                        caches = [Path(self._get_model_dir()) / filename,
+                                  Path(os.environ.get('XDG_CACHE_HOME', str(Path.home() / '.cache'))) / 'whisper' / filename]
+                        cache = next((candidate for candidate in caches if candidate.is_file()), None)
+                        if cache is None:
+                            raise RuntimeError('字幕不匹配，但本地 Whisper 权重未安装；请先安装 openai-whisper 并下载配置指定模型')
+                        model_target = str(cache)
+                self._model = whisper.load_model(model_target, device=self.device)
                 self._backend_loaded = "whisper"
 
             result = self._model.transcribe(

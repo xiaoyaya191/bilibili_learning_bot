@@ -30,7 +30,7 @@ _USER_ROOT_FILES = (
 RESET_GROUPS = {
     "credentials_runtime": {
         "label": "登录凭证与运行数据",
-        "description": "Cookie、二维码、API 配置、网页密码、会话、日志和互动记录",
+        "description": "Cookie、二维码、API 配置、网页密码、全部 SQLite 数据库、会话、日志、画像、日记与互动记录",
     },
     "knowledge_generated": {
         "label": "知识库与生成内容",
@@ -52,7 +52,7 @@ RESET_GROUPS = {
 
 # A factory reset should remove live private data, but leave an explicitly
 # created backup available for a later import. Selecting ALL still includes it.
-DEFAULT_RESET_GROUP_IDS = tuple(group_id for group_id in RESET_GROUPS if group_id != "backup_files")
+DEFAULT_RESET_GROUP_IDS = tuple(group_id for group_id in RESET_GROUPS if group_id not in ("backup_files", "project_docs"))
 
 
 def _configured_path(value: Any, project_dir: Path) -> Path | None:
@@ -69,7 +69,14 @@ def _is_safe_target(path: Path, protected: Iterable[Path]) -> bool:
         return False
     if resolved == Path(resolved.anchor):
         return False
-    return all(resolved != item.resolve() for item in protected)
+    if any(resolved == item.resolve() or resolved in item.resolve().parents for item in protected):
+        return False
+    for parent in (path, *path.parents):
+        if parent.is_symlink():
+            return False
+        if parent.exists() and getattr(parent.lstat(), "st_file_attributes", 0) & 0x400:
+            return False
+    return True
 
 def collect_reset_target_groups(**kwargs: Any) -> dict[str, list[Path]]:
     """Return reset paths grouped by purpose without ever using a drive root."""
@@ -79,12 +86,21 @@ def collect_reset_target_groups(**kwargs: Any) -> dict[str, list[Path]]:
     backup_dir = Path(kwargs["backup_dir"])
     cipher_key_file = Path(kwargs["cipher_key_file"])
     cfg = kwargs.get("config") if isinstance(kwargs.get("config"), dict) else {}
-    protected = (project_dir, user_data_dir)
+    isolated = bool(os.getenv("BILI_ACCOUNT_ID"))
+    protected = (project_dir, user_data_dir, Path.home())
+    source_names = ("core", "services", "utils", "assets", "templates", "tests", "agent", "api", "brain", "cli", "knowledge", "persona", "security", "mcp_server", "xingye_bot", "ob_bridge", ".git", ".github", "build", "dist")
+    source_paths = [project_dir / name for name in source_names]
+
+    def private_root_files(root: Path) -> list[Path]:
+        if not root.exists() or root.resolve() == project_dir.resolve():
+            return []
+        return [child for child in root.iterdir() if child.is_file() and child.suffix.lower() in (".json", ".sqlite", ".sqlite3", ".db", ".log", ".txt", ".md", ".key", ".bak", ".tmp", ".sqlite-wal", ".sqlite-shm", ".sqlite3-wal", ".sqlite3-shm", ".db-wal", ".db-shm") and child.name not in ("accounts.json",)]
 
     runtime = [data_dir, cipher_key_file]
     runtime.extend(project_dir / name for name in ("Data", "qr_codes"))
     runtime.extend(project_dir / name for name in _PROJECT_ARTIFACT_FILES)
     runtime.extend(user_data_dir / name for name in _USER_ROOT_FILES)
+    runtime.extend(private_root_files(user_data_dir))
     runtime.extend(user_data_dir / name for name in ("Data", "qr_codes"))
     runtime.append(user_data_dir / "\u8d26\u53f7\u6062\u590d")
     generated_names = ("KnowledgeBase", "highlights", "html_exports", "MindMaps", "Word")
@@ -113,12 +129,19 @@ def collect_reset_target_groups(**kwargs: Any) -> dict[str, list[Path]]:
                 return True
         return False
 
-    if _is_app_residual(default_root):
+    if not isolated and _is_app_residual(default_root):
         runtime.extend(default_root / name for name in ("Data", "qr_codes"))
         runtime.extend(default_root / name for name in _USER_ROOT_FILES)
+        runtime.extend(private_root_files(default_root))
         generated.extend(default_root / name for name in generated_names)
-    models = [project_dir / "model"]
-    docs = [project_dir / "docs"]
+    if isolated:
+        runtime = [path for path in runtime if path.resolve().is_relative_to(user_data_dir.resolve())]
+        generated = [path for path in generated if path.resolve().is_relative_to(user_data_dir.resolve())]
+    runtime.extend(user_data_dir / name for name in ("cache", "tmp", "temp", "uploads", "logs", ".local_appdata_migration_v1_done"))
+    models = [user_data_dir / "model", user_data_dir / "models"]
+    docs = [] if isolated else [project_dir / "docs"]
+    if not isolated:
+        models.append(project_dir / "model")
     custom_values = (
         cfg.get("knowledge_base_dir"),
         (cfg.get("knowledge") or {}).get("base_dir") if isinstance(cfg.get("knowledge"), dict) else None,
@@ -129,11 +152,17 @@ def collect_reset_target_groups(**kwargs: Any) -> dict[str, list[Path]]:
     )
     for value in custom_values:
         path = _configured_path(value, project_dir)
-        if path and _is_safe_target(path, protected):
+        if path:
+            if isolated and not path.resolve().is_relative_to(user_data_dir.resolve()):
+                continue
+            if not _is_safe_target(path, protected) or any(path.resolve() == source.resolve() or source.resolve() in path.resolve().parents or path.resolve() in source.resolve().parents for source in source_paths):
+                raise ValueError(f"清理路径不安全，请先修正配置：{path}")
             generated.append(path)
     asr_cfg = cfg.get("asr") if isinstance(cfg.get("asr"), dict) else {}
     model_path = _configured_path(asr_cfg.get("funasr_model_dir"), project_dir)
-    if model_path and _is_safe_target(model_path, protected):
+    if model_path and (not isolated or model_path.resolve().is_relative_to(user_data_dir.resolve())):
+        if not _is_safe_target(model_path, protected) or any(model_path.resolve() == source.resolve() or source.resolve() in model_path.resolve().parents or model_path.resolve() in source.resolve().parents for source in source_paths):
+            raise ValueError(f"模型清理路径不安全，请先修正配置：{model_path}")
         models.append(model_path)
 
     def unique(paths: Iterable[Path]) -> list[Path]:
@@ -181,7 +210,9 @@ def _path_usage(path: Path) -> tuple[int, int]:
 
 
 def preview_reset_targets(*, selected_groups: Iterable[str] | None = None, **kwargs: Any) -> dict[str, Any]:
-    selected = set(selected_groups or DEFAULT_RESET_GROUP_IDS)
+    selected = set(DEFAULT_RESET_GROUP_IDS if selected_groups is None else selected_groups)
+    if not selected:
+        raise ValueError("请至少选择一个清理范围")
     unknown = selected.difference(RESET_GROUPS)
     if unknown:
         raise ValueError(f"Unknown reset groups: {', '.join(sorted(unknown))}")
@@ -208,7 +239,10 @@ def collect_reset_targets(**kwargs: Any) -> list[Path]:
 def erase_all_user_data(**kwargs: Any) -> dict[str, Any]:
     """Delete all reset targets and recreate only the empty runtime data dir."""
     data_dir = Path(kwargs["data_dir"])
-    selected = set(kwargs.pop("selected_groups", None) or DEFAULT_RESET_GROUP_IDS)
+    selected_groups = kwargs.pop("selected_groups", None)
+    selected = set(DEFAULT_RESET_GROUP_IDS if selected_groups is None else selected_groups)
+    if not selected:
+        raise ValueError("请至少选择一个清理范围")
     unknown = selected.difference(RESET_GROUPS)
     if unknown:
         raise ValueError(f"Unknown reset groups: {', '.join(sorted(unknown))}")
@@ -216,14 +250,29 @@ def erase_all_user_data(**kwargs: Any) -> dict[str, Any]:
     targets = [path for group_id in RESET_GROUPS if group_id in selected for path in grouped[group_id]]
     deleted: list[str] = []
     failures: list[str] = []
+    preserved = [] if "backup_files" in selected else [Path(kwargs["backup_dir"]).resolve()]
+    preserved.extend([Path(kwargs["user_data_dir"]) / "accounts", Path(kwargs["user_data_dir"]) / "accounts.json"])
+
+    def remove_target(target: Path) -> None:
+        if not _is_safe_target(target, (Path(kwargs["project_dir"]), Path(kwargs["user_data_dir"]), Path.home())):
+            raise OSError("路径校验失败或为链接目录，已拒绝清理")
+        resolved = target.resolve()
+        if any(resolved == item.resolve() or item.resolve() in resolved.parents for item in preserved):
+            return
+        if target.is_dir() and any(resolved in item.resolve().parents for item in preserved):
+            for child in target.iterdir():
+                remove_target(child)
+            return
+        if target.is_dir():
+            shutil.rmtree(target)
+            deleted.append(str(target))
+        elif target.exists():
+            target.unlink()
+            deleted.append(str(target))
+
     for target in targets:
         try:
-            if target.is_dir():
-                shutil.rmtree(target)
-                deleted.append(str(target))
-            elif target.exists():
-                target.unlink()
-                deleted.append(str(target))
+            remove_target(target)
         except OSError as exc:
             failures.append(f"{target}: {exc}")
     if "credentials_runtime" in selected:

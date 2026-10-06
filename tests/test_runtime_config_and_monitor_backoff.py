@@ -26,7 +26,8 @@ def test_private_message_platform_rejection_is_not_a_success(monkeypatch):
     manager = private_msg.PrivateMessageManager.__new__(private_msg.PrivateMessageManager)
     manager.credential = object()
     monkeypatch.setattr(core.config, "load_config", lambda: {
-        "approval_review": {"enabled": False, "action_types": {"private_reply": False}}
+        "approval_review": {"enabled": False, "action_types": {"private_reply": False}},
+        "ai_permissions": {"enabled": True, "actions": {"private_reply": True}}
     })
 
     async def _no_throttle():
@@ -69,7 +70,8 @@ def test_proactive_private_message_is_saved_as_follow_up_context(monkeypatch):
     manager.credential = object()
     manager.context_db = Context()
     monkeypatch.setattr(core.config, "load_config", lambda: {
-        "approval_review": {"enabled": False, "action_types": {"private_reply": False}}
+        "approval_review": {"enabled": False, "action_types": {"private_reply": False}},
+        "ai_permissions": {"enabled": True, "actions": {"private_reply": True}}
     })
 
     async def _no_throttle():

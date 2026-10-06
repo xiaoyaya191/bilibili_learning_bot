@@ -3,11 +3,17 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>BiliLearn v3.1.4 — 项目介绍</title>
+<title>BiliLearn v3.1.6 — 项目介绍</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@100;200;300;400;500;600;700;800&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
-<script src="/assets/js/lucide.js"></script>
+<script>
+// 服务端使用 /assets 路由，本地 file:// 打开时使用页面旁的 assets 目录。
+(function () {
+  var src = location.protocol === 'file:' ? 'assets/js/lucide.js' : '/assets/js/lucide.js';
+  document.write('<script src="' + src + '"><\\/script>');
+})();
+</script>
 <script>
 // [FIX] 图标库改为本地加载（随包分发），彻底消除 CDN 依赖；本地文件异常
 // 缺失时注入 noop 兜底，保证页面脚本（主题切换等）不因 lucide 未定义而中断。
@@ -60,9 +66,12 @@ body {
   background: var(--bg-primary);
   color: var(--text-primary);
   overflow: hidden;
+  width: 100%;
+  max-width: 100%;
   height: 100vh;
   transition: background 0.4s ease, color 0.4s ease;
 }
+body::before { content:''; position:fixed; left:0; top:0; width:100vw; height:4px; background:var(--border-light); opacity:.72; z-index:999; pointer-events:none; }
 
 .slide-container {
   width: 100vw;
@@ -87,8 +96,7 @@ body {
   opacity: 0;
   transform: translateY(16px);
   transition: all 0.55s cubic-bezier(0.22, 0.61, 0.36, 1);
-  overflow-y: auto;
-  overflow-x: hidden;
+  overflow: hidden;
   border: 1px solid var(--border);
   pointer-events: none;
   z-index: 1;
@@ -109,15 +117,21 @@ body {
 .progress-bar {
   position: fixed;
   top: 0; left: 0;
-  height: 2px;
-  background: var(--accent);
+  height: 4px;
+  border-radius: 0 999px 999px 0;
+  background: linear-gradient(90deg, rgba(217,119,87,0) 0%, rgba(217,119,87,.45) 35%, var(--accent) 100%);
+  box-shadow: 0 1px 8px rgba(217,119,87,.28);
+  overflow: visible;
   z-index: 1000;
-  transition: width 0.55s cubic-bezier(0.22, 0.61, 0.36, 1);
+  transition: width .7s cubic-bezier(.22,.61,.36,1);
 }
+.progress-bar::after { content:''; position:absolute; right:-3px; top:50%; width:7px; height:7px; border-radius:50%; background:var(--accent); transform:translateY(-50%); box-shadow:0 0 8px 1px var(--accent), 0 0 20px 5px var(--accent-bg); opacity:0; transition:opacity .35s ease; }
+.progress-bar.ready::after { opacity:1; }
+[data-theme="dark"] .progress-bar { background:linear-gradient(90deg, rgba(232,145,106,0) 0%, rgba(232,145,106,.45) 35%, var(--accent) 100%); }
 
 .theme-toggle {
-  position: fixed; top: 20px; right: 24px; z-index: 1001;
-  width: 40px; height: 40px; border-radius: 50%;
+  position: fixed; top: calc(10px + env(safe-area-inset-top)); right: calc(12px + env(safe-area-inset-right)); z-index: 1001;
+  width: 44px; height: 44px; border-radius: 50%;
   border: 1px solid var(--border); background: var(--bg-secondary);
   cursor: pointer; display: flex; align-items: center; justify-content: center;
   transition: all 0.2s; color: var(--text-primary); padding: 0;
@@ -135,6 +149,21 @@ body {
   opacity: 0.42; backdrop-filter: blur(8px);
   animation: navHintBreath 3.8s ease-in-out infinite;
 }
+
+/* Compact navigation: hidden by default and revealed from the circular button. */
+.nav-toggle { position:fixed; top:calc(10px + env(safe-area-inset-top)); right:calc(64px + env(safe-area-inset-right)); z-index:1002; width:44px; height:44px; border:1px solid var(--border); border-radius:50%; background:var(--bg-secondary); color:var(--text-primary); cursor:pointer; display:flex; align-items:center; justify-content:center; transition:transform .35s ease, background .25s ease; }
+.nav-toggle:hover { transform:scale(1.06); background:var(--border); }
+.nav-toggle svg { width:18px; height:18px; transition:transform .35s ease; }
+.nav-toggle.open svg { transform:rotate(90deg); }
+.slide-nav { position:fixed; left:50%; bottom:calc(28px + env(safe-area-inset-bottom)); z-index:100; display:flex; gap:6px; align-items:center; padding:5px 6px; border:1px solid color-mix(in srgb, var(--border) 82%, var(--accent) 18%); border-radius:40px; background:rgba(255,255,255,.82); box-shadow:0 10px 28px rgba(38,31,28,.12), inset 0 1px 0 rgba(255,255,255,.72); backdrop-filter:blur(16px); -webkit-backdrop-filter:blur(16px); opacity:0; visibility:hidden; pointer-events:none; transform:translate(-50%,14px) scale(.92); transition:opacity .35s ease, transform .35s ease, visibility .35s ease; }
+.slide-nav { bottom:calc(54px + env(safe-area-inset-bottom)); }
+.slide-nav.open { opacity:1; visibility:visible; pointer-events:auto; transform:translate(-50%,0) scale(1); }
+.slide-nav button { width:44px; height:44px; border:0; border-radius:50%; background:transparent; color:var(--text-primary); cursor:pointer; display:flex; align-items:center; justify-content:center; opacity:.62; transition:background .25s ease, color .25s ease, opacity .25s ease, transform .25s ease; }
+.slide-nav button:hover { opacity:1; color:var(--accent); background:var(--accent-bg); transform:translateY(-1px); }
+.slide-nav button svg { width:16px; height:16px; }
+.slide-nav .page-indicator { color:var(--text-secondary); font-size:13px; padding:0 14px; letter-spacing:1.5px; opacity:.9; font-variant-numeric:tabular-nums; }
+[data-theme="dark"] .slide-nav { background:rgba(20,20,20,.88); box-shadow:0 10px 28px rgba(0,0,0,.3), inset 0 1px 0 rgba(255,255,255,.04); }
+[data-theme="dark"] .slide-nav button { color:var(--text-primary); }
 [data-theme="dark"] .keyboard-hint { background: rgba(20,20,20,0.52); }
 .keyboard-hint kbd {
   min-width: 18px; height: 18px; display: inline-flex; align-items: center; justify-content: center;
@@ -169,6 +198,13 @@ body {
   font-size: 44px; font-weight: 200; line-height: 1.12;
   margin-bottom: 16px; letter-spacing: -1.5px; color: var(--text-primary);
 }
+.size-default .slide { width: min(86vw, 1080px); padding: 54px 72px; }
+.size-default .slide-title { font-size: 50px; }
+.size-default .slide-title.sm { font-size: 38px; }
+.size-default .slide-subtitle { font-size: 18px; }
+.size-default .card h3 { font-size: 20px; }
+.size-default .card p { font-size: 14px; }
+.size-default .big-num { font-size: 72px; }
 .slide-title.sm { font-size: 34px; }
 .slide-subtitle {
   font-size: 16px; font-weight: 300; color: var(--text-secondary);
@@ -947,16 +983,27 @@ body {
   .flow-row { gap: 6px; }
   .flow-step { padding: 8px 12px; font-size: 11px; }
   .keyboard-hint { bottom: 10px; font-size: 10px; padding: 5px 8px; }
+  .slide-nav { bottom:calc(48px + env(safe-area-inset-bottom)); }
+  .nav-toggle { right:calc(62px + env(safe-area-inset-right)); }
+  .size-default .slide, .size-large .slide { width:96vw; padding:36px 24px; }
+  .size-default .slide-title, .size-large .slide-title { font-size:clamp(30px, 8vw, 44px); }
+  .size-default .slide-title.sm, .size-large .slide-title.sm { font-size:clamp(27px, 7vw, 38px); }
+  .size-default .slide-subtitle, .size-large .slide-subtitle { font-size:15px; }
+  .size-large .card { padding:22px; }
+  .size-large .card h3 { font-size:19px; }
+  .size-large .card p { font-size:13px; }
+  .size-default .big-num, .size-large .big-num { font-size:44px; }
 }
 </style>
 </head>
-<body>
+<body class="size-default">
 
 <div class="progress-bar" id="progressBar"></div>
 
 <button class="theme-toggle" id="themeToggle" onclick="toggleTheme()" title="暗色模式">
   <i data-lucide="moon" id="themeIcon"></i>
 </button>
+<button class="nav-toggle" id="navToggle" onclick="toggleNav()" title="显示或隐藏页面导航" aria-expanded="false"><i data-lucide="menu"></i></button>
 
 <div class="keyboard-hint" aria-hidden="true">
   <kbd>←</kbd><span>按键盘左右键切换页面</span><kbd>→</kbd>
@@ -1013,8 +1060,8 @@ body {
     <span class="tag">Open Source Project</span>
     <h1 class="slide-title" style="font-size:66px; font-weight:200;">B站 AI 学习<br>互动机器人</h1>
     <p class="slide-subtitle" style="margin-top:20px; font-size:20px;">
-      v3.1.4 — AI 驱动的本地视频学习与互动工作台<br>
-      自动刷视频、学知识、互动评论、自我进化
+      v3.1.6 — AI 驱动的本地视频学习与互动工作台<br>
+      学习目标 → 知识树 → B站内容 → 测验 → 掌握度 → 下一步计划
     </p>
     <div class="divider"></div>
     <p style="font-size:13px; color:var(--text-tertiary); font-weight:400; letter-spacing:0.5px;">
@@ -1022,7 +1069,8 @@ body {
     </p>
     <div class="release-note">
       <i data-lucide="sparkles" style="width:17px;height:17px;color:var(--accent);flex-shrink:0;margin-top:1px;"></i>
-      <div><strong>v3.1.4 更新：</strong>全新 Agent 工作台（17 个内置工具的自主循环）、MCP 服务接入、技能库与插件标准接口、备份支持分组勾选与脱敏导出、恢复出厂设置分组清理、知识库封面自动补全与一键整理体检。稳定性：Linux 启动崩溃（#25）、扫码登录凭据不完整、BOM 配置文件解析、失效凭据僵尸运行等全面修复。AI 从“被代码指挥”升级为“自己思考自己干”。</div>
+      <div><strong>v3.1.5 更新：</strong>补齐学习闭环基础能力、人格与兴趣分区、Agent 工作台、MCP 服务、备份恢复和技能库；新增模型可用性测试、知识库导出、审核重试、ASR 配置和多项本地数据管理工具，并持续修复启动、登录和数据持久化问题。</div>
+      <div><strong>v3.1.6 更新：</strong>稳定性与可用性版本：修复全局按钮点击、首次使用引导、B站 Cookie 登录、账号找回、兴趣内容被覆盖、免责声明倒计时和启动默认仪表盘等问题；新增学习目标/知识树/候选视频/测验记录闭环、配置编辑保护、模型列表完整拉取与可选模型测试，并统一版本信息为 3.1.6。</div>
     </div>
     <div class="release-links">
       <a class="release-link primary" href="https://bot.bxya.top/" target="_blank" rel="noopener noreferrer"><i data-lucide="globe-2"></i>访问官方网站</a>
@@ -1822,6 +1870,12 @@ pip install -r requirements.txt</pre>
 
 </div><!-- /slide-container -->
 
+<nav class="slide-nav" id="slideNav" aria-label="页面导航">
+  <button onclick="prevSlide()" title="上一页"><i data-lucide="chevron-left"></i></button>
+  <span class="page-indicator"><span id="currentPage">1</span> / <span id="totalPages">17</span></span>
+  <button onclick="nextSlide()" title="下一页"><i data-lucide="chevron-right"></i></button>
+</nav>
+
 
 <script>
 let currentSlide = 0;
@@ -1888,7 +1942,7 @@ function animateCounters(root = document) {
 
 // Version rolling animation for end slide
 let versionAnimated = false;
-const versionHistory = ['v1.0.1', 'v1.0.2', 'v2.0.0', 'v2.0.3', 'v2.1.0', 'v2.2.0', 'v2.2.1', 'v3.0.0', 'v3.0.1', 'v3.1.3', 'v3.1.4'];
+const versionHistory = ['v1.0.1', 'v1.0.2', 'v2.0.0', 'v2.0.3', 'v2.1.0', 'v2.2.0', 'v2.2.1', 'v3.0.0', 'v3.0.1', 'v3.1.3', 'v3.1.5', 'v3.1.6'];
 
 // === MC-style Particle System ===
 const MC_COLORS = ['#a855f7','#c084fc','#facc15','#fde047','#22d3ee','#67e8f9','#34d399','#6ee7b7','#f9f9f9','#fbbf24'];
@@ -2000,7 +2054,10 @@ function updateSlide() {
   document.querySelectorAll('.slide').forEach((s, i) => {
     s.classList.toggle('active', i === currentSlide);
   });
-  document.getElementById('progressBar').style.width = ((currentSlide + 1) / totalSlides * 100) + '%';
+  const progressBar = document.getElementById('progressBar');
+  progressBar.style.width = (totalSlides > 1 ? currentSlide / (totalSlides - 1) : 0) * 100 + '%';
+  progressBar.classList.toggle('ready', currentSlide > 0);
+  document.getElementById('currentPage').textContent = currentSlide + 1;
 
   // Trigger staggered entrance animation on the active slide
   const active = document.querySelector('.slide.active');
@@ -2038,6 +2095,16 @@ function toggleTheme() {
   icon.setAttribute('data-lucide', isDark ? 'sun' : 'moon');
   lucide.createIcons({ icons: { Sun: lucide.icons.Sun, Moon: lucide.icons.Moon }, attrs: { 'stroke-width': 1.5 } });
   try { localStorage.setItem('bot-slides-theme', isDark ? 'dark' : 'light'); } catch(e) {}
+}
+
+function toggleNav() {
+  const nav = document.getElementById('slideNav');
+  const button = document.getElementById('navToggle');
+  const open = nav.classList.toggle('open');
+  button.classList.toggle('open', open);
+  button.setAttribute('aria-expanded', String(open));
+  button.querySelector('svg')?.setAttribute('data-lucide', open ? 'x' : 'menu');
+  lucide.createIcons({ attrs: { 'stroke-width': 1.5 } });
 }
 
 // Load saved theme + trigger initial counter animation

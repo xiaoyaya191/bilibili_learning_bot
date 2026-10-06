@@ -301,15 +301,15 @@ DEFAULT_CONFIG = {
     "diary": {
         "enabled": True,
         "auto_enabled": True,
-        "auto_interval_minutes": 60,
-        "min_events_for_auto": 3
+        "auto_interval_minutes": 1440,
+        "min_events_for_auto": 1
     },
     "self_evolution": {
-        "enabled": True,
-        "auto_enabled": True,
-        "reflect_interval_events": 8,
+        "enabled": False,
+        "auto_enabled": False,
+        "reflect_interval_events": 100,
         "min_events_for_reflect": 3,
-        "auto_apply": True
+        "auto_apply": False
     },
     "agent": {
         "enabled": True,
@@ -335,9 +335,15 @@ DEFAULT_CONFIG = {
         "max_duration_minutes": 0
     },
     "revisit": {
-        "enabled": True,
+        "enabled": False,
+        "rules_confirmed": False,
+        "sources": ["history", "local_favorites"],
+        "time_windows": [], "weekdays": [0, 1, 2, 3, 4, 5, 6],
+        "categories": [], "keywords": [], "exclude_keywords": [],
+        "up_names": [], "favorite_folders": [], "min_age_hours": 24,
+        "daily_limit": 3, "order": "oldest",
         "prob_revisit": 0.25,
-        "revisit_cooldown_minutes": 15,
+        "revisit_cooldown_minutes": 60,
         "min_score": 7.5,
         "max_per_video": 2,
         "per_video_cooldown_minutes": 240
@@ -682,13 +688,13 @@ REPLY_SAFETY_BLOCK_POLITICAL_VIDEO_COMMENTS = config.get("reply_safety", {}).get
 REPLY_SAFETY_BLOCKED_KEYWORDS = config.get("reply_safety", {}).get("blocked_keywords", DEFAULT_CONFIG["reply_safety"]["blocked_keywords"])
 DIARY_ENABLED = config.get("diary", {}).get("enabled", True)
 DIARY_AUTO_ENABLED = config.get("diary", {}).get("auto_enabled", True)
-DIARY_AUTO_INTERVAL_MINUTES = config.get("diary", {}).get("auto_interval_minutes", 60)
-DIARY_MIN_EVENTS_FOR_AUTO = config.get("diary", {}).get("min_events_for_auto", 3)
-EVOLUTION_ENABLED = config.get("self_evolution", {}).get("enabled", True)
-EVOLUTION_AUTO_ENABLED = config.get("self_evolution", {}).get("auto_enabled", True)
-EVOLUTION_REFLECT_INTERVAL_EVENTS = config.get("self_evolution", {}).get("reflect_interval_events", 8)
+DIARY_AUTO_INTERVAL_MINUTES = config.get("diary", {}).get("auto_interval_minutes", 1440)
+DIARY_MIN_EVENTS_FOR_AUTO = config.get("diary", {}).get("min_events_for_auto", 1)
+EVOLUTION_ENABLED = config.get("self_evolution", {}).get("enabled", False)
+EVOLUTION_AUTO_ENABLED = config.get("self_evolution", {}).get("auto_enabled", False)
+EVOLUTION_REFLECT_INTERVAL_EVENTS = config.get("self_evolution", {}).get("reflect_interval_events", 100)
 EVOLUTION_MIN_EVENTS_FOR_REFLECT = config.get("self_evolution", {}).get("min_events_for_reflect", 3)
-EVOLUTION_AUTO_APPLY = config.get("self_evolution", {}).get("auto_apply", True)
+EVOLUTION_AUTO_APPLY = False
 AGENT_ENABLED = config.get("agent", {}).get("enabled", True)
 AGENT_AUTO_ENABLED = config.get("agent", {}).get("auto_enabled", False)
 AGENT_DIVE_ENABLED = config.get("agent", {}).get("dive_enabled", True)  # Agent深度搜索集成到刷视频主循环
@@ -713,7 +719,7 @@ SESSION_MAX_DURATION_MINUTES = config.get("session", {}).get("max_duration_minut
 SESSION_COMPLETION_ACTION = config.get("session", {}).get("completion_action", "stop")
 
 # Revisit review (learn & reinforce)
-REVISIT_ENABLED = config.get("revisit", {}).get("enabled", True)
+REVISIT_ENABLED = config.get("revisit", {}).get("enabled", False)
 PROB_REVISIT = config.get("revisit", {}).get("prob_revisit", 0.25)
 REVISIT_COOLDOWN_MINUTES = config.get("revisit", {}).get("revisit_cooldown_minutes", 15)
 REVISIT_MIN_SCORE = config.get("revisit", {}).get("min_score", 7.5)  # only quality videos enter the pool
@@ -1245,7 +1251,7 @@ def show_main_menu():
     print(f"""
     ╔══════════════════════════════════════════════════════════╗
     ║           bilibili_learning_bot - B站学习互动机器人     ║
-    ║               版本: v3.1.3 B站视频学习版                ║
+    ║               版本: v3.1.6 B站视频学习版                ║
     ║  特性: B站视频分析+智能兴趣引擎+投币管控+19种风格+知识库   ║
     ╠══════════════════════════════════════════════════════════╣
     ╚══════════════════════════════════════════════════════════╝
@@ -4186,62 +4192,30 @@ def _print_evolution_items(items):
 
 
 async def run_manual_diary_generation(extra_note=""):
-    diary_mgr = BotDiaryManager()
-    persona_mgr = PersonaManager()
-    mood_mgr = MoodManager()
-    events = _load_recent_journal_events(limit=20)
-    if not events:
-        print(f"{Fore.YELLOW}[WARN] 暂无机器人互动日志，无法自动生成日记。可以先手动写一篇。{Style.RESET_ALL}")
+    from services.diary_scheduler import DiaryScheduler, settings
+    preferences = settings()
+    if input(f"{Fore.YELLOW}生成日记会发送所选来源给AI并消耗额度，确认？(y/N): {Style.RESET_ALL}").strip().lower() != "y":
         return
-    entry = await diary_mgr.generate_from_events(
-        events,
-        persona_mgr.build_prompt_block(),
-        mood_mgr.get_current(),
-        extra_note=extra_note
-    )
+    if extra_note:
+        preferences["custom_prompt"] = (preferences["custom_prompt"] + "\n" + extra_note)[:6000]
+    result = await DiaryScheduler().generate(preferences, manual=True,
+        persona_prompt=PersonaManager().build_prompt_block(), mood=MoodManager().get_current())
+    if not result.get("ok"):
+        print(f"{Fore.YELLOW}[WARN] {result.get('message', '未生成日记')}{Style.RESET_ALL}")
+        return
+    entry = result["entry"]
     print(f"{Fore.GREEN}[OK] 已生成日记: {entry['title']}{Style.RESET_ALL}")
     print(entry["content"][:500])
 
 
 async def run_manual_self_evolution(apply_result=True):
-    diary_mgr = BotDiaryManager()
-    evolution_mgr = SelfEvolutionManager()
-    persona_mgr = PersonaManager()
-    mood_mgr = MoodManager()
-    events = _load_recent_journal_events(limit=20)
-    diary_entries = diary_mgr.list_entries(limit=5)
-    if not events and not diary_entries:
-        print(f"{Fore.YELLOW}[WARN] 暂无日记或互动日志，无法进化。{Style.RESET_ALL}")
+    from services.evolution_engine import EvolutionEngine
+    from services.evolution_settings import settings
+    if input(f"{Fore.YELLOW}生成进化提案会把所选来源发送给AI并消耗额度，确认？(y/N): {Style.RESET_ALL}").strip().lower() != "y":
         return
-
-    item = await evolution_mgr.reflect(
-        events or [{"source": "diary", "text": e.get("content", "")} for e in diary_entries],
-        persona_mgr.build_prompt_block(),
-        mood_mgr.get_current(),
-        diary_entries=diary_entries
-    )
-    parsed = item.get("parsed", {})
-    print(f"{Fore.GREEN}[OK] 自我复盘完成{Style.RESET_ALL}")
-    print(f"复盘: {parsed.get('reflection', '')}")
-    print(f"风格调整: {parsed.get('style_delta', '') or '无'}")
-    print(f"关系边界调整: {parsed.get('relationship_delta', '') or '无'}")
-    print(f"新增约束: {parsed.get('new_rule', '') or '无'}")
-
-    if apply_result and EVOLUTION_AUTO_APPLY:
-        persona_mgr.evolve_active_persona(
-            style_delta=str(parsed.get("style_delta") or "").strip(),
-            relationship_delta=str(parsed.get("relationship_delta") or "").strip(),
-            new_rule=str(parsed.get("new_rule") or "").strip()
-        )
-        mood_delta = parsed.get("mood_delta", 0)
-        try:
-            mood_delta = int(float(mood_delta))
-        except Exception:
-            mood_delta = 0
-        if mood_delta:
-            mood_mgr.shift("自我进化复盘", max(-2, min(2, mood_delta)))
-        evolution_mgr.mark_applied(item.get("id"))
-        print(f"{Fore.GREEN}[OK] 已应用到当前人格/心情{Style.RESET_ALL}")
+    result = await EvolutionEngine().generate("parameters", settings(), manual=True)
+    print(result.get("message", "未生成提案"))
+    print("提案不会直接修改人格或OB配置。请在网页AI进化分区审核、观察和回滚。")
 
 
 def show_diary_evolution_menu():
@@ -4312,7 +4286,14 @@ def show_diary_evolution_menu():
             except Exception as e:
                 print(f"{Fore.RED}[ERROR] 自我进化失败: {e}{Style.RESET_ALL}")
         elif choice == "6":
-            _print_evolution_items(evolution_mgr.list_items(limit=20))
+            from services.evolution_engine import EvolutionEngine
+            from services.evolution_settings import settings as evolution_settings
+            proposals = EvolutionEngine().snapshot(evolution_settings())["proposals"]
+            if not proposals:
+                print("暂无进化提案；可手动生成，或启用自动计划。")
+            for proposal in proposals[:20]:
+                print(f"{proposal['id']} | {proposal['layer']} | {proposal['status']} | {proposal['payload']['reflection']}")
+            print("完整变更、审核、观察与回滚请打开网页：数据监控 → AI进化。")
         elif choice == "7":
             diary_cfg = config.setdefault("diary", {})
             evolution_cfg = config.setdefault("self_evolution", {})
@@ -4332,7 +4313,8 @@ def show_diary_evolution_menu():
             evolution_cfg["enabled"] = EVOLUTION_ENABLED
             EVOLUTION_AUTO_ENABLED = not EVOLUTION_AUTO_ENABLED if input(f"{Fore.YELLOW}切换自动进化？(y/N): {Style.RESET_ALL}").strip().lower() == "y" else EVOLUTION_AUTO_ENABLED
             evolution_cfg["auto_enabled"] = EVOLUTION_AUTO_ENABLED
-            EVOLUTION_AUTO_APPLY = not EVOLUTION_AUTO_APPLY if input(f"{Fore.YELLOW}切换自动应用进化结果？(y/N): {Style.RESET_ALL}").strip().lower() == "y" else EVOLUTION_AUTO_APPLY
+            EVOLUTION_AUTO_APPLY = False
+            print("进化提案在网页AI进化分区审核；仅白名单参数可显式开启自动应用。")
             evolution_cfg["auto_apply"] = EVOLUTION_AUTO_APPLY
             raw = input(f"{Fore.YELLOW}进化检查事件间隔 (回车保持): {Style.RESET_ALL}").strip()
             if raw:
@@ -6416,7 +6398,7 @@ def factory_reset_all():
     print(f"{Fore.RED}╚══════════════════════════════════════════════════╝{Style.RESET_ALL}")
 
     html_dir = str(_SHARED_HTML_EXPORTS_DIR)
-    web_dir = os.path.join(BASE_DIR, "web")
+    web_dir = os.path.join(str(_SHARED_USER_DATA_DIR) if os.getenv("BILI_ACCOUNT_ID") else BASE_DIR, "web")
     qr_dir = str(_SHARED_QR_CODES_DIR)
     mindmap_dir = str(_SHARED_MINDMAPS_DIR)
 
@@ -6499,8 +6481,8 @@ def factory_reset_all():
         (" 缓存与临时文件",
          [("Data/子目录 (video_cache/feedback等)", DATA_DIR + "/【子目录】"),  # 特殊标记
           ("二维码临时文件", qr_dir),
-          ("根目录临时HTML", os.path.join(BASE_DIR, "web_explain_*.html")),  # glob模式
-          ("ID列表文件", os.path.join(BASE_DIR, "html_ids.txt")),
+          ("根目录临时HTML", os.path.join(str(_SHARED_USER_DATA_DIR) if os.getenv("BILI_ACCOUNT_ID") else BASE_DIR, "web_explain_*.html")),
+          ("ID列表文件", os.path.join(str(_SHARED_USER_DATA_DIR) if os.getenv("BILI_ACCOUNT_ID") else BASE_DIR, "html_ids.txt")),
           ("KB内嵌HTML缓存", os.path.join(KNOWLEDGE_BASE_DIR or "", ".html_exports"))]),
     ]
 
@@ -6658,7 +6640,7 @@ def factory_reset_all():
     # ID列表文件 (html_ids.txt / js_ids.txt)
     if any(n == "ID列表文件" for gi, ex in to_delete.items() for n, _ in ex):
         for id_file in ("html_ids.txt", "js_ids.txt"):
-            id_path = os.path.join(BASE_DIR, id_file)
+            id_path = os.path.join(str(_SHARED_USER_DATA_DIR) if os.getenv("BILI_ACCOUNT_ID") else BASE_DIR, id_file)
             _safe_delete_file(id_path, id_file)
 
     # KB内嵌HTML缓存
@@ -6673,7 +6655,7 @@ def factory_reset_all():
             _de = config.get("document_export", {}) if isinstance(config, dict) else {}
             _custom = _de.get("output_dir") or _de.get("folder_name")
             if _custom:
-                _custom_path = os.path.join(BASE_DIR, _custom)
+                _custom_path = str(_SHARED_WORD_DIR) if os.getenv("BILI_ACCOUNT_ID") else os.path.join(BASE_DIR, _custom)
                 _safe_delete_dir(_custom_path, f"自定义文档目录 ({_custom}/)")
         except Exception:
             pass
@@ -7461,11 +7443,11 @@ def _reload_all_globals(new_config: dict):
     DIARY_MIN_EVENTS_FOR_AUTO = diary_cfg.get("min_events_for_auto", 3)
 
     evo = new_config.get("self_evolution", {})
-    EVOLUTION_ENABLED = evo.get("enabled", True)
-    EVOLUTION_AUTO_ENABLED = evo.get("auto_enabled", True)
-    EVOLUTION_REFLECT_INTERVAL_EVENTS = evo.get("reflect_interval_events", 8)
+    EVOLUTION_ENABLED = evo.get("enabled", False)
+    EVOLUTION_AUTO_ENABLED = evo.get("auto_enabled", False)
+    EVOLUTION_REFLECT_INTERVAL_EVENTS = evo.get("reflect_interval_events", 100)
     EVOLUTION_MIN_EVENTS_FOR_REFLECT = evo.get("min_events_for_reflect", 3)
-    EVOLUTION_AUTO_APPLY = evo.get("auto_apply", True)
+    EVOLUTION_AUTO_APPLY = False
 
     ag = new_config.get("agent", {})
     AGENT_ENABLED = ag.get("enabled", True)
@@ -7494,7 +7476,7 @@ def _reload_all_globals(new_config: dict):
     SESSION_COMPLETION_ACTION = sess.get("completion_action", "stop")
 
     rev = new_config.get("revisit", {})
-    REVISIT_ENABLED = rev.get("enabled", True)
+    REVISIT_ENABLED = rev.get("enabled", False)
     PROB_REVISIT = rev.get("prob_revisit", 0.25)
     REVISIT_COOLDOWN_MINUTES = rev.get("revisit_cooldown_minutes", 15)
     REVISIT_MIN_SCORE = rev.get("min_score", 7.5)

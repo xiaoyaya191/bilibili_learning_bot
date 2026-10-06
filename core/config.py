@@ -6,9 +6,11 @@
 import os
 import sys
 import json
+from copy import deepcopy
 import hashlib, base64, secrets
 from colorama import Fore, Style
-from utils.storage import get_backup_dir
+from utils.storage import get_backup_dir, JsonStore
+from utils.database import DocumentDatabase, register_directory
 from utils.display import mask_secret
 from core.user_data import (
     DATA_DIR as _USER_DATA_DIR,
@@ -43,12 +45,16 @@ KNOWLEDGE_BASE_DIR = str(_USER_KNOWLEDGE_BASE_DIR)
 HIGHLIGHTS_DIR = str(_USER_HIGHLIGHTS_DIR)
 
 os.makedirs(DATA_DIR, exist_ok=True)
+register_directory(DATA_DIR)
+register_directory(USER_DATA_DIR, DATA_DIR)
 
 # ===== 知识库目录解析 =====
 # 支持通过 config.json 的 knowledge_base_dir / knowledge.base_dir 自定义知识库目录，
 # 未配置时回退到默认的 BASE_DIR/KnowledgeBase。
 def resolve_knowledge_base_dir(cfg=None):
     """从配置解析知识库目录；未配置回退默认 KnowledgeBase。"""
+    if os.getenv("BILI_ACCOUNT_ID"):
+        return str(_USER_KNOWLEDGE_BASE_DIR)
     if cfg is None:
         cfg = config
     if cfg and isinstance(cfg, dict):
@@ -252,13 +258,34 @@ DEFAULT_CONFIG = {
         "download_interest_threshold": 7.0, "download_dir": "",
         "delete_video_after_understand": True,         "filter_mode": "cover_and_title",
         "frame_note_mode": "visual_note",
-        "visual_note_frame_interval": 6,
+        "visual_note_frame_interval": 5,
         "visual_note_max_frames": 240,
-        "visual_note_grid_cols": 3,
+        "visual_note_grid_cols": 4,
         "visual_note_grid_rows": 3,
+        "visual_note_scene_detection": True,
+        "visual_note_scene_threshold": 0.3,
         "candidate_pool_size": 20,
         "quality": "best",  # 下载画质: best=自动最高/1080p/720p/480p/360p
         "custom_video_prompt": "请完整覆盖视频全过程，像教程/部署文档一样逐步讲解，保留关键细节、命令、参数、配置和截图，不要省略步骤。"
+    },
+    "direct_video": {
+        "enabled": False, "capability_confirmed": False, "model": "",
+        "use_vision_endpoint": True, "max_size_mb": 32, "max_duration_seconds": 300,
+        "timeout_seconds": 180, "max_tokens": 2000, "fallback_to_frames": True
+    },
+    "api_pool": {
+        "enabled": False, "include_primary": True, "strategy": "round_robin",
+        "rounds": 2, "attempt_limit": 20, "total_timeout_seconds": 300,
+        "retry_delay_seconds": 1, "backoff_multiplier": 2, "max_delay_seconds": 15,
+        "failure_threshold": 2, "cooldown_seconds": 60, "respect_retry_after": True,
+        "retry_network_errors": True, "retry_statuses": [408, 429, 500, 502, 503, 504],
+        "failover_statuses": [401, 402, 403, 404, 408, 429, 500, 502, 503, 504], "endpoints": []
+    },
+    "watch_queue": {
+        "enabled": True, "max_selected": 0, "remove_completed": True,
+        "keep_history": True, "history_limit": 500, "skip_watched": True,
+        "review_interest_again": False, "max_retries": 2, "retry_delay_seconds": 60,
+        "sync_platform": False, "remove_platform_completed": False
     },
     "vision": {
         # Disabled by default because many OpenAI-compatible text endpoints do
@@ -270,6 +297,8 @@ DEFAULT_CONFIG = {
         "max_comment_images": 5, "frame_count": 8,
         "smart_frame_enabled": False, "smart_frame_min": 10, "smart_frame_max": 60
     },
+    "subtitles": {"enabled": True},
+    "ai_permissions": {"enabled": False, "actions": {}},
     "asr": {
         "enabled": False, "backend": "funasr", "whisper_model": "base",
         "language": "zh", "speaker_separation": True, "max_audio_duration": 3600,
@@ -309,7 +338,7 @@ DEFAULT_CONFIG = {
         "action_types": {
             "video_like": True, "follow_up": True, "send_danmaku": True,
             "public_comment": True, "private_reply": True, "coin": True,
-            "favorite": True, "knowledge_write": False, "file_export": False
+            "favorite": True, "knowledge_write": True, "file_export": True
         }
     },
     "up_learning": {
@@ -340,12 +369,20 @@ DEFAULT_CONFIG = {
         "custom_terms": PROMPT_INJECTION_DEFAULT_TERMS.copy(),
     },
     "diary": {
-        "enabled": False, "auto_enabled": False, "auto_interval_minutes": 60,
-        "min_events_for_auto": 3
+        "schedule_version": 1, "enabled": True, "auto_enabled": True,
+        "trigger_mode": "interval", "auto_interval_minutes": 1440, "daily_time": "22:00",
+        "time_windows": [], "weekdays": [0, 1, 2, 3, 4, 5, 6],
+        "min_events_for_auto": 1, "event_threshold": 20, "lookback_hours": 24,
+        "sources": ["learning", "videos", "web_chat", "private_messages", "comments"],
+        "max_events": 100, "max_chars_per_source": 6000, "max_total_chars": 24000,
+        "include_skipped": False, "include_blocked": False, "anonymize_contacts": True,
+        "empty_behavior": "skip", "fallback_to_local": False, "retry_minutes": 30,
+        "model": "", "temperature": 0.4, "max_tokens": 1500, "ai_timeout_seconds": 180,
+        "custom_prompt": "", "title_prefix": "今日手记",
     },
     "self_evolution": {
-        "enabled": False, "auto_enabled": False, "reflect_interval_events": 8,
-        "min_events_for_reflect": 3, "auto_apply": True
+        "enabled": False, "auto_enabled": False, "reflect_interval_events": 100,
+        "min_events_for_reflect": 3, "auto_apply": False
     },
     "agent": {
         "enabled": True, "auto_enabled": True, "max_steps_per_plan": 5,
@@ -379,8 +416,12 @@ DEFAULT_CONFIG = {
         "completion_action": "stop",
     },
     "revisit": {
-        "enabled": True, "prob_revisit": 0.25, "revisit_cooldown_minutes": 15,
-        "min_score": 7.5, "max_per_video": 2, "per_video_cooldown_minutes": 240
+        "enabled": False, "rules_confirmed": False, "prob_revisit": 0.25, "revisit_cooldown_minutes": 60,
+        "min_score": 7.5, "max_per_video": 2, "per_video_cooldown_minutes": 240,
+        "sources": ["history", "local_favorites"], "time_windows": [],
+        "weekdays": [0, 1, 2, 3, 4, 5, 6], "categories": [], "keywords": [],
+        "exclude_keywords": [], "up_names": [], "favorite_folders": [],
+        "min_age_hours": 24, "daily_limit": 3, "order": "oldest"
     },
     "active_chat": {
         "enabled": False, "prob_initiate": 0.06, "cooldown_minutes": 45,
@@ -407,6 +448,7 @@ DEFAULT_CONFIG = {
         "custom_prompt": "",
     },
     "quota_alert": {
+        "review_required": True,
         "enabled": False,
         "email_enabled": False,
         "smtp_host": "",
@@ -422,6 +464,7 @@ DEFAULT_CONFIG = {
         "cooldown_minutes": 60,
     },
     "local_favorites": {
+        "destination": "local",
         "auto_collect_enabled": True,
         "min_score": 8.0,
         "folder_name": "AI 精选",
@@ -546,6 +589,8 @@ DEFAULT_CONFIG = {
 }
 
 
+from services.evolution_settings import DEFAULTS as EVOLUTION_DEFAULTS
+DEFAULT_CONFIG["self_evolution"] = EVOLUTION_DEFAULTS.copy()
 DEFAULT_CONFIG["reply_safety"]["blocked_keywords"] = POLITICAL_SAFETY_DEFAULT_KEYWORDS.copy()
 
 
@@ -553,6 +598,32 @@ def normalize_config(cfg):
     """归一化旧字段，避免不同入口读写的 API 配置字段漂移。"""
     if not isinstance(cfg, dict):
         cfg = {}
+    if not isinstance(cfg.get('user_experience'), dict):
+        cfg['user_experience'] = {}
+    cfg['user_experience']['mode'] = 'learn_companion'
+    legacy_asr = cfg.get('interaction', {}).pop('enable_asr', None)
+    cfg.setdefault('asr', {})
+    if 'enabled' not in cfg['asr'] and type(legacy_asr) is bool:
+        cfg['asr']['enabled'] = legacy_asr
+    cfg.setdefault('subtitles', {'enabled': True})
+    from services.action_permissions import defaults as permission_defaults
+    cfg.setdefault('ai_permissions', permission_defaults())
+    for section in ('reply_safety', 'prompt_injection', 'approval_review'):
+        current = cfg.get(section)
+        if not isinstance(current, dict):
+            cfg[section] = deepcopy(DEFAULT_CONFIG[section])
+        else:
+            for key, value in DEFAULT_CONFIG[section].items():
+                if key not in current:
+                    current[key] = deepcopy(value)
+                elif isinstance(value, bool) and type(current[key]) is not bool:
+                    current[key] = value
+                elif isinstance(value, dict):
+                    if not isinstance(current[key], dict):
+                        current[key] = deepcopy(value)
+                    else:
+                        for field, default in value.items():
+                            current[key].setdefault(field, default)
     api_cfg = cfg.setdefault("api", {})
     if isinstance(api_cfg, dict):
         legacy_pairs = {
@@ -564,18 +635,27 @@ def normalize_config(cfg):
         for old_key, new_key in legacy_pairs.items():
             if not api_cfg.get(new_key) and api_cfg.get(old_key):
                 api_cfg[new_key] = api_cfg.get(old_key)
-    # Diary and persona evolution are still internal preview features.  Keep
-    # them disabled even when an older web page submits a full, stale config.
-    # This prevents background jobs from running or emitting preview-only logs.
-    diary = cfg.setdefault("diary", {})
-    if isinstance(diary, dict):
-        diary["enabled"] = False
-        diary["auto_enabled"] = False
     evolution = cfg.setdefault("self_evolution", {})
     if isinstance(evolution, dict):
-        evolution["enabled"] = False
-        evolution["auto_enabled"] = False
         evolution["auto_apply"] = False
+    cfg.setdefault("rag_qa", {})
+    cfg["rag_qa"].setdefault("embedding_model", "")
+    cfg["rag_qa"].setdefault("reranker_model", "")
+    cfg["rag_qa"].setdefault("allow_lexical_fallback", True)
+    cfg["rag_qa"].setdefault("chunk_size", 900)
+    cfg["rag_qa"].setdefault("chunk_overlap", 120)
+    cfg["rag_qa"].setdefault("candidate_count", 30)
+    cfg["rag_qa"].setdefault("context_chars", 6000)
+    cfg.setdefault("subtitle_alignment", {"enabled": True, "embedding_model": "", "threshold": 0.25, "fetch_attempts": 3, "whisper_fallback": True})
+    cfg.setdefault("image_export", {"width": 1200, "height": 1600, "font_size": 32, "background": "", "overlay": 0.9})
+    cfg.setdefault("model_provider", {"plugin": "openai-compatible"})
+    try:
+        from core.config_schema import validate_config
+        checked = validate_config(cfg, DEFAULT_CONFIG)
+        for section in ("rag_qa", "subtitle_alignment", "image_export", "model_provider", "ai_permissions", "local_favorites", "subtitles"):
+            cfg[section] = checked[section]
+    except (ImportError, ValueError, TypeError) as error:
+        raise ValueError(f"配置校验失败: {error}") from error
     return cfg
 
 
@@ -584,8 +664,16 @@ def load_config():
     """加载配置文件，合并默认值，解密敏感词"""
     if os.path.exists(CONFIG_FILE):
         try:
-            with open(CONFIG_FILE, 'r', encoding='utf-8-sig') as f:
-                cfg = json.load(f)
+            try:
+                with open(CONFIG_FILE, 'r', encoding='utf-8-sig') as source:
+                    raw_config = json.load(source)
+                if not isinstance(raw_config, dict):
+                    raise ValueError('配置根节点必须为对象')
+            except (json.JSONDecodeError, UnicodeDecodeError, OSError) as error:
+                raise ValueError('配置文件无法读取，未覆盖原文件') from error
+            cfg = JsonStore(CONFIG_FILE).read()
+            from core.config_schema import validate_config
+            validate_config(cfg, DEFAULT_CONFIG)
             cfg = normalize_config(cfg)
             # 清洗脱敏占位符：'[已隐藏]' 视为未配置（避免被当真实 key 使用）
             _api = cfg.setdefault("api", {})
@@ -597,11 +685,11 @@ def load_config():
                 _fb["api_key"] = ""
             for key in DEFAULT_CONFIG:
                 if key not in cfg:
-                    cfg[key] = DEFAULT_CONFIG[key]
+                    cfg[key] = deepcopy(DEFAULT_CONFIG[key])
                 elif isinstance(cfg[key], dict):
                     for sub_key in DEFAULT_CONFIG[key]:
                         if sub_key not in cfg[key]:
-                            cfg[key][sub_key] = DEFAULT_CONFIG[key][sub_key]
+                            cfg[key][sub_key] = deepcopy(DEFAULT_CONFIG[key][sub_key])
             # 解密 blocked_keywords
             kw_list = cfg.get("reply_safety", {}).get("blocked_keywords", [])
             if kw_list and any(len(k) > 10 for k in kw_list):
@@ -611,36 +699,23 @@ def load_config():
             return cfg
         except (OSError, json.JSONDecodeError):
             pass
-    save_config(DEFAULT_CONFIG)
-    return DEFAULT_CONFIG.copy()
+    defaults = deepcopy(DEFAULT_CONFIG)
+    save_config(defaults)
+    return defaults
 
 
 def save_config(cfg):
     """保存配置文件，加密敏感词（原子写入防崩溃损坏）"""
     try:
-        cfg = normalize_config(cfg)
+        from core.config_schema import validate_config
+        validate_config(cfg, DEFAULT_CONFIG)
+        cfg = normalize_config(deepcopy(cfg))
         # 加密 blocked_keywords 再存盘
         kw_list = cfg.get("reply_safety", {}).get("blocked_keywords", [])
         if kw_list and not all(k.startswith(("enc:", "===")) or len(k) < 3 for k in kw_list):
             cfg["reply_safety"]["blocked_keywords"] = [_cipher_encrypt(k) for k in kw_list]
-        tmp = CONFIG_FILE + '.tmp'
-        with open(tmp, 'w', encoding='utf-8') as f:
-            json.dump(cfg, f, ensure_ascii=False, indent=4)
-        # Windows 下若 config.json 短暂被其他进程（面板/机器人/杀毒）占用，
-        # os.replace 会抛 PermissionError 导致"保存失败: Unable to save ..."。
-        # 这里做短重试，把瞬态占用变成无感成功。
-        import time as _time
-        last_err = None
-        for attempt in range(4):
-            try:
-                os.replace(tmp, CONFIG_FILE)
-                last_err = None
-                break
-            except PermissionError as exc:
-                last_err = exc
-                _time.sleep(0.12 * (attempt + 1))
-        if last_err is not None:
-            raise last_err
+        if not JsonStore(CONFIG_FILE).write(cfg):
+            raise OSError('配置数据库保存失败')
         # 存完后解密回内存，保持内存中明文
         if kw_list:
             cfg["reply_safety"]["blocked_keywords"] = kw_list
@@ -668,26 +743,17 @@ def get_config_or_env(section, key, env_name):
 
 # ===== JSON 辅助 =====
 def load_json_file(path, default):
-    if os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8-sig") as f:
-                return json.load(f)
-        except Exception as e:
-            print(f"[WARN] 加载 JSON 文件失败: {path} - {e}", flush=True)
-    return default.copy() if isinstance(default, dict) else default
+    return JsonStore(path).read(default.copy() if isinstance(default, dict) else default)
 
 
 def save_json_file(path, data):
-    """原子写入 JSON 文件（tmp+replace 防止断电损坏）"""
-    try:
-        tmp = path + '.tmp'
-        with open(tmp, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, path)
-        return True
-    except Exception as e:
-        print(f"[WARN] 保存 JSON 文件失败: {path} - {e}", flush=True)
-        return False
+    return JsonStore(path).write(data)
+
+
+try:
+    DocumentDatabase(DATA_DIR).migrate(include_root=True)
+except (OSError, ValueError, UnicodeDecodeError) as migration_error:
+    print(f'[SQLite] 迁移未完成，原始JSON保留：{type(migration_error).__name__}', flush=True)
 
 
 # 加载当前配置（模块导入时自动加载）
@@ -729,8 +795,8 @@ _CONFIG_PATHS = {
     "PROB_COMMENT_OTHERS":   (("interaction", "prob_comment_others"), 0.3),
     "PRIVATE_MESSAGE_ENABLED": (("private_message", "enabled"), True),
     "PRIVATE_MESSAGE_CHECK_INTERVAL": (("private_message", "check_interval"), 120),
-    "DIARY_ENABLED":         (("diary", "enabled"), False),
-    "DIARY_AUTO_ENABLED":    (("diary", "auto_enabled"), False),
+    "DIARY_ENABLED":         (("diary", "enabled"), True),
+    "DIARY_AUTO_ENABLED":    (("diary", "auto_enabled"), True),
     "EVOLUTION_ENABLED":     (("self_evolution", "enabled"), False),
     "AGENT_ENABLED":         (("agent", "enabled"), True),
     "AGENT_DIVE_MAX_VIDEOS": (("agent", "dive_max_videos"), 10),

@@ -7,20 +7,19 @@ class BrainHistoryMixin:
     def _load_history_videos(self):
         if os.path.exists(HISTORY_VIDEOS_FILE):
             try:
-                with open(HISTORY_VIDEOS_FILE, 'r', encoding='utf-8-sig') as f:
-                    data = json.load(f)
-                    data.setdefault("videos", [])
-                    return data
+                from utils.storage import JsonStore
+                data = JsonStore(HISTORY_VIDEOS_FILE).read()
+                data.setdefault("videos", [])
+                return data
             except (OSError, json.JSONDecodeError) as e:
                 log(f'加载JSON文件失败: {e}', 'DEBUG')
         return {"videos": []}
 
     def _save_history_videos(self):
         try:
-            tmp = HISTORY_VIDEOS_FILE + '.tmp'
-            with open(tmp, 'w', encoding='utf-8') as f:
-                json.dump(self.history_videos, f, ensure_ascii=False, indent=2)
-            os.replace(tmp, HISTORY_VIDEOS_FILE)
+            from utils.storage import JsonStore
+            if not JsonStore(HISTORY_VIDEOS_FILE).write(self.history_videos):
+                raise OSError("账号数据库保存失败")
         except OSError as e:
             log(f'文件操作失败: {e}', 'DEBUG')
 
@@ -48,7 +47,7 @@ class BrainHistoryMixin:
         self._save_history_videos()
 
     def record_watched_video(self, bvid, title, up, aid, *, pic="", duration=0,
-                             source="推荐流", result="已浏览", interest_reason="", score=None):
+source="推荐流", result="已浏览", interest_reason="", score=None, category=""):
         """Persist a real analysis target for the web viewing-history workspace.
 
         This is deliberately separate from interaction history: one video can be
@@ -68,6 +67,7 @@ class BrainHistoryMixin:
             "pic": str(pic or ""),
             "duration": duration or 0,
             "source": str(source or "推荐流"),
+            "category": str(category or ""),
             "result": str(result or "已浏览"),
             "interest_reason": str(interest_reason or ""),
             "score": score,
@@ -78,61 +78,17 @@ class BrainHistoryMixin:
         if entry is None:
             videos.append(payload)
         else:
-            entry.update({key: value for key, value in payload.items() if value not in (None, "")})
+            entry.update({key: value for key, value in payload.items() if value not in (None, "") and key not in ("revisit_count", "last_revisit")})
         self.history_videos["videos"] = videos[-200:]
         self._save_history_videos()
 
     def get_revisit_candidate(self):
-        videos = self.history_videos.get("videos", [])
-        if not videos:
+        from services.video_review import VideoReview, in_schedule, settings
+        preferences = settings()
+        if not preferences["enabled"] or not preferences["rules_confirmed"] or not in_schedule(preferences, datetime.now()):
             return None
-        
-        max_per_video = REVISIT_MAX_PER_VIDEO
-        per_video_cooldown = REVISIT_PER_VIDEO_COOLDOWN_MINUTES
-        min_score = REVISIT_MIN_SCORE
-        
-        eligible = [v for v in videos if v.get("score", 0) >= min_score]
-        if not eligible:
-            return None
-        
-        eligible = [v for v in eligible if v.get("revisit_count", 0) < max_per_video]
-        if not eligible:
-            return None
-        
-        now = datetime.now()
-        cooldown_ok = []
-        for v in eligible:
-            last = v.get("last_revisit")
-            if last is None:
-                cooldown_ok.append(v)
-            else:
-                try:
-                    last_dt = datetime.fromisoformat(last)
-                    if (now - last_dt).total_seconds() / 60 >= per_video_cooldown:
-                        cooldown_ok.append(v)
-                except (ValueError, TypeError):
-                    cooldown_ok.append(v)
-        
-        if not cooldown_ok:
-            return None
-        
-        never = [v for v in cooldown_ok if v.get("last_revisit") is None]
-        reviewed = [v for v in cooldown_ok if v.get("last_revisit") is not None]
-        
-        if never and random.random() < 0.7:
-            return max(never, key=lambda v: v.get("score", 0))
-        
-        weights = [v.get("score", 0) * (1.0 / (1.0 + v.get("revisit_count", 0))) for v in cooldown_ok]
-        total_w = sum(weights)
-        if total_w <= 0:
-            return None
-        r = random.random() * total_w
-        cum = 0
-        for i, w in enumerate(weights):
-            cum += w
-            if r <= cum:
-                return cooldown_ok[i]
-        return cooldown_ok[-1]
+        candidates = VideoReview().candidates(preferences)
+        return candidates[0] if candidates else None
 
     def mark_revisited(self, bvid):
         for v in self.history_videos.get("videos", []):

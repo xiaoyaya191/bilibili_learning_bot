@@ -175,10 +175,20 @@ def kb_stats(kb_dir: Path) -> dict[str, Any]:
 
 def persona_info(cfg: dict | None) -> dict[str, str]:
     p = (cfg or {}).get("persona", {}) or {}
+    owner = (cfg or {}).get("owner_share", {}) or {}
+    try:
+        from persona.managers import PersonaManager
+        manager = PersonaManager(cfg or {})
+        context_name = manager.get_context_persona("web_chat")
+        prompt_block = manager.build_prompt_block("web_chat")
+    except Exception:
+        context_name, prompt_block = p.get("active_persona", "") or "", ""
     return {
-        "active_persona": p.get("active_persona", "") or "",
+        "active_persona": context_name,
         "prompt_name": p.get("prompt_name", "") or "",
         "self_description": p.get("self_description", "") or "",
+        "prompt_block": prompt_block,
+        "owner_nickname": str(owner.get("master_nickname") or "主人"),
     }
 
 
@@ -255,6 +265,10 @@ def _build_system(intent: str, ctx: dict[str, Any], cfg: dict | None, message: s
     lines.append("你是 bilibili_learning_bot 的主页智能助手。你可以基于用户的「学习日志」和「知识库笔记」回答问题。")
     lines.append("请用简体中文回答，语气自然友好、结构清晰（善用标题与列表）。只基于已有事实回答，不确定处明确说明。")
 
+    if p.get("prompt_block"):
+        lines.append("\n【本分区人格】\n" + p["prompt_block"])
+    lines.append(f"\n【主人身份】当前网页对话用户就是你的主人，称呼偏好为：{p.get('owner_nickname') or '主人'}。该身份在网页对话与 B 站交互中通用。")
+
     if p.get("self_description"):
         lines.append(f"\n【用户自定义画像】用户对自己的描述：{p['self_description']}")
 
@@ -307,7 +321,9 @@ def _final_system(intent: str, ctx: dict[str, Any], cfg: dict | None, message: s
 
 
 def _history_for_context(conv: dict, context_mode: str) -> list[dict]:
-    msgs = conv.get("messages", [])
+    # The current user message is appended before context construction and is
+    # added separately by _call_llm, so do not send it twice.
+    msgs = conv.get("messages", [])[:-1]
     if context_mode == "none":
         return []
     if context_mode == "infinite":

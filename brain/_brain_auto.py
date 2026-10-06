@@ -5,73 +5,54 @@ class BrainAutoMixin:
     """自动日记、自我进化、Agent目标执行、深度搜索主题选择"""
 
     async def maybe_auto_diary(self, force=False):
-        if not DIARY_ENABLED or not DIARY_AUTO_ENABLED:
+        from services.diary_scheduler import DiaryScheduler, settings
+        now = datetime.now()
+        if not force and (now - getattr(self, "_last_diary_check", datetime.min)).total_seconds() < 60:
             return False
-        if len(self.session_events) < DIARY_MIN_EVENTS_FOR_AUTO and not force:
-            return False
-        elapsed = (datetime.now() - self.last_auto_diary_at).total_seconds() / 60
-        if elapsed < DIARY_AUTO_INTERVAL_MINUTES and not force:
-            return False
+        self._last_diary_check = now
         try:
-            entry = await self.diary_mgr.generate_from_events(
-                self.session_events,
-                self.persona_mgr.build_prompt_block(),
-                self.mood_mgr.get_current()
-            )
+            scheduler = getattr(self, "_diary_scheduler", None)
+            if scheduler is None:
+                scheduler = self._diary_scheduler = DiaryScheduler()
+            result = await scheduler.generate(settings(), manual=force,
+                persona_prompt=self.persona_mgr.build_prompt_block(), mood=self.mood_mgr.get_current())
+            if not result.get("ok"):
+                if result.get("status") == "failed":
+                    log(result["message"], "WARN")
+                return False
+            self.diary_mgr.recheck()
             self.last_auto_diary_at = datetime.now()
-            log(f"自动日记已生成: {entry.get('title')}", "NOTE")
-
-            # ── Phase 3: 日记生长点 → OB 好奇心关键词注入 ──
-            if hasattr(self, '_inject_curiosity_from_diary'):
-                await self._inject_curiosity_from_diary(entry)
-
+            log(f"自动日记已生成: {result['entry'].get('title')}", "NOTE")
             return True
-        except Exception as e:
-            log(f"自动日记生成失败: {e}", "WARN")
+        except Exception as error:
+            log(f"自动日记检查失败: {type(error).__name__}", "WARN")
             return False
 
     async def maybe_self_evolve(self, force=False):
-        if not EVOLUTION_ENABLED or not EVOLUTION_AUTO_ENABLED:
+        from services.evolution_engine import EvolutionEngine
+        from services.evolution_settings import settings
+        now = datetime.now()
+        if not force and (now - getattr(self, "_last_evolution_check", datetime.min)).total_seconds() < 60:
             return False
-        new_events = self.processed_event_count - self.events_at_last_evolution
-        if new_events < EVOLUTION_REFLECT_INTERVAL_EVENTS and not force:
-            return False
-        if len(self.session_events) < EVOLUTION_MIN_EVENTS_FOR_REFLECT and not force:
-            return False
+        self._last_evolution_check = now
         try:
-            item = await self.evolution_mgr.reflect(
-                self.session_events,
-                self.persona_mgr.build_prompt_block(),
-                self.mood_mgr.get_current(),
-                diary_entries=self.diary_mgr.list_entries(limit=5)
-            )
-            parsed = item.get("parsed", {})
-            if EVOLUTION_AUTO_APPLY:
-                self.persona_mgr.evolve_active_persona(
-                    style_delta=str(parsed.get("style_delta") or "").strip(),
-                    relationship_delta=str(parsed.get("relationship_delta") or "").strip(),
-                    new_rule=str(parsed.get("new_rule") or "").strip()
-                )
-                try:
-                    mood_delta = int(float(parsed.get("mood_delta", 0)))
-                except Exception:
-                    mood_delta = 0
-                if mood_delta:
-                    self.mood_mgr.shift("自动自我进化", max(-2, min(2, mood_delta)))
-                self.evolution_mgr.mark_applied(item.get("id"))
-            self.events_at_last_evolution = self.processed_event_count
-            log(f"自我进化复盘完成: {str(parsed.get('reflection', ''))[:80]}", "EVOLVE")
-
-            # ── Phase 4: 进化策略 → OB 配置桥接（含AB上下文）──
-            if hasattr(self, '_apply_strategy_to_ob_v2'):
-                ab_context = ""
-                if hasattr(self, '_ob_ab_tracker') and self._ob_ab_tracker:
-                    ab_context = self._ob_ab_tracker.evolution_context()
-                await self._apply_strategy_to_ob_v2(item, ab_context)
-
-            return True
-        except Exception as e:
-            log(f"自我进化失败: {e}", "WARN")
+            preferences = settings()
+            if not preferences["enabled"] or not preferences["auto_enabled"]:
+                return False
+            engine = getattr(self, "_evolution_engine", None)
+            if engine is None:
+                engine = self._evolution_engine = EvolutionEngine()
+            layer = engine.due_layer(preferences)
+            if layer is None:
+                return False
+            result = await engine.generate(layer, preferences)
+            if result.get("ok"):
+                log("进化提案已生成，请在AI进化分区查看审核", "EVOLVE")
+            elif result.get("status") == "failed":
+                log(result["message"], "WARN")
+            return bool(result.get("ok"))
+        except Exception as error:
+            log("进化检查失败：" + type(error).__name__, "WARN")
             return False
 
     async def maybe_run_agent_goal(self, goal, score=0, force=False):

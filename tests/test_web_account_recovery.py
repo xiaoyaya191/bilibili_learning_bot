@@ -51,3 +51,23 @@ def test_setup_creates_rotating_local_recovery_file(monkeypatch, tmp_path):
         json={"username": "researcher", "password": first_code},
     )
     assert reused.get_json()["ok"] is False
+
+
+def test_forgot_password_page_shows_email_username_and_recovery_path(monkeypatch, tmp_path):
+    import web_panel
+
+    data_dir = tmp_path / "Data"
+    data_dir.mkdir()
+    config_file = data_dir / "config.json"
+    config_file.write_text(json.dumps({"web": {"username": "yaya"}}), encoding="utf-8")
+    monkeypatch.setattr(web_panel, "DATA_DIR", data_dir)
+    monkeypatch.setattr(web_panel, "CONFIG_FILE", str(config_file))
+
+    html = web_panel._forgot_password_html()
+    assert "邮箱验证" in html
+    assert "发送验证码" in html
+    assert "当前本地用户名" in html
+    assert 'var _RECOVERY_FILE=' in html
+    assert json.dumps(str(web_panel._recovery_file_path()), ensure_ascii=False) in html
+    assert 'var _RECOVERY_FILE=__RECOVERY_FILE_PATH__' not in html
+    assert '_CURRENT_USERNAME="yaya"' in html

@@ -1,33 +1,43 @@
 """Global safety policy for actions that write to a Bilibili account."""
 
-# Public comment replies are enabled by the account owner. They still pass
-# through the existing review, sensitive-word, and platform-result checks.
-ALLOW_PUBLIC_COMMENTS = True
-ALLOW_AT_MENTION_REPLIES = True
-ALLOW_VIDEO_LIKES = True
-
-
 def public_commenting_enabled() -> bool:
-    return ALLOW_PUBLIC_COMMENTS
+    return platform_action_enabled('public_comment')
 
 
 def at_mention_replies_enabled() -> bool:
     """Whether a reply to an explicit @ mention may be sent."""
-    return ALLOW_AT_MENTION_REPLIES
+    return platform_action_enabled('public_comment')
 
 
 def video_liking_enabled() -> bool:
-    return ALLOW_VIDEO_LIKES
+    return platform_action_enabled('video_like')
 
 
 # ===== 功能开关 =====
 def _interaction_switch(key, default=True):
     """Check if an interaction feature is enabled."""
     try:
-        from core.config import config
+        from core.config import load_config
+        config = load_config()
+        mapping = {
+            "enable_comment": "public_comment", "enable_reply_comment": "public_comment",
+            "enable_reply_dm": "private_reply", "enable_like": "video_like",
+            "enable_coin": "coin", "enable_favorite": "favorite", "enable_follow": "follow_up",
+            "enable_watch_later": "watch_later", "enable_dynamic_publish": "dynamic_publish",
+            "enable_active_dm": "private_reply", "enable_owner_share": "private_reply",
+            "enable_dynamic_draft": "dynamic_draft",
+        }
+        action = mapping.get(key)
+        if action:
+            from services.action_permissions import allowed
+            return allowed(action, config)
+        if key == 'enable_asr':
+            return config.get('asr', {}).get('enabled', False) is True
+        if key == "enable_monitor":
+            return bool(config.get("interaction", {}).get(key, default))
         return bool(config.get("interaction", {}).get(key, default))
     except Exception:
-        return default
+        return False
 
 def commenting_enabled():
     return _interaction_switch("enable_comment")
@@ -64,3 +74,8 @@ def dynamic_draft_enabled():
 
 def dynamic_publish_enabled():
     return _interaction_switch("enable_dynamic_publish", False)
+
+
+def platform_action_enabled(action: str) -> bool:
+    from services.action_permissions import allowed
+    return allowed(action)

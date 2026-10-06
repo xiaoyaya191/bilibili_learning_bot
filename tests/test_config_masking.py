@@ -122,3 +122,69 @@ def test_models_list_placeholder_falls_back_to_stored_key(monkeypatch, tmp_path)
     payload = response.get_json()
     assert payload["ok"] is True
     assert captured["auth"] == "Bearer sk-stored"
+
+
+def test_models_list_never_bypasses_api_key_for_an_old_local_proxy(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path, {
+        "api": {"unified_api_key": "", "unified_base_url": "http://127.0.0.1:18508/v1"},
+        "web": {"username": "demo", "password": "hashed-value"},
+    })
+
+    payload = client.get("/api/models/list").get_json()
+
+    assert payload == {"ok": False, "message": "请先配置 API Key 和 Base URL", "models": []}
+
+
+def test_removed_free_channel_endpoint_is_not_registered(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path, {
+        "api": {},
+        "web": {"username": "demo", "password": "hashed-value"},
+    })
+
+    assert client.get("/api/free-channel").status_code == 404
+
+
+def test_models_list_post_accepts_unsaved_credentials_and_array_response(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path, {"api": {}, "web": {"username": "demo", "password": "hash"}})
+    captured = {}
+
+    class Response:
+        def read(self):
+            return json.dumps([{"id": "custom-chat"}, {"id": "custom-chat"}, {"id": "vision"}]).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def open_request(request, **kwargs):
+        captured["authorization"] = request.headers["Authorization"]
+        captured["url"] = request.full_url
+        return Response()
+
+    monkeypatch.setattr("urllib.request.urlopen", open_request)
+    response = client.post("/api/models/list", json={"api_key": "test-only-key", "base_url": "https://models.example/v1"})
+    data = response.get_json()
+    assert data["ok"] is True
+    assert data["count"] == 2
+    assert captured == {"authorization": "Bearer test-only-key", "url": "https://models.example/v1/models"}
+
+
+def test_models_list_invalid_data_is_reported_without_crashing(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path, {"api": {"unified_api_key": "test", "unified_base_url": "https://models.example/v1"}, "web": {"username": "demo", "password": "hash"}})
+
+    class Response:
+        def read(self):
+            return b'{"data": {"not": "a list"}}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *args, **kwargs: Response())
+    result = client.post("/api/models/list", json={}).get_json()
+    assert result["ok"] is False
+    assert "模型列表格式不正确" in result["message"]

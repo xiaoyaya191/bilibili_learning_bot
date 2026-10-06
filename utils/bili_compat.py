@@ -84,6 +84,8 @@ def _patch_aiohttp_br_fallback() -> bool:
 def patch_bili_api_headers() -> bool:
     """应用全部编码兼容补丁（幂等，可重复调用）。"""
     global _patched
+    from services.action_permissions import install_sdk_guard
+    install_sdk_guard()
     if _patched:
         return True
     ok = _patch_bili_api_headers_dict()

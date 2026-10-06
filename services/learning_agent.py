@@ -637,6 +637,13 @@ def _make_tool_handler(session: LearningAgentSession, on_finalize: Callable | No
         elif tool_name == "favorite_video":
             bvid = tool_args.get("bvid", "")
             try:
+                from core.config import load_config
+                from services.local_favorites import collect_ai_intention
+                local_result = collect_ai_intention(load_config(), {'bvid': bvid, 'title': tool_args.get('title', bvid)})
+                if local_result is not None:
+                    return json.dumps(local_result, ensure_ascii=False)
+                from services.action_permissions import require
+                require('favorite')
                 from core.platform_actions import favoriting_enabled
                 if not favoriting_enabled():
                     return json.dumps({"ok": False, "message": "收藏功能已关闭"}, ensure_ascii=False)

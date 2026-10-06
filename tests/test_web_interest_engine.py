@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import web_panel
+from services.interest_engine import InterestEngine
 
 
 def test_interest_engine_web_api_persists_the_cli_v2_shape(tmp_path, monkeypatch):
@@ -68,3 +69,33 @@ def test_interest_workspace_template_has_cli_shared_controls():
         assert marker in template
     assert 'min-block-size:260px' not in template
     assert '.system-grid .pc{margin:0;min-height:0}' in template
+    assert 'id="interestAiProbability"' in template
+    assert 'AI 永远不能覆盖或删除手工兴趣' in template
+
+
+def test_new_interest_profiles_do_not_share_nested_defaults(tmp_path):
+    first = InterestEngine(str(tmp_path / "first" / "interest_engine.json"))
+    second = InterestEngine(str(tmp_path / "second" / "interest_engine.json"))
+
+    assert first.add_interest("Python", source="manual") is True
+    first.settings["ai_suggest"] = True
+
+    assert second.get_keywords() == []
+    assert second.settings["ai_suggest"] is False
+
+
+def test_ai_suggestions_require_a_nonzero_probability_and_preserve_manual_items(tmp_path):
+    engine = InterestEngine(str(tmp_path / "interest_engine.json"))
+    assert engine.add_interest("Python", weight="high", synonyms=["py"], source="manual") is True
+
+    engine.settings["ai_suggest"] = True
+    engine.settings["ai_suggest_probability"] = 0.0
+    assert engine.apply_ai_suggestions(["LLM"]) == 0
+    assert engine.get_keywords() == ["python"]
+    original_python = dict(engine.interests_list[0])
+
+    engine.settings["ai_suggest_probability"] = 0.5
+    assert engine.apply_ai_suggestions(["Python", "LLM"]) == 1
+    python_item = next(item for item in engine.interests_list if item["keyword"] == "python")
+    assert python_item == original_python
+    assert engine.get_keywords() == ["python", "llm"]

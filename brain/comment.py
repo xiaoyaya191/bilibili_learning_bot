@@ -126,16 +126,16 @@ class CommentInteractionManager:
         """加载评论日志"""
         if os.path.exists(COMMENT_LOG_FILE):
             try:
-                with open(COMMENT_LOG_FILE, 'r', encoding='utf-8-sig') as f:
-                    data = json.load(f)
-                    data.setdefault("processed_comments", [])
-                    data.setdefault("replied_comments", [])
-                    data.setdefault("liked_comments", [])
-                    data.setdefault("history", [])
-                    data.setdefault("user_reply_state", {})
-                    data.setdefault("reply_feed_baseline_initialized", False)
-                    data.setdefault("conversations", {})
-                    return data
+                from utils.storage import JsonStore
+                data = JsonStore(COMMENT_LOG_FILE).read()
+                data.setdefault("processed_comments", [])
+                data.setdefault("replied_comments", [])
+                data.setdefault("liked_comments", [])
+                data.setdefault("history", [])
+                data.setdefault("user_reply_state", {})
+                data.setdefault("reply_feed_baseline_initialized", False)
+                data.setdefault("conversations", {})
+                return data
             except (json.JSONDecodeError, OSError) as e:
                 log(f"[WARN] 评论日志加载失败: {e}", "WARN")
         return {
@@ -148,10 +148,9 @@ class CommentInteractionManager:
         """保存评论日志"""
         try:
             self.comment_log["processed_comments"] = list(self.processed_comments)
-            tmp = COMMENT_LOG_FILE + '.tmp'
-            with open(tmp, 'w', encoding='utf-8') as f:
-                json.dump(self.comment_log, f, ensure_ascii=False, indent=2)
-            os.replace(tmp, COMMENT_LOG_FILE)
+            from utils.storage import JsonStore
+            if not JsonStore(COMMENT_LOG_FILE).write(self.comment_log):
+                raise OSError("账号数据库保存失败")
         except OSError as e:
             log(f'文件操作失败: {e}', 'DEBUG')
     
@@ -744,7 +743,8 @@ class CommentInteractionManager:
     
     async def like_comment(self, bili_client, comment_data):
         """点赞评论"""
-        if not public_commenting_enabled():
+        from services.action_permissions import allowed
+        if not allowed('comment_like'):
             log("评论与评论点赞已被全局安全策略禁用", "WARN")
             return False
         try:

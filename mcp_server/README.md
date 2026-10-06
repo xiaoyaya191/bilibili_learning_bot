@@ -22,7 +22,7 @@
 
 - **命令**：`C:\Users\Administrator\AppData\Local\Programs\Python\Python313\python.exe`
 - **参数**：`-m mcp_server`
-- **工作目录**：`g:\code\work\bilibili_learning_bot-3.1.3`
+- **工作目录**：当前 BiliLearn 3.1.6 项目根目录
 
 或在需要 `.bat` 入口时，直接使用根目录的 `run_mcp.bat`。
 

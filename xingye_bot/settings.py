@@ -59,11 +59,17 @@ class BotSettings:
     video_max_duration_seconds: int = 900
     video_frame_count: int = 12
     frame_note_mode: str = "visual_note"
-    visual_note_frame_interval: int = 6
+    visual_note_frame_interval: float = 5
     candidate_pool_size: int = 20
     visual_note_max_frames: int = 240
-    visual_note_grid_cols: int = 3
+    visual_note_grid_cols: int = 4
     visual_note_grid_rows: int = 3
+    visual_note_scene_detection: bool = True
+    visual_note_scene_threshold: float = 0.3
+    multimodal_enabled: bool = False
+    vision_cover_enabled: bool = True
+    vision_frames_enabled: bool = True
+    analyze_frames_with_sufficient_subtitles: bool = False
     custom_video_prompt: str = "请完整覆盖视频全过程，像教程/部署文档一样逐步讲解，保留关键细节、命令、参数、配置和截图，不要省略步骤。"
     video_download_interest_threshold: float = 7.0
     video_download_dir: str = ""
@@ -91,12 +97,8 @@ class BotSettings:
 
 
 def _load_json(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {}
-    try:
-        return json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, json.JSONDecodeError):
-        return {}
+    from utils.storage import JsonStore
+    return JsonStore(path).read({})
 
 
 def read_runtime_config() -> dict[str, Any]:
@@ -109,13 +111,9 @@ def write_runtime_config(data: dict[str, Any]) -> None:
 
 
 def _atomic_write_json(path: Path, data: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    content = json.dumps(data, ensure_ascii=False, indent=2)
-    with NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as tmp:
-        tmp.write(content)
-        tmp.write("\n")
-        temp_name = tmp.name
-    Path(temp_name).replace(path)
+    from utils.storage import JsonStore
+    if not JsonStore(path).write(data):
+        raise OSError('账号配置数据库保存失败')
 
 
 def _deep_update(target: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
@@ -248,11 +246,18 @@ def load_settings() -> BotSettings:
         frame_note_mode=str(video.get("frame_note_mode", "visual_note")).strip().lower()
         if str(video.get("frame_note_mode", "visual_note")).strip().lower() in {"visual_note", "classic"}
         else "visual_note",
-        visual_note_frame_interval=_int(video.get("visual_note_frame_interval"), 6, 1, 60),
+        visual_note_frame_interval=_float(video.get("visual_note_frame_interval"), 5, 0.5, 60),
         candidate_pool_size=_int(video.get("candidate_pool_size"), 20, 5, 100),
         visual_note_max_frames=_int(video.get("visual_note_max_frames"), 240, 9, 360),
-        visual_note_grid_cols=_int(video.get("visual_note_grid_cols"), 3, 1, 4),
-        visual_note_grid_rows=_int(video.get("visual_note_grid_rows"), 3, 1, 4),
+        visual_note_grid_cols=_int(video.get("visual_note_grid_cols"), 4, 1, 6),
+        visual_note_grid_rows=_int(video.get("visual_note_grid_rows"), 3, 1, 6),
+        visual_note_scene_detection=_bool(video.get("visual_note_scene_detection"), True),
+        visual_note_scene_threshold=_float(video.get("visual_note_scene_threshold"), 0.3, 0.05, 0.9),
+        multimodal_enabled=_bool(_dict(raw.get("vision")).get("multimodal_enabled"), False),
+        vision_cover_enabled=_bool(_dict(raw.get("vision")).get("cover_enabled"), True),
+        vision_frames_enabled=_bool(_dict(raw.get("vision")).get("frames_enabled"), True),
+        analyze_frames_with_sufficient_subtitles=_bool(
+            _dict(raw.get("vision")).get("analyze_frames_with_sufficient_subtitles"), False),
         custom_video_prompt=str(video.get("custom_video_prompt", "")).strip(),
         video_download_interest_threshold=_float(video.get("download_interest_threshold"), 7.0, 0.0, 10.0),
         video_download_dir=str(video.get("download_dir", "")).strip(),

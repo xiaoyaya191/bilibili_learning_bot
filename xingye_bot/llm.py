@@ -6,6 +6,8 @@ import uuid
 from typing import Any
 
 import httpx
+from services.token_observability import observed_post
+from services.model_providers import provider_post
 
 from .settings import DATA_DIR, MODEL_PRICES, BotSettings
 from .state import BotState
@@ -66,8 +68,11 @@ class ModelClient:
         }
         body, encoding_headers = self._json_request_body(payload)
         headers = {"Authorization": f"Bearer {self.settings.api_key}", **encoding_headers}
+        from core.config import load_config
+        provider = load_config().get('model_provider', {}).get('plugin', 'openai-compatible')
         async with httpx.AsyncClient(timeout=getattr(self, "_html_timeout", 300) if purpose=="html_gen" else 90) as client:
-            resp = await client.post(url, headers=headers, content=body)
+            resp = await provider_post(client, url, provider=provider, fallback=observed_post,
+                                       source=purpose, model=model, headers=headers, content=body)
         if resp.status_code >= 400:
             raise ModelError(f"模型请求失败：HTTP {resp.status_code} {resp.text[:300]}")
 
@@ -105,7 +110,7 @@ class ModelClient:
         body, encoding_headers = self._json_request_body(payload)
         headers = {"Authorization": f"Bearer {self.settings.api_key}", **encoding_headers}
         async with httpx.AsyncClient(timeout=getattr(self, "_html_timeout", 300)) as client:
-            resp = await client.post(url, headers=headers, content=body)
+            resp = await observed_post(client, url, source="image-generation", model=model, headers=headers, content=body)
         if resp.status_code >= 400:
             raise ModelError(f"图片生成失败：HTTP {resp.status_code} {resp.text[:300]}")
         data = resp.json()
@@ -131,7 +136,7 @@ class ModelClient:
         body, encoding_headers = self._json_request_body(payload)
         headers.update(encoding_headers)
         async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(url, headers=headers, content=body)
+            resp = await observed_post(client, url, source="embedding", model=model, headers=headers, content=body)
         if resp.status_code >= 400:
             raise ModelError(f"Embedding 请求失败：HTTP {resp.status_code} {resp.text[:300]}")
         data = resp.json()

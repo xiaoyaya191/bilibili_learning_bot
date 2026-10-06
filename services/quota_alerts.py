@@ -74,7 +74,7 @@ def status() -> dict:
         "ok": True,
         "enabled": bool(cfg.get("enabled", False)),
         "email_enabled": bool(cfg.get("email_enabled", False)),
-        "review_required": bool(cfg.get("review_required", False)),
+        "review_required": bool(cfg.get("review_required", True)),
         "smtp_host": str(cfg.get("smtp_host", "")).strip(),
         "smtp_port": int(cfg.get("smtp_port", 465) or 465),
         "smtp_security": str(cfg.get("smtp_security", "ssl") or "ssl"),
@@ -107,7 +107,7 @@ def save_settings(payload: dict) -> dict:
 
     current["enabled"] = bool(current.get("enabled", False))
     current["email_enabled"] = bool(current.get("email_enabled", False))
-    current["review_required"] = bool(current.get("review_required", False))
+    current["review_required"] = bool(current.get("review_required", True))
     current["alert_on_balance_error"] = bool(current.get("alert_on_balance_error", True))
     current["smtp_host"] = str(current.get("smtp_host", "")).strip()
     current["smtp_username"] = str(current.get("smtp_username", "")).strip()
@@ -218,7 +218,7 @@ def alert_billing_error(error_text: Any) -> bool:
     detail = redact_sensitive_text(str(error_text or "AI provider reported a quota or balance error"))[:500]
     subject = "BiliLearn AI quota/balance alert"
     body = "BiliLearn stopped AI work after a provider billing error.\n\n" + detail
-    if cfg.get("review_required", False):
+    if cfg.get("review_required", True):
         _queue_for_review("billing_error", subject, body)
         return True
     _send(subject, body)
@@ -246,7 +246,7 @@ def maybe_alert_recorded_spend(total: float) -> bool:
         return False
     subject = "BiliLearn recorded spend limit reached"
     body = f"Recorded local AI spend is {float(total):.4f}, reaching the configured limit of {limit:.4f}.\n\nThis is based on BiliLearn's local web_costs.json record, not a provider balance query."
-    if cfg.get("review_required", False):
+    if cfg.get("review_required", True):
         _queue_for_review("recorded_spend", subject, body)
         return True
     _send(subject, body)

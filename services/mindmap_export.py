@@ -145,45 +145,48 @@ def _maybe_ai_outline(markdown: str, prompt: str | None, require_ai: bool = Fals
 
 
 def markdown_to_mindmap_html(markdown: str, title: str = "知识思维导图", theme: str = "default", max_depth: int = 3, include_images: bool = True) -> str:
+    from services.video_export_renderer import render_reference_html
+
     md = _trim_markdown(markdown, max_depth=max_depth, include_images=include_images)
     safe_title = html.escape(title or "知识思维导图")
-    md_json = json.dumps(md, ensure_ascii=False)
-    dark = theme == "dark"
-    bg = "#0d1117" if dark else "#ffffff"
-    fg = "#e6edf3" if dark else "#1f2328"
-    _mindmap_scripts = _mindmap_script_tags()
-    return f"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{safe_title}</title>
-<style>
-html,body,#mindmap{{margin:0;width:100%;height:100%;background:{bg};color:{fg};font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;}}
-.toolbar{{position:fixed;z-index:10;left:16px;top:16px;background:rgba(127,127,127,.12);backdrop-filter:blur(12px);border:1px solid rgba(127,127,127,.22);border-radius:12px;padding:10px 14px;}}
-.toolbar h1{{font-size:15px;margin:0 0 4px 0;}}
-.toolbar p{{font-size:12px;margin:0;opacity:.72;}}
-/* 导图节点中的图片（文字 + 图片结合） */
-foreignObject img{{max-width:200px;max-height:150px;border-radius:8px;display:block;margin:4px 0;box-shadow:0 1px 6px rgba(0,0,0,.15);}}
-.markmap-node foreignObject{{overflow:hidden}}
-</style>
-</head>
-<body>
-<div class="toolbar"><h1>{safe_title}</h1><p>由 bilibili_learning_bot 自动生成</p></div>
-<svg id="mindmap"></svg>
-{_mindmap_scripts}
+    md_json = json.dumps(md, ensure_ascii=False).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+    fragment = (
+        '<div class="slide active mindmap-slide"><span class="tag">KNOWLEDGE MAP</span>'
+        f'<h1 class="slide-title sm">{safe_title}</h1>'
+        '<p class="slide-subtitle">拖动移动 · 滚轮缩放 · 点击节点折叠</p>'
+        '<div class="divider"></div><svg id="mindmap" aria-label="知识思维导图"></svg>'
+        '<div class="logo-mark">bilibili_learning_bot</div></div>'
+    )
+    output = render_reference_html(fragment, title=title)
+    styles = """<style>
+.mindmap-slide { width:80vw; }
+#mindmap { display:block; width:100%; height:clamp(240px,48vh,560px); color:var(--text-primary); }
+#mindmap .markmap-node { color:var(--text-primary); }
+#mindmap .markmap-link, #mindmap .markmap-node circle, #mindmap .markmap-node line { stroke:var(--accent); }
+#mindmap foreignObject img { max-width:200px; max-height:150px; border-radius:8px; display:block; margin:4px 0; }
+#mindmap .markmap-node foreignObject { overflow:hidden; }
+@media(max-width:768px) { .mindmap-slide { width:calc(100vw - 32px); } }
+@media print { #mindmap { height:600px; } }
+</style>"""
+    runtime = f"""{_mindmap_script_tags()}
 <script>
-const markdown = {md_json};
-const transformer = new markmap.Transformer();
-const {{ root }} = transformer.transform(markdown);
-const mm = markmap.Markmap.create('#mindmap', {{ autoFit: true, duration: 500 }}, root);
-// 图片异步加载完成后重新自适应，避免文字+图片节点溢出
-document.querySelectorAll('foreignObject img').forEach(function(img){{
-  img.addEventListener('load', function(){{ try{{ mm.fit(); }}catch(e){{}} }});
-}});
-</script>
-</body>
-</html>"""
+(function () {{
+  const markdown = {md_json};
+  const transformer = new markmap.Transformer();
+  const {{ root }} = transformer.transform(markdown);
+  const mm = markmap.Markmap.create('#mindmap', {{ autoFit: true, duration: 500 }}, root);
+  const canvas = document.getElementById('mindmap');
+  const resize = new ResizeObserver(function () {{ mm.fit(); }});
+  resize.observe(canvas);
+  document.querySelectorAll('foreignObject img').forEach(function (image) {{
+    image.addEventListener('load', function () {{ mm.fit(); }});
+  }});
+}})();
+</script>"""
+    output = output.replace('</head>', styles + '</head>', 1)
+    if theme == "dark":
+        output = output.replace('<html lang="zh-CN">', '<html lang="zh-CN" data-theme="dark">', 1)
+    return output.replace('</body>', runtime + '</body>', 1)
 
 
 def export_mindmap(markdown_path: str | os.PathLike[str], output_dir: str | os.PathLike[str] | None = None, cfg: dict[str, Any] | None = None) -> str:
@@ -192,6 +195,8 @@ def export_mindmap(markdown_path: str | os.PathLike[str], output_dir: str | os.P
         raise FileNotFoundError(str(path))
     opts = (cfg or {}).get("mindmap", {}) if isinstance(cfg, dict) else {}
     out_dir = Path(output_dir or opts.get("output_dir") or DEFAULT_OUTPUT_DIR)
+    if os.getenv("BILI_ACCOUNT_ID"):
+        out_dir = MINDMAPS_DIR
     if not out_dir.is_absolute():
         # Frozen releases run from a read-only _internal directory.
         out_dir = MINDMAPS_DIR if getattr(sys, "frozen", False) else BASE_DIR / out_dir

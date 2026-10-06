@@ -86,10 +86,10 @@ def ensure_ppt_container(fragment: str, *, title: str = "学习页面") -> str:
 
 def render_slide_html(fragment: str, *, title: str = "学习页面", enhanced_animations: bool = True) -> str:
     """Render a Claude slide deck from an AI-generated fragment."""
-    from services.video_to_ppt import build_full_html
+    from services.video_export_renderer import render_reference_html
 
     normalized = ensure_ppt_container(fragment, title=title)
-    return build_full_html(normalized, "claude_slides", enhanced_animations=enhanced_animations)
+    return render_reference_html(normalized, title=title, enhanced_animations=enhanced_animations)
 
 
 def markdown_to_reading_html(markdown: str, title: str) -> str:
@@ -130,22 +130,9 @@ def markdown_to_reading_html(markdown: str, title: str) -> str:
     close_list()
 
     body = "".join(blocks) or "<p>暂无内容</p>"
-    return f'''<!doctype html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{safe_title}</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500;600&display=swap" rel="stylesheet">
-<style>
-:root{{--bg:#faf9f7;--surface:#fff;--text:#181817;--muted:#696761;--border:#e5e1dc;--accent:#d97757;--accent-bg:rgba(217,119,87,.08)}}
-*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--text);font:400 16px/1.78 Inter,"Microsoft YaHei",sans-serif;-webkit-font-smoothing:antialiased}}main{{max-width:980px;margin:0 auto;padding:64px 28px 92px}}.eyebrow{{display:inline-block;color:var(--accent);background:var(--accent-bg);border-radius:999px;padding:5px 14px;font-size:11px;letter-spacing:0;text-transform:uppercase}}article{{margin-top:22px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:44px;box-shadow:0 12px 32px rgba(32,27,22,.05)}}h1,h2,h3{{font-weight:300;line-height:1.25;letter-spacing:0}}h1{{font-size:36px;margin:0 0 28px}}h2{{font-size:25px;margin:42px 0 14px;padding-top:16px;border-top:1px solid var(--border)}}h3{{font-size:19px;margin:26px 0 8px}}p{{margin:10px 0;color:var(--text)}}ul{{margin:10px 0 16px;padding:0}}li{{margin:7px 0 7px 22px}}a{{color:var(--accent)}}@media(max-width:640px){{main{{padding:32px 16px}}article{{padding:26px 20px}}h1{{font-size:29px}}}}
-</style>
-</head>
-<body><main><div class="eyebrow">LEARNING REPORT</div><article><h1>{safe_title}</h1>{body}</article></main></body>
-</html>'''
+    from services.video_export_renderer import render_reference_html
+    fragment = f'<div class="slide active"><span class="tag">LEARNING REPORT</span><article><h1>{safe_title}</h1>{body}</article></div>'
+    return render_reference_html(fragment, title=title, reading=True)
 
 
 def markdown_to_slides_html(markdown: str, title: str, *, tag: str = "DEEP RESEARCH") -> str:

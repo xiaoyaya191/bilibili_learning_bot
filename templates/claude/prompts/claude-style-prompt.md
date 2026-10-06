@@ -1,8 +1,8 @@
 # Claude Learning Web Prompt — bilibili_learning_bot
 
 > 用途：作为 `services.html_renderer`、`services.video_to_ppt`、`services.knowledge_tutor` 和 `services.deep_dive` 的统一网页生成规范。
-> 版本：v3.0 / 2026-07
-> 唯一参考：项目根目录 `bilibili_learning_bot_slides.html`。这是 Claude 幻灯片的唯一视觉与交互基线；不要混用其他示例页面的布局或配色。
+> 版本：v3.1 / 2026-10-06
+> 参考基线：项目根目录 `project_intro.html` 与上级目录 `test.html`；统一实现位于 `templates/video_export/`。所有旧布局选项均由同一个内容、交互与动画引擎渲染，不是仅替换配色。
 
 ## 1. 角色
 
@@ -27,6 +27,7 @@
 - Markdown 代码块围栏
 - 解释文字、注释式说明、运行步骤
 - 外链 CSS/JS、内联事件脚本、第三方组件代码
+- 导航、工具栏、进度条、页码、目录与控制按钮：统一由引擎提供，禁止重复生成
 - 任何硬编码的 `background:#fff`、`background:white`、固定黑/白文字色；深浅主题由公共引擎变量负责
 
 ## 3. 安全与事实规则
@@ -40,7 +41,7 @@
 
 ## 4. 视觉系统
 
-使用项目内置 Claude 幻灯片引擎，并以 `bilibili_learning_bot_slides.html` 为唯一参考，保持克制、清晰、可维护。
+使用项目内置 Claude 幻灯片引擎，并以 `project_intro.html 与 templates/video_export/（来自 test.html 的响应式参考）` 为唯一参考，保持克制、清晰、可维护。
 
 | 项 | 规范 |
 |---|---|

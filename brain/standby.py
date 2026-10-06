@@ -334,7 +334,8 @@ class StandbyBot:
             except Exception:
                 pass
             async with httpx.AsyncClient(timeout=120.0, proxy=_proxy_url or None) as c:
-                r = await c.post(
+                from services.token_observability import observed_post
+                r = await observed_post(c, source="standby", model=self.model, url=
                     f"{self.base_url}/chat/completions",
                     headers={'Authorization': f'Bearer {self.api_key}', 'Content-Type': 'application/json'},
                     json={'model': self.model, 'messages': messages, 'temperature': 0.7, 'max_tokens': 2048}

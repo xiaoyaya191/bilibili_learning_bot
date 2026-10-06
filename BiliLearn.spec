@@ -3,7 +3,7 @@
 # This is a local web application. ML/ASR runtimes are intentionally excluded:
 # their native dependency trees are optional and must not block the web app
 # from launching when no local ASR engine has been installed.
-from PyInstaller.utils.hooks import copy_metadata
+from PyInstaller.utils.hooks import copy_metadata, collect_data_files
 
 datas = [
     ('VERSION', '.'),
@@ -19,6 +19,7 @@ datas = [
 # not reliably include .dist-info under Python 3.13, so ship both metadata
 # directories explicitly.
 datas += copy_metadata('flask') + copy_metadata('werkzeug')
+datas += collect_data_files('tzdata')
 binaries = []
 hiddenimports = [
     # Used from request handlers and tray callbacks. Keeping these explicit
@@ -48,6 +49,7 @@ hiddenimports = [
     'brain.monitor',
     'brain.standby',
     'httpx',
+    'tzdata',
     # httpx HTTP/2 栈：api/client.py 在 h2 可用时启用 http2=True，
     # 冻结构建下必须显式携带，否则全部请求回退且元数据失败。
     'h2',
@@ -57,13 +59,25 @@ hiddenimports = [
     'colorama',
     'flask_cors',
     'imageio_ffmpeg',
-    'python_docx',
+    'docx',
     'reportlab',
     # 学习小目标：web_panel 路由与 brain 主循环均在函数体内延迟 import，
     # 静态分析可能漏掉，显式声明确保冻结构建可用。
     'services.mini_goal',
     # 拟人随机搜索：brain 主循环函数体内延迟 import，静态分析漏掉，显式声明。
     'services.human_search',
+    'core.config_schema',
+    'services.model_providers',
+    'services.semantic_vectors',
+    'services.vector_retrieval',
+    'services.learning_settings_routes',
+    'services.permission_routes',
+    'services.action_permissions',
+    'services.platform_favorites',
+    'services.platform_management',
+    'services.image_export',
+    'services.interest_persistence',
+    'services.subtitle_candidates',
 ]
 optional_ml_excludes = [
     'faiss', 'funasr', 'huggingface_hub', 'jieba', 'llvmlite', 'modelscope',

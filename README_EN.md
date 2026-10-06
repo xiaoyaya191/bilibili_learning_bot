@@ -2,7 +2,7 @@
 
 > **Bilibili AI Learning Bot** — An AI that auto-watches videos, learns knowledge, interacts via comments, replies to DMs, evolves itself, with a built-in Web admin panel, and one-click Windows EXE packaging.
 >
-> Version: **3.1.2** | License: MIT | Project Docs: https://bxya.app/
+> Version: **3.1.6** | License: MIT | Project Docs: https://bxya.app/
 
 > 📘 中文版（Chinese）：[README.md](README.md)
 
@@ -38,9 +38,9 @@
 
 ---
 
-## 📊 Version Comparison: v3.0.2 → v3.1.x
+## 📊 Version Comparison: v3.0.2 → v3.1.6
 
-| Dimension | v3.0.2 | v3.1.2+ (current 3.1.2) |
+| Dimension | v3.0.2 | v3.1.6 (current) |
 |-----------|--------|--------------------------|
 | **Code Size** | 77 Python files / ~34k lines | 113 Python files / ~54k lines (+47%) |
 | **Windows Desktop** | ❌ Source-only | ✅ `desktop_app.py` one-click EXE packaging (tray icon + auto-open browser) |
@@ -57,6 +57,11 @@
 | **Stability Fixes** | — | Persona persistence, Cookie validation, risk control, multi-instance lock, AI degradation cooldown, context truncation protection |
 
 > See [CHANGELOG.md](CHANGELOG.md) for detailed evolution.
+
+## 🆕 v3.1.5 and v3.1.6
+
+- **v3.1.5** added the Agent/MCP and skills foundations, grouped backup/restore, review retries, persona and interest management, ASR settings, learning goals, and model availability tests.
+- **v3.1.6** focuses on usability and data safety: Bilibili Cookie login, email/security-question recovery, first-use mode selection, protected manual interests, a non-hideable settings editor, a timed disclaimer, dashboard-first startup, and the learning loop with multiple topics, knowledge trees, candidates, quizzes, and mastery tracking. Model listing now returns the provider's full list (up to a generous abuse guard), while availability tests are selectable and mutually exclusive with fetching.
 
 ---
 

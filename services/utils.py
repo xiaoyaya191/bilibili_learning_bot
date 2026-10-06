@@ -24,50 +24,29 @@ class InterestManager:
         self.interests_file = INTERESTS_FILE
         self.interests = self._load_interests()
 
-    def _load_interests(self):
-        if os.path.exists(self.interests_file):
-            try:
-                with open(self.interests_file, 'r', encoding='utf-8-sig') as f:
-                    data = json.load(f)
-                    return data.get("interests", [])
-            except (OSError, json.JSONDecodeError) as e:
-                _log(f'加载JSON文件失败: {e}', 'DEBUG')
-        return []
+    def _engine(self):
+        from services.interest_engine import InterestEngine
+        return InterestEngine(str(Path(self.interests_file).with_name('interest_engine.json')))
 
-    def _save_interests(self):
-        """原子写入 JSON 文件（tmp+replace 防止断电损坏）"""
-        try:
-            tmp = self.interests_file + '.tmp'
-            with open(tmp, 'w', encoding='utf-8') as f:
-                json.dump({"interests": self.interests, "updated_at": datetime.now().isoformat()},
-                          f, ensure_ascii=False, indent=2)
-            os.replace(tmp, self.interests_file)
-            return True
-        except OSError:
-            return False
+    def _load_interests(self):
+        return self._engine().get_keywords()
 
     def add_interest(self, keyword):
-        keyword = keyword.strip().lower()
-        if keyword and keyword not in self.interests:
-            self.interests.append(keyword)
-            self._save_interests()
-            _log(f"已添加兴趣: {keyword}", "SUCCESS")
-            return True
-        return False
+        success = self._engine().add_interest(keyword)
+        self.interests = self._load_interests()
+        return success
 
     def remove_interest(self, keyword):
-        keyword = keyword.strip().lower()
-        if keyword in self.interests:
-            self.interests.remove(keyword)
-            self._save_interests()
-            _log(f"已移除兴趣: {keyword}", "SUCCESS")
-            return True
-        return False
+        success = self._engine().remove_interest(keyword)
+        self.interests = self._load_interests()
+        return success
 
     def get_interests(self):
-        return self.interests
+        self.interests = self._load_interests()
+        return list(self.interests)
 
     def is_interesting(self, title, content=""):
+        self.get_interests()
         if not self.interests:
             return True
         check_text = (title + " " + content).lower()
@@ -321,6 +300,9 @@ class BiliToolbox:
 
         from core.config import load_config
         runtime_config = load_config()
+        from services.action_permissions import allowed
+        if not allowed('follow_up' if action == 'follow' else 'unfollow_user', runtime_config):
+            return {"ok": False, "message": "请先在 AI API 权限分区授权此操作"}
         agent_cfg = runtime_config.get("private_message", {}).get("agent", {})
         if agent_cfg.get("allow_social_follow_actions", True) is False:
             return {"ok": False, "message": "Agent 关注工具已在设置中关闭"}
@@ -690,6 +672,14 @@ class BiliToolbox:
         agent_cfg = runtime_config.get("private_message", {}).get("agent", {})
         if agent_cfg.get("allow_account_actions", True) is False:
             return {"ok": False, "message": "主人互动工具已在设置中关闭"}
+        if action == 'favorite':
+            from services.local_favorites import collect_ai_intention
+            local_result = collect_ai_intention(runtime_config, {'bvid': bvid, 'title': bvid}, DATA_DIR)
+            if local_result is not None:
+                return local_result
+        from services.action_permissions import allowed
+        if not allowed(action, runtime_config):
+            return {"ok": False, "message": "请先在 AI API 权限分区授权此操作"}
         reserve = max(0, int(agent_cfg.get("coin_reserve", 5) or 5))
         abundant = max(reserve + 1, int(agent_cfg.get("coin_abundant_threshold", 50) or 50))
         if action == "coin":

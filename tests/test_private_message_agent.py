@@ -211,6 +211,7 @@ def test_non_owner_social_follow_is_queued_only_after_ai_decision(tmp_path, monk
 
     monkeypatch.setattr(toolbox, "social_profile", fake_profile)
     monkeypatch.setattr("core.config.load_config", lambda: {
+        "ai_permissions": {"enabled": True, "actions": {"video_like": True, "coin": True, "favorite": True, "follow_up": True, "unfollow_user": True}},
         "private_message": {"agent": {"enabled": True, "allow_social_follow_actions": True}},
         "approval_review": {"enabled": True, "action_types": {"follow_up": True}},
     })
@@ -231,6 +232,7 @@ def test_non_owner_cannot_request_an_unfollow(monkeypatch):
     toolbox = BiliToolbox(None, 1)
     monkeypatch.setattr(toolbox, "is_owner", lambda _talker_id: False)
     monkeypatch.setattr("core.config.load_config", lambda: {
+        "ai_permissions": {"enabled": True, "actions": {"video_like": True, "coin": True, "favorite": True, "follow_up": True, "unfollow_user": True}},
         "private_message": {"agent": {"allow_social_follow_actions": True}},
     })
 
@@ -255,6 +257,7 @@ def test_agent_can_proactively_queue_a_follow_after_a_valuable_chat(tmp_path, mo
 
     monkeypatch.setattr(toolbox, "social_profile", fake_profile)
     monkeypatch.setattr("core.config.load_config", lambda: {
+        "ai_permissions": {"enabled": True, "actions": {"video_like": True, "coin": True, "favorite": True, "follow_up": True, "unfollow_user": True}},
         "private_message": {"agent": {
             "enabled": True, "allow_social_follow_actions": True,
             "allow_proactive_social_follow": True, "social_follow_daily_limit": 1,
@@ -304,6 +307,7 @@ def test_autonomous_coin_requires_abundant_balance_and_reason(monkeypatch):
     monkeypatch.setattr(toolbox, "is_owner", lambda _talker_id: True)
     monkeypatch.setattr(toolbox, "self_status", lambda **_kwargs: asyncio.sleep(0, result={"coin_balance": 12}))
     monkeypatch.setattr("core.config.load_config", lambda: {
+        "ai_permissions": {"enabled": True, "actions": {"video_like": True, "coin": True, "favorite": True, "follow_up": True, "unfollow_user": True}},
         "private_message": {"agent": {"coin_reserve": 5, "coin_abundant_threshold": 50}}
     })
 
@@ -324,6 +328,7 @@ def test_owner_explicit_like_is_queued_when_review_is_enabled(tmp_path, monkeypa
         lambda **_kwargs: asyncio.sleep(0, result={"coin_balance": 80}),
     )
     monkeypatch.setattr("core.config.load_config", lambda: {
+        "ai_permissions": {"enabled": True, "actions": {"video_like": True, "coin": True, "favorite": True, "follow_up": True, "unfollow_user": True}},
         "private_message": {"agent": {"allow_account_actions": True}},
         "approval_review": {
             "enabled": True,
@@ -384,6 +389,7 @@ def test_owner_explicit_actions_call_platform_only_when_review_is_disabled(monke
     monkeypatch.setattr(
         "bilibili_api.favorite_list.get_video_favorite_list", fake_favorite_folders)
     monkeypatch.setattr("core.config.load_config", lambda: {
+        "ai_permissions": {"enabled": True, "actions": {"video_like": True, "coin": True, "favorite": True, "follow_up": True, "unfollow_user": True}},
         "private_message": {
             "agent": {
                 "allow_account_actions": True,
@@ -392,6 +398,7 @@ def test_owner_explicit_actions_call_platform_only_when_review_is_disabled(monke
             },
         },
         "approval_review": {"enabled": False},
+        "local_favorites": {"destination": "platform"},
     })
 
     cases = [

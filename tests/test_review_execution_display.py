@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import web_panel
 
 
@@ -17,3 +19,12 @@ def test_legacy_raw_execution_display_becomes_generic_confirmation():
     )
 
     assert display == "平台已确认执行"
+
+
+def test_review_page_can_retry_all_retryable_failures():
+    template = (Path(__file__).resolve().parents[1] / "web_panel.html").read_text(encoding="utf-8")
+
+    assert "重试全部失败" in template
+    assert "async function reviewRetryFailed()" in template
+    assert "api('GET','/api/reviews?status=failed')" in template
+    assert "x.retryable!==false" in template

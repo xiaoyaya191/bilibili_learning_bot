@@ -4,13 +4,14 @@ import web_panel
 from services.like_review import ActionReviewInbox, requires_review, review_settings
 
 
-def test_default_policy_reviews_platform_actions_only():
+def test_default_policy_reviews_all_actions():
     settings = review_settings({})
     assert settings["enabled"] is True
     assert requires_review({}, "video_like") is True
     assert requires_review({}, "private_reply") is True
     assert requires_review({}, "unfollow_user") is True
-    assert requires_review({}, "knowledge_write") is False
+    assert requires_review({}, "knowledge_write") is True
+    assert requires_review({}, "file_export") is True
 
 
 def test_disabled_review_policy_never_requires_review():
@@ -35,6 +36,7 @@ def test_account_switch_cancels_all_pending_review_actions(tmp_path):
 
 
 def test_execution_rejects_action_from_another_account(monkeypatch):
+    monkeypatch.setattr('services.action_permissions.require', lambda action: None)
     from api import client as client_module
 
     class Credential:

@@ -5,16 +5,19 @@ from core.platform_actions import (
 )
 
 
-def test_public_commenting_is_available_after_the_policy_checks():
-    assert public_commenting_enabled() is True
+def test_public_commenting_is_disabled_without_explicit_permission(monkeypatch):
+    monkeypatch.setattr('core.config.load_config', lambda: {})
+    assert public_commenting_enabled() is False
 
 
-def test_explicit_at_mention_replies_are_available():
-    assert at_mention_replies_enabled() is True
+def test_explicit_at_mention_replies_need_permission(monkeypatch):
+    monkeypatch.setattr('core.config.load_config', lambda: {})
+    assert at_mention_replies_enabled() is False
 
 
-def test_video_liking_is_available_for_reviewed_actions():
-    assert video_liking_enabled() is True
+def test_video_liking_needs_permission_even_for_reviewed_actions(monkeypatch):
+    monkeypatch.setattr('core.config.load_config', lambda: {})
+    assert video_liking_enabled() is False
 
 
 def test_all_write_paths_check_the_global_policy():

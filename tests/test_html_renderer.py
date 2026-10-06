@@ -60,7 +60,8 @@ def test_deck_wrapper_strips_a_truncated_ppt_container_without_rendering_text():
 
 def test_canonical_claude_prompt_names_the_reference_template():
     prompt = build_slide_prompt({"title": "测试", "stats": {}}, "字幕", "claude_slides")
-    assert "bilibili_learning_bot_slides.html" in prompt
+    assert "project_intro.html" in prompt
+    assert "templates/video_export/" in prompt
 
 
 def test_requested_slide_count_is_strict_and_counts_only_slide_elements():

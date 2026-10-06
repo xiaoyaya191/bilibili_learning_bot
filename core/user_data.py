@@ -45,13 +45,13 @@ if getattr(sys, "frozen", False):
     ARTIFACTS_DIR = USER_DATA_DIR
 else:
     PROJECT_DIR = Path(__file__).resolve().parents[1]
-    ARTIFACTS_DIR = PROJECT_DIR
+    ARTIFACTS_DIR = USER_DATA_DIR if os.getenv("BILI_ACCOUNT_ID") else PROJECT_DIR
 
 # Private runtime data always lives under the user profile. Source checkouts
 # (non-frozen) keep generated artifacts inside the project folder so users can
 # find exports easily; frozen releases keep every generated artifact in the
 # current Windows user's BiliLearn directory (the app dir is read-only).
-if getattr(sys, "frozen", False):
+if getattr(sys, "frozen", False) or os.getenv("BILI_ACCOUNT_ID"):
     _ARTIFACT_ROOT = USER_DATA_DIR
 else:
     _ARTIFACT_ROOT = PROJECT_DIR
@@ -126,6 +126,9 @@ def ensure_user_data_dir() -> Path:
     USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
     for directory in (*_PRIVATE_DIRECTORIES.values(), *_PROJECT_DIRECTORIES.values()):
         directory.mkdir(parents=True, exist_ok=True)
+
+    if os.getenv("BILI_ACCOUNT_ID"):
+        return USER_DATA_DIR
 
     # Releases before 3.1.2 stored runtime data directly under the user home.
     # Move it locally on this machine only; this never affects the distributable.

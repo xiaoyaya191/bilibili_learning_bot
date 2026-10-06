@@ -17,7 +17,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
 echo -e "${CYAN}============================================${NC}"
-echo -e "${CYAN}   bilibili_learning_bot v3.0.2${NC}"
+echo -e "${CYAN}   bilibili_learning_bot v3.1.6${NC}"
 echo -e "${CYAN}============================================${NC}"
 echo ""
 
@@ -47,14 +47,14 @@ check_and_install "httpx" "httpx"
 check_and_install "qrcode" "qrcode"
 check_and_install "Pillow" "PIL"
 check_and_install "colorama" "colorama"
-check_and_install "bilibili-api" "bilibili_api"
+check_and_install "bilibili-api-python" "bilibili_api"
 echo -e "${GREEN}[OK] 依赖检查完成${NC}"
 echo ""
 
 # ── 菜单 ──
 echo -e "${YELLOW}请选择启动模式:${NC}"
 echo "  1) 机器人菜单 (main.py - 交互式)"
-echo "  2) Web 管理面板 (web_panel.py - 端口7860)"
+echo "  2) Web 管理面板 (web_panel.py - 默认端口18083)"
 echo "  3) 后台运行 Web 面板"
 echo "  4) 安装/更新全部依赖"
 echo "  0) 退出"
@@ -67,7 +67,7 @@ case "$choice" in
         exec python3 main.py
         ;;
     2)
-        echo -e "${GREEN}启动 Web 管理面板 (http://localhost:7860)${NC}"
+        echo -e "${GREEN}启动 Web 管理面板（默认 http://127.0.0.1:18083，以启动信息为准）${NC}"
         exec python3 web_panel.py
         ;;
     3)
@@ -77,7 +77,7 @@ case "$choice" in
         PID=$!
         echo "PID: $PID"
         echo "$PID" > "$SCRIPT_DIR/bot.pid"
-        echo -e "${GREEN}[OK] 已后台启动，访问 http://localhost:7860${NC}"
+        echo -e "${GREEN}[OK] 已后台启动，默认访问 http://127.0.0.1:18083（以日志显示为准）${NC}"
         echo -e "${YELLOW}停止命令: kill \$(cat bot.pid)${NC}"
         ;;
     4)

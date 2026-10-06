@@ -3,9 +3,9 @@ from xingye_bot.grid_frames import visual_note_frame_options
 
 def test_visual_note_frame_options_use_defaults():
     assert visual_note_frame_options() == {
-        "frame_interval": 6,
+        "frame_interval": 5,
         "max_frames": 240,
-        "grid": (3, 3),
+        "grid": (4, 3),
     }
 
 
@@ -18,7 +18,7 @@ def test_visual_note_frame_options_clamp_invalid_values():
     })
 
     assert options == {
-        "frame_interval": 1,
+        "frame_interval": 0.5,
         "max_frames": 360,
         "grid": (1, 3),
     }

@@ -157,6 +157,8 @@ class BilibiliAccount:
         if dry_run or not allow_dynamic:
             self._log("dynamic.draft", True, text[:120])
             return {"executed": False, "reason": "dry_run 或 allow_dynamic 未开启", "text": text}
+        from services.action_permissions import require
+        require('dynamic_publish')
         from bilibili_api import dynamic
         from bilibili_api.dynamic import BuildDynamic
 
@@ -185,6 +187,8 @@ class BilibiliAccount:
     ) -> dict[str, Any]:
         action = (action or "").strip().lower()
         payload = {"bvid": bvid, "action": action, "text": text}
+        from services.action_permissions import require
+        require({'comment': 'public_comment', 'like': 'video_like', 'coin': 'coin', 'favorite': 'favorite'}.get(action, action))
         # Commenting and video likes are intentionally source-disabled globally.
         from core.platform_actions import public_commenting_enabled, video_liking_enabled
         if action == "comment" and not public_commenting_enabled():

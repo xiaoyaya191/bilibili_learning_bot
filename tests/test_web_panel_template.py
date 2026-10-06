@@ -65,6 +65,15 @@ def test_agent_goal_placeholder_is_a_single_valid_html_attribute():
     assert 'placeholder="例如：帮我看看最近B站上大家在讨论什么 AI Agent 框架，挑一个最火的视频总结要点，存进知识库"' in template
 
 
+def test_agent_tool_count_comes_from_the_live_registry():
+    template = (Path(__file__).resolve().parents[1] / "web_panel.html").read_text(encoding="utf-8")
+
+    assert 'id="agentToolCountLead">待加载</span>' in template
+    assert "lead.textContent=tools.length+' '" in template
+    assert "hint.textContent='（'+tools.length+' 个内置能力" in template
+    assert "AI 拿着 17 个工具" not in template
+
+
 def test_runtime_web_template_has_no_duplicate_ids():
     template = (Path(__file__).resolve().parents[1] / "web_panel.html").read_text(encoding="utf-8")
     import re
@@ -265,6 +274,13 @@ def test_monitor_switches_and_log_polling_do_not_duplicate_controls_or_toasts():
     assert "function stopFullLogPoll(){if(fullLogPoll){" not in template
 
 
+def test_behavior_page_refreshes_the_real_smart_safety_state():
+    template = (Path(__file__).resolve().parents[1] / "web_panel.html").read_text(encoding="utf-8")
+
+    assert "function rf_behavior(){fetchBehavior();fetchSafety()}" in template
+    assert "toggle.checked=r.enabled!==false" in template
+
+
 def test_config_masks_api_keys_and_uses_fast_local_runtime_clocks():
     template = (Path(__file__).resolve().parents[1] / "web_panel.html").read_text(encoding="utf-8")
 
@@ -327,4 +343,6 @@ def test_video_to_web_defaults_to_ten_pages_and_sends_the_count():
     assert 'id="v2wSlideCount"' in template
     assert 'value="10"' in template
     assert "slide_count:slideCount" in template
-    assert "自动（Claude 幻灯片）" in template
+    assert "统一参考布局 · 项目介绍 / 内容总结" in template
+    assert '<span class="form-hint">每种风格对应一套排版与配色</span>' not in template
+    assert 'id="v2wEnhancedAnimations" type="checkbox" checked' in template

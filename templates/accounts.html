@@ -1,0 +1,8 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>独立账号管理</title>
+<link rel="stylesheet" href="/assets/css/accounts.css?v=20261007-1"></head>
+<body{% if embedded %} class="embedded"{% endif %}><main>{% if not embedded %}<a href="/">← 返回当前面板</a>{% endif %}<div class="account-hero"><small>ACCOUNT WORKSPACES / LOCAL ISOLATION</small><h1>账号管理</h1><p>最多 10 个账号。每个账号使用独立端口、配置、Cookie、记忆、日志和知识库；新账号不会复制其他账号凭据。</p></div>
+<section class="account-create"><h2>添加独立账号</h2><form id="create"><label>账号名称<input id="name" required maxlength="80" placeholder="例如：学习账号"></label><label>端口（可选）<input id="port" type="number" min="1024" max="65535" placeholder="留空自动分配"></label><button id="createSubmit" class="primary">添加账号</button></form><p>默认从 18083 开始分配空闲端口。关闭主面板时，由它启动的子面板及机器人一起停止。</p></section>
+<p id="message" role="status"></p><div class="account-toolbar"><div><h2>账号工作区</h2><small id="accountCount">读取中...</small></div><button id="refresh">刷新状态</button></div><section id="rows"></section>
+</main><dialog id="accountDialog"><form id="dialogForm" method="dialog"><h2 id="dialogTitle">确认操作</h2><p id="dialogText"></p><input id="dialogInput"><div class="dialog-actions"><button type="button" id="dialogCancel">取消</button><button id="dialogSubmit" class="primary">确认</button></div></form></dialog><script src="/assets/js/accounts.js?v=20261007-1"></script></body></html>

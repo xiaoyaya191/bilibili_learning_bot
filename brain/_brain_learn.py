@@ -14,6 +14,17 @@ from brain.local_note import build_local_subtitle_note
 class BrainLearnMixin:
     """学习与知识归档方法"""
 
+    @staticmethod
+    def _clean_generated_note(text: str) -> str:
+        """Remove model-added metadata/fences so the program-owned file header stays unique."""
+        value = str(text or "").replace("\r\n", "\n").strip()
+        value = re.sub(r"^```(?:markdown|md)?\s*\n", "", value, flags=re.I)
+        value = re.sub(r"\n```\s*$", "", value)
+        value = re.sub(r"^\s*(?:【视频信息】|##\s*视频信息)\s*\n(?:[-*].*\n?){1,8}", "", value, flags=re.I)
+        value = re.sub(r"^\s*#+\s*(?:视频总结|学习笔记|AI内容总结)\s*\n+", "", value, flags=re.I)
+        value = re.sub(r"\n{3,}", "\n\n", value)
+        return value.strip()
+
     async def learn_from_video(self, bvid, title, up, url, subtitle_text, topic_suggestion, video_desc="", score=None, comment_summary=None, skip_auto_export=False):
         # 二次守卫：分数不达标直接拒绝归档
         if score is not None and score < LEARN_MIN_SCORE:
@@ -100,7 +111,8 @@ class BrainLearnMixin:
                             {"role": "user", "content": summary_context}
                         ]
                     )
-                    summary_content = resp.choices[0].message.content
+                    summary_content = self._clean_generated_note(resp.choices[0].message.content)
+                summary_content = self._clean_generated_note(summary_content)
                 if not str(summary_content or "").strip():
                     raise RuntimeError("AI总结返回空内容")
             except Exception as summary_error:

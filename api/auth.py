@@ -34,8 +34,8 @@ def is_bili_logged_in():
     if not os.path.exists(COOKIE_FILE):
         return False
     try:
-        with open(COOKIE_FILE, 'r', encoding='utf-8-sig') as f:
-            cookies = json.load(f)
+        from utils.storage import JsonStore
+        cookies = JsonStore(COOKIE_FILE).read()
         return bool(cookies.get('SESSDATA', '').strip()) and bool(cookies.get('DedeUserID', '').strip())
     except Exception:
         return False
@@ -48,8 +48,8 @@ def check_login_status():
         return
 
     try:
-        with open(COOKIE_FILE, 'r', encoding='utf-8-sig') as f:
-            cookies = json.load(f)
+        from utils.storage import JsonStore
+        cookies = JsonStore(COOKIE_FILE).read()
 
         print(f"{Fore.CYAN}════════════════════════════════════════════════{Style.RESET_ALL}")
         print(f"{Fore.CYAN}                登录状态检查{Style.RESET_ALL}")
@@ -239,10 +239,9 @@ async def login_bilibili():
         }
 
         os.makedirs(os.path.dirname(COOKIE_FILE), exist_ok=True)
-        tmp = COOKIE_FILE + '.tmp'
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(cookies, f, indent=4)
-        os.replace(tmp, COOKIE_FILE)
+        from utils.storage import JsonStore
+        if not JsonStore(COOKIE_FILE).write(cookies):
+            raise OSError("账号数据库保存失败")
 
         log(f"成功！Cookie 已保存至: {COOKIE_FILE}", "SUCCESS")
         return True

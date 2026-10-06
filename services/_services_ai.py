@@ -10,6 +10,8 @@ _services_ai.py — services/ 共享的 AI 调用层
 """
 
 from __future__ import annotations
+from services.token_observability import observed_post
+from services.model_providers import provider_post
 
 import json
 import os
@@ -50,7 +52,7 @@ def _compat_resp(data: dict):
 
     class _Msg:
         def __init__(self, d):
-            self.content = d.get("content", "")
+            self.content = d.get("content") or d.get("reasoning_content") or ""
             raw_tool_calls = d.get("tool_calls", None)
             self.tool_calls = [_ToolCall(tc) for tc in raw_tool_calls] if raw_tool_calls else None
             self.role = d.get("role", "assistant")
@@ -69,6 +71,12 @@ def _compat_resp(data: dict):
     class _Resp:
         def __init__(self, d):
             self.choices = [_Choice(c) for c in d.get("choices", [])]
+            self.usage = d.get("usage")
+            self.model = d.get("model", "")
+            self._data = d
+
+        def model_dump(self):
+            return self._data
 
     return _Resp(data)
 
@@ -176,6 +184,8 @@ def _live_config() -> dict:
         "model_brain_fallback": _or_env("model_brain_fallback", "BILI_AI_MODEL_BRAIN_FALLBACK"),
         "vision_api_key": vision_api_key if vision_api_key else _or_env("unified_api_key", "BILI_AI_API_KEY"),
         "vision_base_url": vision_base_url if vision_base_url else _or_env("unified_base_url", "BILI_AI_BASE_URL"),
+        "pool_config": _cfg,
+        "model_provider": _cfg.get("model_provider", {}),
     }
 
 
@@ -226,7 +236,7 @@ async def _call_ai_via_openai(
         pass
 
     async with _httpx.AsyncClient(timeout=float(timeout), proxy=_proxy_url or None) as _ac:
-        _resp = await _ac.post(url, headers=headers, content=body_bytes)
+        _resp = await provider_post(_ac, url, provider=live.get("model_provider", {}).get("plugin", "openai-compatible"), fallback=observed_post, source="services", model=_model, headers=headers, content=body_bytes)
         _resp.raise_for_status()
         data = _resp.json()
     return _compat_resp(data)
@@ -285,8 +295,11 @@ async def _call_ai_via_httpx(
     except Exception:
         pass
 
+    from services.model_providers import get_provider
+    provider_name = str(live.get('model_provider', {}).get('plugin', 'openai-compatible'))
+    provider = get_provider(provider_name)
     async with httpx.AsyncClient(timeout=float(timeout), proxy=_proxy_url or None) as client:
-        resp = await client.post(url, headers=headers, content=body_bytes)
+        resp = await provider.chat(client, url, payload, headers=headers, timeout=float(timeout), source="services")
         resp.raise_for_status()
         data = resp.json()
 
@@ -314,7 +327,15 @@ async def call_ai_raw(
     - 最多重试 3 次
     - 返回 OpenAI response 对象（含 choices[0].message.content 和 tool_calls）
     """
+    global _ai_429_cooldown_until
     live = _live_config()
+    pool_config = live.get("pool_config", {})
+    if pool_config.get("api_pool", {}).get("enabled"):
+        from services.ai_pool import route
+        payload = {"model": model or live.get("model_brain", ""), "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
+        if tools:
+            payload.update(tools=tools, tool_choice=tool_choice)
+        return _compat_resp(await route(payload, config_data=pool_config, timeout=timeout))
     api_key = live.get("api_key", "")
     if not api_key:
         raise RuntimeError("API Key 未配置，请在用户数据目录的 config.json 中设置 unified_api_key")
@@ -334,7 +355,8 @@ async def call_ai_raw(
         backends = [("httpx", _call_ai_via_httpx)]
 
         last_error = None
-        max_attempts = 3
+        api_settings = live.get("pool_config", {}).get("api", {})
+        max_attempts = max(1, min(5, int(api_settings.get("max_retries", 3))))
 
         for attempt in range(max_attempts):
             for backend_name, backend_fn in backends:
@@ -429,7 +451,8 @@ async def call_ai(
     """
     import time
     # 全局 429 冷却期间直接返回空
-    if time.time() < _ai_429_cooldown_until:
+    pool_enabled = _live_config().get("pool_config", {}).get("api_pool", {}).get("enabled", False)
+    if not pool_enabled and time.time() < _ai_429_cooldown_until:
         if verbose:
             remaining = int(_ai_429_cooldown_until - time.time())
             print(f"{Fore.YELLOW}[AI] 429 冷却中，剩余 {remaining} 秒，跳过本次调用{Style.RESET_ALL}")
@@ -536,13 +559,13 @@ async def call_ai_with_tools(
 
     live = _live_config()
     api_key = live.get("api_key", "")
-    if not api_key:
+    if not api_key and not live.get("pool_config", {}).get("api_pool", {}).get("enabled"):
         raise RuntimeError("API Key 未配置，请在用户数据目录的 config.json 中设置 unified_api_key")
     _model = model or live.get("model_brain", "")
-    if not _model:
+    if not _model and not live.get("pool_config", {}).get("api_pool", {}).get("enabled"):
         raise RuntimeError("未配置 model_brain，请在配置菜单中设置 AI 模型")
 
-    if not _openai_available():
+    if live.get("pool_config", {}).get("api_pool", {}).get("enabled") or not _openai_available():
         return await _call_ai_with_tools_via_httpx(
             messages=messages, tools=tools, model=_model, temperature=temperature,
             max_tokens=max_tokens, timeout=timeout, verbose=verbose,
@@ -591,7 +614,7 @@ async def call_ai_with_tools(
                 "Content-Length": str(len(body_bytes)),
             }
             async with _httpx.AsyncClient(timeout=float(timeout), proxy=_proxy_url or None) as _ac:
-                _resp = await _ac.post(_url, headers=headers, content=body_bytes)
+                _resp = await provider_post(_ac, _url, provider=live.get("model_provider", {}).get("plugin", "openai-compatible"), fallback=observed_post, source="services-tools", model=_model, headers=headers, content=body_bytes)
                 _resp.raise_for_status()
                 resp = _compat_resp(_resp.json())
         except Exception as e:
@@ -653,7 +676,7 @@ async def call_ai_with_tools(
             "Content-Length": str(len(body_bytes)),
         }
         async with _httpx.AsyncClient(timeout=float(timeout), proxy=_proxy_url or None) as _ac:
-            _resp = await _ac.post(_url, headers=headers, content=body_bytes)
+            _resp = await provider_post(_ac, _url, provider=live.get("model_provider", {}).get("plugin", "openai-compatible"), fallback=observed_post, source="services-tools", model=_model, headers=headers, content=body_bytes)
             _resp.raise_for_status()
             resp = _compat_resp(_resp.json())
         return resp.choices[0].message.content or ""

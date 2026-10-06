@@ -14,6 +14,10 @@ import webbrowser
 import runpy
 from pathlib import Path
 
+if __name__ == '__main__' and not os.getenv('BILI_ACCOUNT_ID'):
+    from core.account_workspaces import configure_default_account
+    configure_default_account()
+
 from utils.system_tray import SystemTray
 from utils.web_launcher import get_web_port, is_our_panel
 from utils.updater import start_update_check
@@ -215,7 +219,21 @@ def main() -> int:
     def _exit_desktop() -> None:
         reminder_stop.set()
         if process is not None and process.poll() is None:
-            process.terminate()
+            import psutil
+            try:
+                parent = psutil.Process(process.pid)
+                descendants = parent.children(recursive=True)
+                for child in reversed(descendants):
+                    try:
+                        child.terminate()
+                    except psutil.NoSuchProcess:
+                        pass
+                parent.terminate()
+                _, alive = psutil.wait_procs(descendants + [parent], timeout=5)
+                for child in alive:
+                    child.kill()
+            except psutil.NoSuchProcess:
+                pass
 
     tray = SystemTray(URL, on_exit=_exit_desktop)
     _start_reminder_notifications(tray, reminder_stop)

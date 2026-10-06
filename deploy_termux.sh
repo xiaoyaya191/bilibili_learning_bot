@@ -39,13 +39,10 @@ you enable those features. It is for learning and personal use. You are
 responsible for account actions and platform rules.
 NOTICE
 
-# 多语言同意：兼容 中文 / English / Русский，任意匹配即可继续。
-printf 'Type 我同意 / I agree / согласен to continue: '
+# 仅接受准确的中文确认，避免误触后直接执行账号相关部署。
+printf '确认理解并继续，请准确输入：我同意\n> '
 read -r consent
-case "$consent" in
-  我同意|i agree|I agree|IAGREE|согласен|Согласен|yes|y|Y|ok|OK|是) ;;
-  *) fail "Consent did not match. Installation was not started." ;;
-esac
+[ "$consent" = "我同意" ] || fail "未输入准确的“我同意”，安装没有开始。"
 
 say "Step 2/6: installing required Termux packages"
 pkg update -y

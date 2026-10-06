@@ -11,6 +11,10 @@ import os
 import time
 import traceback
 
+if __name__ == '__main__' and not os.getenv('BILI_ACCOUNT_ID'):
+    from core.account_workspaces import configure_default_account
+    configure_default_account()
+
 from colorama import Fore, Style
 
 # 修复 Termux 等环境下退出时 logging.shutdown 被 KeyboardInterrupt 打断

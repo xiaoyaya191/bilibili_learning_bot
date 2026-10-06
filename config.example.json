@@ -1,4 +1,41 @@
 {
+  "subtitles": {"enabled": true},
+  "ai_permissions": {"enabled": false, "actions": {}},
+  "rag_qa": {
+    "enabled": false,
+    "model": "auto",
+    "max_context_chunks": 5,
+    "enable_function_calling": true,
+    "sources": [
+      "knowledge_base",
+      "single_video"
+    ],
+    "embedding_model": "",
+    "reranker_model": "",
+    "allow_lexical_fallback": true,
+    "chunk_size": 900,
+    "chunk_overlap": 120,
+    "candidate_count": 30,
+    "context_chars": 6000
+  },
+  "subtitle_alignment": {
+    "enabled": true,
+    "embedding_model": "",
+    "threshold": 0.25,
+    "chunk_size": 900,
+    "fetch_attempts": 3,
+    "whisper_fallback": true
+  },
+  "image_export": {
+    "width": 1200,
+    "height": 1600,
+    "font_size": 32,
+    "background": "",
+    "overlay": 0.9
+  },
+  "model_provider": {
+    "plugin": "openai-compatible"
+  },
   "api": {
     "unified_api_key": "",
     "max_retries": 3,
@@ -101,13 +138,66 @@
     "delete_video_after_understand": true,
     "frame_note_mode": "visual_note",
     "candidate_pool_size": 20,
-    "visual_note_frame_interval": 6,
+    "visual_note_frame_interval": 5,
     "visual_note_max_frames": 240,
-    "visual_note_grid_cols": 3,
+    "visual_note_grid_cols": 4,
     "visual_note_grid_rows": 3,
+    "visual_note_scene_detection": true,
+    "visual_note_scene_threshold": 0.3,
     "quality": "best",
     "max_age_days": 180,
     "max_duration_limit_seconds": 18000
+  },
+  "direct_video": {
+    "enabled": false,
+    "capability_confirmed": false,
+    "model": "",
+    "use_vision_endpoint": true,
+    "max_size_mb": 32,
+    "max_duration_seconds": 300,
+    "timeout_seconds": 180,
+    "max_tokens": 2000,
+    "fallback_to_frames": true
+  },
+  "prompt_injection": {
+    "enabled": true,
+    "custom_terms": []
+  },
+  "api_pool": {
+    "enabled": false,
+    "include_primary": true,
+    "strategy": "round_robin",
+    "rounds": 2,
+    "attempt_limit": 20,
+    "total_timeout_seconds": 300,
+    "retry_delay_seconds": 1,
+    "backoff_multiplier": 2,
+    "max_delay_seconds": 15,
+    "failure_threshold": 2,
+    "cooldown_seconds": 60,
+    "respect_retry_after": true,
+    "retry_network_errors": true,
+    "retry_statuses": [
+      408,
+      429,
+      500,
+      502,
+      503,
+      504
+    ],
+    "failover_statuses": [
+      401,
+      402,
+      403,
+      404,
+      408,
+      429,
+      500,
+      502,
+      503,
+      504
+    ],
+    "endpoints": []
   },
   "vision": {
     "multimodal_enabled": false,
@@ -127,8 +217,8 @@
       "private_reply": true,
       "coin": true,
       "favorite": true,
-      "knowledge_write": false,
-      "file_export": false
+      "knowledge_write": true,
+      "file_export": true
     }
   },
   "up_learning": {
@@ -187,17 +277,66 @@
     ]
   },
   "diary": {
+    "schedule_version": 1,
     "enabled": true,
     "auto_enabled": true,
-    "auto_interval_minutes": 60,
-    "min_events_for_auto": 3
+    "trigger_mode": "interval",
+    "auto_interval_minutes": 1440,
+    "daily_time": "22:00",
+    "time_windows": [],
+    "weekdays": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ],
+    "min_events_for_auto": 1,
+    "event_threshold": 20,
+    "lookback_hours": 24,
+    "sources": [
+      "learning",
+      "videos",
+      "web_chat",
+      "private_messages",
+      "comments"
+    ],
+    "max_events": 100,
+    "max_chars_per_source": 6000,
+    "max_total_chars": 24000,
+    "include_skipped": false,
+    "include_blocked": false,
+    "anonymize_contacts": true,
+    "empty_behavior": "skip",
+    "fallback_to_local": false,
+    "retry_minutes": 30,
+    "model": "",
+    "temperature": 0.4,
+    "max_tokens": 1500,
+    "ai_timeout_seconds": 180,
+    "custom_prompt": "",
+    "title_prefix": "今日手记"
   },
   "self_evolution": {
-    "enabled": true,
-    "auto_enabled": true,
-    "reflect_interval_events": 8,
+    "enabled": false,
+    "auto_enabled": false,
+    "auto_apply": false,
+    "reflect_interval_events": 100,
     "min_events_for_reflect": 3,
-    "auto_apply": true
+    "layers": [
+      "parameters",
+      "knowledge",
+      "strategy"
+    ],
+    "sources": [
+      "videos",
+      "learning",
+      "diary"
+    ],
+    "observation_hours": 336,
+    "auto_apply_parameters": false
   },
   "agent": {
     "enabled": true,
@@ -231,9 +370,32 @@
     "completion_action": "stop"
   },
   "revisit": {
-    "enabled": true,
+    "enabled": false,
+    "rules_confirmed": false,
+    "sources": [
+      "history",
+      "local_favorites"
+    ],
+    "time_windows": [],
+    "weekdays": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ],
+    "categories": [],
+    "keywords": [],
+    "exclude_keywords": [],
+    "up_names": [],
+    "favorite_folders": [],
+    "min_age_hours": 24,
+    "daily_limit": 3,
+    "order": "oldest",
     "prob_revisit": 0.25,
-    "revisit_cooldown_minutes": 15,
+    "revisit_cooldown_minutes": 60,
     "min_score": 7.5,
     "max_per_video": 2,
     "per_video_cooldown_minutes": 240
@@ -326,16 +488,6 @@
       }
     }
   },
-  "rag_qa": {
-    "enabled": false,
-    "model": "auto",
-    "max_context_chunks": 5,
-    "enable_function_calling": true,
-    "sources": [
-      "knowledge_base",
-      "single_video"
-    ]
-  },
   "version_history": {
     "enabled": false,
     "max_versions": 5,
@@ -398,6 +550,7 @@
     "quiet_end_hour": 8
   },
   "local_favorites": {
+    "destination": "local",
     "auto_collect_enabled": true,
     "min_score": 8.0,
     "folder_name": "AI 精选",

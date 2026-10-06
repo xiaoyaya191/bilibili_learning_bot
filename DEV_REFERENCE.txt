@@ -1,4 +1,4 @@
-bilibili_learning_bot v3.1.5 — 开发者索引
+bilibili_learning_bot v3.1.6 — 开发者索引
 更新时间: 2026-07-11
 
 本文件是入口索引，不再维护重复的完整文件清单。详细规则请阅读 dev_refs/ 和 REFACTOR_PLAN.md。

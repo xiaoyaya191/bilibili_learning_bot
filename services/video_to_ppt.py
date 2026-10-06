@@ -1,15 +1,10 @@
-"""services/video_to_ppt.py — B站视频 → PPT风格HTML页面（借鉴AI_Animation模板）
+"""Bilibili video to reference-style, self-contained interactive HTML.
 
-特性：
-- 多页幻灯片，←→键盘翻页 + 底部导航点 + 触摸滑动
-- 粒子Canvas背景 + SVG噪点 + 渐变暗色主题
-- animate-item 级联入场动画
-- 支持多种配色主题: dark(默认), purple, cyan, claude_slides；旧 Claude 主题自动兼容到 claude_slides
-- Flask预览服务器：生成后本地预览，保存到指定路径（跨平台）
-- claude_slides: 基于 bilibili_learning_bot_slides.html 模板的完整动画系统
+Legacy layout IDs remain accepted; all output uses the same learning studio.
 """
 import os, re, time, json, sys, asyncio, webbrowser, socket, threading
 import httpx
+from services.token_observability import observed_post
 from pathlib import Path
 
 
@@ -63,7 +58,7 @@ THEMES = {
     },
     "claude_slides": {
         "name": "Claude 幻灯片",
-        # 唯一 Claude 风格：bilibili_learning_bot_slides.html 的白/黑/灰+暖橙体系。
+        # 唯一 Claude 风格：project_intro.html 与 templates/video_export/（来自 test.html 的响应式参考） 的白/黑/灰+暖橙体系。
         "bg_start": "#FFFFFF", "bg_end": "#F5F5F5",
         "primary": "#D97757", "accent": "#E8916A",
         "cyan": "#4dabf7", "purple": "#da77f2",
@@ -92,9 +87,24 @@ THEMES.update({
     "gradient_new": {"name":"新变风","bg_start":"#3b0764","bg_end":"#0c4a6e","primary":"#f9a8d4","accent":"#fde68a","cyan":"#67e8f9","purple":"#c4b5fd","card_bg":"rgba(15,23,42,.58)","card_border":"rgba(255,255,255,.22)"},
     "soft_pop": {"name":"柔和流行","bg_start":"#fff1f2","bg_end":"#e0f2fe","primary":"#db2777","accent":"#2563eb","cyan":"#0ea5e9","purple":"#8b5cf6","card_bg":"rgba(255,255,255,.88)","card_border":"rgba(219,39,119,.18)"},
     "promptport": {"name":"PromptPort","bg_start":"#020617","bg_end":"#071a1a","primary":"#00e5a8","accent":"#67e8f9","cyan":"#22d3ee","purple":"#a78bfa","card_bg":"rgba(15,23,42,.84)","card_border":"rgba(0,229,168,.30)"},
+    "editorial": {"name":"编辑部","bg_start":"#fafafa","bg_end":"#e5e7eb","primary":"#b91c1c","accent":"#1d4ed8","cyan":"#0369a1","purple":"#6d28d9","card_bg":"#ffffff","card_border":"rgba(17,24,39,.18)"},
+    "classroom": {"name":"课堂讲义","bg_start":"#f8fafc","bg_end":"#dcfce7","primary":"#166534","accent":"#b45309","cyan":"#0369a1","purple":"#6d28d9","card_bg":"rgba(255,255,255,.94)","card_border":"rgba(22,101,52,.20)"},
+    "notebook": {"name":"学习笔记","bg_start":"#fffdf7","bg_end":"#f1f5f9","primary":"#334155","accent":"#c2410c","cyan":"#0e7490","purple":"#7e22ce","card_bg":"rgba(255,255,255,.90)","card_border":"rgba(51,65,85,.18)"},
+    "data_report": {"name":"数据报告","bg_start":"#f8fafc","bg_end":"#e2e8f0","primary":"#0f766e","accent":"#be123c","cyan":"#0369a1","purple":"#6d28d9","card_bg":"#ffffff","card_border":"rgba(15,118,110,.20)"},
+    "terminal": {"name":"终端实验室","bg_start":"#09090b","bg_end":"#18181b","primary":"#4ade80","accent":"#facc15","cyan":"#22d3ee","purple":"#c084fc","card_bg":"rgba(24,24,27,.94)","card_border":"rgba(74,222,128,.24)"},
+    "storyboard": {"name":"分镜故事","bg_start":"#18181b","bg_end":"#292524","primary":"#fb7185","accent":"#fbbf24","cyan":"#38bdf8","purple":"#c084fc","card_bg":"rgba(41,37,36,.90)","card_border":"rgba(251,113,133,.25)"},
+    "minimal": {"name":"极简阅读","bg_start":"#ffffff","bg_end":"#f4f4f5","primary":"#18181b","accent":"#2563eb","cyan":"#0891b2","purple":"#7c3aed","card_bg":"#ffffff","card_border":"rgba(24,24,27,.14)"},
 })
 
+# Publicly maintained export templates: Claude plus ten distinct learning layouts.
+PUBLIC_THEME_IDS = (
+    "claude_slides", "light", "editorial", "bento", "card", "classroom",
+    "notebook", "data_report", "terminal", "storyboard", "minimal",
+)
+THEMES = {key: THEMES[key] for key in PUBLIC_THEME_IDS}
+
 STYLE_ART_DIRECTION = {
+    "claude_slides":"Claude 式克制幻灯片，白黑灰为主、暖橙强调，内容和叙事优先。",
     "dark":"深色研究界面，红金点缀和克制粒子；内容以章节和数据卡片组织。",
     "light":"高可读的白昼编辑排版，深色正文、蓝绿强调、留白优先。",
     "slide":"电影分镜式叙事，每页一个结论，前后承接明确。", "card":"高密度可扫描卡片画廊，卡片内有结论和依据。",
@@ -105,18 +115,44 @@ STYLE_ART_DIRECTION = {
     "nostalgic":"克制的复古 GUI 和等宽标签，不使用像素噪点干扰正文。", "linear":"精简开发者工具感，细边框与紫青点缀。",
     "gradient_new":"鲜明但节制的潮流背景，正文区域必须稳定可读。", "soft_pop":"柔和活泼但非儿童化，圆润结构与清楚层级。",
     "promptport":"黑底绿青开发者产品界面，模块清晰，禁止营销空话。",
+    "editorial":"杂志编辑部式信息层级，标题、导语、正文和引证清楚分离。",
+    "classroom":"教师讲义式结构，概念、例子、练习和小结逐层推进。",
+    "notebook":"实用学习笔记布局，重点、代码、误区与复盘易于扫描。",
+    "data_report":"数据报告布局，指标、依据、结论和限制条件同时呈现。",
+    "terminal":"工程实验记录风格，终端和代码只服务于可读内容。",
+    "storyboard":"分镜式叙事，一页一步，前后关系明确且节奏稳定。",
+    "minimal":"极简阅读版式，减少装饰，突出核心结论和证据。",
 }
 
 # Old saved settings and API callers remain valid, but all Claude variants render
 # through the one maintained style above.  Keeping this mapping avoids silently
 # falling back to the unrelated dark theme for existing users.
-_LEGACY_CLAUDE_THEMES = {"claude", "claude_slides_v2"}
+_LEGACY_CLAUDE_THEMES = {"claude", "claude_slides_v2", "auto", "dark", "purple", "cyan",
+                         "slide", "glass", "aurora", "neobrutal", "oled", "cyberpunk",
+                         "neumorphism", "liquid_glass", "nostalgic", "linear", "gradient_new",
+                         "soft_pop", "promptport"}
 
 
 def normalize_theme_name(theme_name: str) -> str:
     """Return the public theme ID, preserving compatibility with old configs."""
     normalized = (theme_name or "").strip().lower()
-    return "claude_slides" if normalized in _LEGACY_CLAUDE_THEMES else normalized
+    if normalized in _LEGACY_CLAUDE_THEMES or normalized not in THEMES:
+        return "claude_slides"
+    return normalized
+
+
+def strip_export_watermarks(html: str) -> str:
+    """Remove both generated per-slide marks and the optional fixed badge."""
+    text = html or ""
+    text = re.sub(
+        r'<(?:div|span|footer)\b[^>]*class=["\'][^"\']*\blogo-mark\b[^"\']*["\'][^>]*>[\s\S]*?</(?:div|span|footer)>',
+        '', text, flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r'<div\b[^>]*>\s*bilibili_learning_bot\s+视频学习助手\s*</div>',
+        '', text, flags=re.IGNORECASE,
+    )
+    return text
 
 
 def count_slide_elements(html: str) -> int:
@@ -824,7 +860,7 @@ document.querySelector('.page-num span').textContent='1';
 """
 
 # ══════════════════════════════════════════════════════════════
-# Claude Slides V2 — 完整动画系统（基于 bilibili_learning_bot_slides.html 模板）
+# Claude Slides V2 — 完整动画系统（基于 project_intro.html 与 templates/video_export/（来自 test.html 的响应式参考） 模板）
 # 包含11种keyframe动画、级联入场、数字滚动、粒子特效、版本翻转
 # ══════════════════════════════════════════════════════════════
 
@@ -1140,11 +1176,11 @@ def _load_claude_design_system() -> str:
 
 def _load_examples_info(base_dir: str) -> str:
     """Describe the one canonical reference without injecting an HTML file into the LLM."""
-    reference = os.path.join(base_dir, "bilibili_learning_bot_slides.html")
+    reference = os.path.join(base_dir, "project_intro.html")
     if not os.path.isfile(reference):
         return ""
     return (
-        "唯一视觉参考：项目根目录 bilibili_learning_bot_slides.html。"
+        "唯一视觉参考：项目根目录 project_intro.html 与 templates/video_export/（来自 test.html 的响应式参考）。"
         "使用其已有的 slide、tag、slide-title、divider、content-grid、card、"
         "feature-list、two-col、table-wrap、end-card、logo-mark 组件；"
         "页面引擎已提供亮暗切换、进度条、键盘和触摸翻页、Lucide 与响应式布局。"
@@ -1169,7 +1205,7 @@ def build_slide_prompt(
     stats = video_info.get('stats', {})
     desc = video_info.get('desc', '')[:500]
     is_claude = False
-    is_claude_slides = theme_name == "claude_slides"
+    is_claude_slides = True
 
     # ── 详情级别配置 ──
     _detail_cfg = {
@@ -1232,7 +1268,7 @@ def build_slide_prompt(
 - 禁止: 渐变背景、彩色阴影、彩色文字、弹跳/旋转/脉冲动画、emoji图标、Font Awesome图标
 """
 
-    style_direction = STYLE_ART_DIRECTION.get(theme_name, STYLE_ART_DIRECTION["dark"])
+    style_direction = STYLE_ART_DIRECTION.get(theme_name, STYLE_ART_DIRECTION["claude_slides"])
     prompt = f"""你是顶级知识萃取师和前端设计师。根据以下B站视频信息，生成一个**多页PPT风格HTML页面**的内容。
 {claude_guidelines}
 
@@ -1431,14 +1467,14 @@ def _build_slide_prompt_v2(
     prompt = f"""你是知识萃取师和前端设计师。根据B站视频信息，生成多页幻灯片HTML。
 
 【引擎说明】
-你生成的内容会被注入基于 `bilibili_learning_bot_slides.html` 的 Claude 幻灯片引擎。只输出幻灯片内容HTML（从<div class="ppt-container">开始），不要写CSS/JS。
-引擎提供：亮暗主题切换、进度条、键盘/触摸翻页、Lucide 图标和响应式布局。
+你生成的内容会被注入基于 `project_intro.html 与 templates/video_export/（来自 test.html 的响应式参考）` 的 Claude 幻灯片引擎。只输出幻灯片内容HTML（从<div class="ppt-container">开始），不要写CSS/JS。
+引擎统一提供：章节目录抽屉、下载HTML、打印/PDF、连续阅读、自动播放、全屏、亮暗切换、动画进度条、键盘/触摸翻页及离线Lucide图标。不要重复生成导航、按钮、进度条、页码、工具栏或全屏控件。
 动画偏好：{animation_guidance}
 
 【设计与质量要求】
 1. 使用克制的白/黑/灰与暖橙强调色，Inter 字体体系；只使用 Lucide 图标，禁止 emoji 和 Font Awesome
 2. 标题字重 200-300，正文 400，卡片标题 500；不要使用渐变背景、彩色阴影或夸张动效
-3. 每页只讲一个主题，避免溢出、遮挡、超长段落与无意义的重复卡片
+3. 每页只讲一个主题，通常不超过3张卡片或5条要点；保持呼吸感与内容层级，避免溢出、遮挡、超长段落与无意义的重复卡片。封面使用 slide-cover，数字动画可使用 data-target，禁止自写动画脚本
 4. 内容必须基于字幕、简介和真实统计数据提炼；不可编造事实或修改数据
 5. 输出的标签、标题、卡片、列表、表格和总结页必须使用下方列出的既有组件类名
 
@@ -1551,125 +1587,9 @@ def build_full_html(
     theme_name: str = "dark",
     enhanced_animations: bool = False,
 ) -> str:
-    """将AI生成的 slide 内容包装成完整 HTML 页面。"""
-    theme_name = normalize_theme_name(theme_name)
-    theme = THEMES.get(theme_name, THEMES["dark"])
-    is_claude = False
-    is_claude_slides = theme_name == "claude_slides"
-    is_claude_slides_v2 = is_claude_slides
-
-    # 生成CSS变量
-    css_vars = f""":root{{
-        --bg-start:{theme['bg_start']};--bg-end:{theme['bg_end']};
-        --primary:{theme['primary']};--accent:{theme['accent']};
-        --cyan:{theme['cyan']};--purple:{theme['purple']};
-        --card-bg:{theme['card_bg']};--card-border:{theme['card_border']};
-        --cover-glow:rgba({_hex_to_rgb(theme['primary'])},0.6);
-    }}"""
-
-    # 根据主题选择CSS/JS + Google Fonts
-    if is_claude_slides_v2:
-        # V2: 完整动画系统 (Inter字体 + Lucide图标 + 11种动画 + 亮暗切换)
-        use_css = CLAUDE_SLIDES_V2_CSS
-        if enhanced_animations:
-            use_css += r"""
-@keyframes enhancedSlideLeft { from { opacity:0; transform:translateX(-24px); } to { opacity:1; transform:translateX(0); } }
-@keyframes enhancedPopIn { 0% { opacity:0; transform:scale(.90); } 70% { opacity:1; transform:scale(1.02); } 100% { opacity:1; transform:scale(1); } }
-.slide.animating .feature-list > li { animation:enhancedSlideLeft .45s cubic-bezier(.22,.61,.36,1) both; }
-.slide.animating .feature-list > li:nth-child(1) { animation-delay:.10s; }
-.slide.animating .feature-list > li:nth-child(2) { animation-delay:.18s; }
-.slide.animating .feature-list > li:nth-child(3) { animation-delay:.26s; }
-.slide.animating .feature-list > li:nth-child(n+4) { animation-delay:.34s; }
-.slide.animating .content-grid > .card { animation:enhancedPopIn .48s cubic-bezier(.22,.61,.36,1) both; }
-.slide.animating .content-grid > .card:nth-child(1) { animation-delay:.12s; }
-.slide.animating .content-grid > .card:nth-child(2) { animation-delay:.20s; }
-.slide.animating .content-grid > .card:nth-child(3) { animation-delay:.28s; }
-.slide.animating .content-grid > .card:nth-child(n+4) { animation-delay:.36s; }
-"""
-        use_js = CLAUDE_SLIDES_V2_JS
-        body_extra = '<button class="theme-toggle" aria-label="切换主题"><i data-lucide="moon"></i></button>'
-        canvas_tag = '<div class="progress-bar"></div>'
-        google_fonts = '<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:wght@100;200;300;400;500;600;700;800&display=swap" rel="stylesheet">'
-        # Strip outer ppt-container wrapper (AI prompt generates it) to avoid double-wrap with slide-container
-        _s = _unwrap_ppt_container(slide_html)
-        slide_html = f'<div class="slide-container">{_s}</div>'
-    elif is_claude_slides:
-        # Claude Slides: 纯白+暖橙+亮暗切换+进度条
-        use_css = CLAUDE_SLIDES_CSS
-        use_js = CLAUDE_SLIDES_JS
-        body_extra = '<button class="theme-toggle" aria-label="切换主题"><i data-lucide="moon" id="themeIcon"></i></button>'
-        canvas_tag = '<div class="progress-bar"></div>'
-        google_fonts = '<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:wght@100;200;300;400;500;600;700;800&display=swap" rel="stylesheet">'
-        # slide container wrap for claude_slides
-        slide_html = f'<div class="slide-container">{slide_html}</div>'
-    elif is_claude:
-        use_css = CLAUDE_CSS
-        use_js = CLAUDE_JS
-        body_extra = '<div class="theme-toggle" onclick="this.textContent=this.textContent.includes(\'Solarized\')?\'Light\':\'Solarized\'">Solarized</div>'
-        canvas_tag = ""
-        google_fonts = '<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:wght@100;200;300;400;500;600;700;800&display=swap" rel="stylesheet">'
-    else:
-        use_css = PPT_CSS
-        use_js = PPT_JS
-        body_extra = ""
-        canvas_tag = '<canvas id="particlesCanvas"></canvas>'
-        google_fonts = ""
-    style_override = "" if is_claude_slides_v2 or is_claude_slides else _style_css_override(theme_name)
-
-    # 构建导航点JS
-    nav_dots_js = """
-// Auto-generate nav dots
-(function(){
-    var slides=document.querySelectorAll('.slide');
-    var dots=document.getElementById('navDots');
-    if(dots&&slides.length){
-        dots.innerHTML='';
-        for(var i=0;i<slides.length;i++){
-            var d=document.createElement('div');
-            d.className='nav-dot'+(i===0?' active':'');
-            d.setAttribute('data-index',i);
-            d.addEventListener('click',function(){go(parseInt(this.dataset.index))});
-            dots.appendChild(d);
-        }
-        var pn=document.querySelector('.page-num');
-        if(pn)pn.innerHTML='<span>1</span> / '+slides.length;
-    }
-})();
-"""
-
-    is_claude_any = is_claude or is_claude_slides or is_claude_slides_v2
-    icon_block = (
-        '<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>'
-        if is_claude_any
-        else '<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">'
-    )
-    icons_init = "lucide.createIcons({attrs:{'stroke-width':1.5}});" if is_claude_any else ""
-
-    full_html = f"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>{theme['name']} Theme - B站视频知识卡片</title>
-{google_fonts}
-{icon_block}
-<style>
-{css_vars}
-{use_css}
-{style_override}
-</style>
-</head>
-<body>
-{canvas_tag}{body_extra}
-{slide_html}
-<script>
-{use_js}
-{nav_dots_js}
-{icons_init}
-</script>
-</body>
-</html>"""
-    return full_html
+    """Render all saved layout choices with the maintained reference engine."""
+    from services.video_export_renderer import render_reference_html
+    return render_reference_html(slide_html, enhanced_animations=enhanced_animations)
 
 
 def _hex_to_rgb(hex_color: str) -> str:
@@ -1820,7 +1740,7 @@ async def generate_ppt_from_bvid(
     requested_theme = normalize_theme_name(theme)
     # "auto" must select a maintained high-quality engine, not fall through to
     # the first legacy theme in the mapping.
-    theme = "claude_slides" if requested_theme in ("", "auto") else requested_theme
+    theme = requested_theme
     slide_count = max(4, min(int(slide_count or 10), 20))
     result = {
         "success": False, "html_path": "", "title": "", "subtitle_chars": 0,
@@ -1944,7 +1864,7 @@ async def generate_ppt_from_bvid(
     _heartbeat = asyncio.ensure_future(_heartbeat_dots(2.0))
     try:
         async with httpx.AsyncClient(timeout=300.0) as client:
-            r = await client.post(
+            r = await observed_post(client, source="video-html", model=model, url=
                 f"{base_url}/chat/completions",
                 headers={'Authorization': f'Bearer {api_key}', **request_headers},
                 content=request_body,
@@ -2007,7 +1927,7 @@ async def generate_ppt_from_bvid(
                 'max_tokens': 16384,
             })
             async with httpx.AsyncClient(timeout=300.0) as client:
-                repair_response = await client.post(
+                repair_response = await observed_post(client, source="video-html-repair", model=model, url=
                     f"{base_url}/chat/completions",
                     headers={'Authorization': f'Bearer {api_key}', **repair_headers},
                     content=repair_body,
@@ -2054,10 +1974,12 @@ async def generate_ppt_from_bvid(
     if watermark and full_html and '</body>' in full_html:
         _wm = '<div style="position:fixed;bottom:10px;right:14px;z-index:9999;font:12px system-ui,sans-serif;color:rgba(128,128,128,.55);background:rgba(255,255,255,.65);padding:4px 10px;border-radius:6px;pointer-events:none;user-select:none">bilibili_learning_bot 视频学习助手</div>'
         full_html = full_html.replace('</body>', _wm + '</body>', 1)
+    elif not watermark:
+        full_html = strip_export_watermarks(full_html)
 
     # 左右播放按钮：可选，默认开启。关闭时用 CSS 隐藏导航箭头（保留键盘/圆点切换）。
     if not nav_buttons and full_html:
-        _hide_nav = '<style>.nav-arrows{display:none!important}</style>'
+        _hide_nav = '<style>#prevButton,#nextButton{display:none!important}</style>'
         if '</head>' in full_html:
             full_html = full_html.replace('</head>', _hide_nav + '</head>', 1)
         else:

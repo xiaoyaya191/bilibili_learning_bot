@@ -1,6 +1,8 @@
 """brain/_brain_ai.py — AgentBrain AI后端 & 多Provider mixin"""
 from brain._mixin_imports import *
 from utils.helpers import _mask_urls
+from services.token_observability import observed_post
+from services.model_providers import provider_post
 
 class BrainAIMixin:
     """AI backend methods"""
@@ -29,7 +31,8 @@ class BrainAIMixin:
     def _live_config(self):
         """实时读取 API 配置（绕过 import * 导致的模块级变量缓存问题）。
         每次调用都从 config 字典重新读取，确保用户通过菜单修改后即时生效。"""
-        from core.config import config as _cfg
+        from core.config import load_config
+        _cfg = load_config()
         api = _cfg.get("api", {})
         fb_prov = _cfg.get("fallback_provider", {})
         fb_models = _cfg.get("fallback_models", {})
@@ -51,13 +54,15 @@ class BrainAIMixin:
             "vision_api_key": vision_api_key if vision_api_key else _or_env("unified_api_key", "BILI_AI_API_KEY"),
             "vision_base_url": vision_base_url if vision_base_url else _or_env("unified_base_url", "BILI_AI_BASE_URL"),
             "fallback_models": fb_models,
-            "fallback_model_chat": fb_models.get("chat", ""),
+            "fallback_model_chat": api.get("model_brain_fallback") or fb_models.get("chat", ""),
             "fallback_model_vision": fb_models.get("vision", ""),
             "fallback_provider_enabled": fb_prov.get("enabled", False),
             "fallback_provider_api_key": fb_prov.get("api_key", ""),
             "fallback_provider_base_url": fb_prov.get("base_url", ""),
             "fallback_provider_name": fb_prov.get("name", ""),
             "fallback_provider_models": fb_prov.get("models", {}),
+            "pool_config": _cfg,
+            "model_provider": _cfg.get('model_provider', {}),
         }
 
     async def _call_ai_via_openai(self, **kwargs):
@@ -116,7 +121,9 @@ class BrainAIMixin:
             pass
         async with httpx.AsyncClient(timeout=float(timeout),
                                      proxy=_proxy_url or None) as client:
-            resp = await client.post(url, headers=headers, content=body_bytes)
+            resp = await provider_post(client, url, provider=live.get('model_provider', {}).get('plugin', 'openai-compatible'),
+                                       fallback=observed_post, source="brain", model=model, headers=headers, content=body_bytes,
+                                       timeout=float(timeout))
             try:
                 resp.raise_for_status()
             except httpx.HTTPStatusError as he:
@@ -156,6 +163,20 @@ class BrainAIMixin:
                 kwargs["messages"][mi] = {**msg, "content": truncated}
                 log(f"[TRUNC] 消息过大({len(content)}字符→{MAX_MESSAGE_LEN})，已截断 #context_guard", "WARN")
 
+        pool_config = live.get("pool_config", {})
+        if pool_config.get("api_pool", {}).get("enabled") and not any(key in kwargs for key in ("_override_api_key", "_override_base_url", "_vision_api_key", "_vision_base_url")):
+            from services.ai_pool import route
+            from services._services_ai import _compat_resp
+            payload = {key: value for key, value in kwargs.items() if not key.startswith("_") and key not in ("request_timeout",)}
+            payload.setdefault("model", live["model_brain"])
+            payload.pop("stream", None)
+            data = await route(payload, config_data=pool_config, timeout=kwargs.get("request_timeout", 120))
+            self._ai_errors_consecutive = 0
+            self._ai_primary_failing = 0
+            self._ai_degraded_until = 0.0
+            self._ai_degraded_logged = False
+            return _compat_resp(data)
+
         if self._is_ai_degraded():
             raise RuntimeError("AI处于降级模式，跳过调用")
 
@@ -180,7 +201,7 @@ class BrainAIMixin:
         _models_to_try = [_primary_model]
         if _fallback_model and _fallback_model != _primary_model:
             _models_to_try.append(_fallback_model)
-        api_cfg = config.get("api", {}) if isinstance(config, dict) else {}
+        api_cfg = live.get("pool_config", {}).get("api", {})
         _primary_retries = max(1, min(5, int(api_cfg.get("max_retries", 3))))
         _fallback_retries = max(1, min(3, int(api_cfg.get("fallback_retries", 2))))
         

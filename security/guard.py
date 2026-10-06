@@ -7,6 +7,7 @@
   例："国家"、"政府"、"民主"、"战争"等
 """
 import re
+import unicodedata
 from core.config import config as _global_config
 
 
@@ -36,6 +37,9 @@ class ReplySafetyGuard:
     # assistant's instructions. They are intentionally separate from the
     # keyword policy so ordinary Bilibili conversations are not overblocked.
     _INJECTION_PATTERNS = (
+        r'(?:ignore|disregard|override).{0,40}(?:previous|prior|above|all|system).{0,25}(?:instructions?|rules?|prompts?)',
+        r'(?:reveal|print|show|repeat|leak).{0,30}(?:system\s*prompt|developer\s*message|api\s*key|secret|credentials?)',
+        r'(?:忽略|覆盖|无视).{0,15}(?:之前|以上|所有|系统|开发者).{0,15}(?:指令|规则|提示词)',
         r"忽略(?:之前|以上|所有)?(?:指令|规则|提示)",
         r"(?:显示|输出|复述|泄露)(?:系统提示|提示词|prompt|内部设定)",
         r"(?:你现在是|扮演|切换为).{0,24}(?:系统|开发者|管理员)",
@@ -48,17 +52,19 @@ class ReplySafetyGuard:
 
     def __init__(self, config: dict = None):
         self._config_override = config
-        self._apply_config(config or _global_config)
+        self._apply_config(config if config is not None else _global_config)
 
     def _apply_config(self, cfg: dict | None):
         cfg = cfg or {}
         safety_cfg = cfg.get("reply_safety", {})
+        safety_cfg = safety_cfg if isinstance(safety_cfg, dict) else {}
         self.enabled = safety_cfg.get("enabled", True)
         self.block_on_incoming = safety_cfg.get("block_on_incoming", True)
         self.block_on_outgoing = safety_cfg.get("block_on_outgoing", True)
         self.block_political_video_comments = safety_cfg.get("block_political_video_comments", True)
         self.blocked_keywords: list = safety_cfg.get("blocked_keywords", [])
         injection_cfg = cfg.get("prompt_injection", {})
+        injection_cfg = injection_cfg if isinstance(injection_cfg, dict) else {}
         self.injection_enabled = injection_cfg.get("enabled", True)
         self.injection_terms = [
             str(term).strip().lower()
@@ -85,7 +91,8 @@ class ReplySafetyGuard:
         """
         if not self.enabled or not self.injection_enabled or not text:
             return False, []
-        normalized = str(text).lower()
+        normalized = unicodedata.normalize('NFKC', str(text)).lower()
+        normalized = ''.join(character for character in normalized if unicodedata.category(character) != 'Cf')
         hits = [pattern for pattern in self._INJECTION_PATTERNS
                 if re.search(pattern, normalized, flags=re.IGNORECASE)]
         hits.extend(term for term in self.injection_terms if term in normalized)
@@ -165,6 +172,13 @@ class ReplySafetyGuard:
         """审查对话：分级检查来信和回信。
         返回 (ok: bool, reason: str, hits: list)
         """
+        if self.enabled:
+            injection, injection_hits = self.detect_injection(incoming) if self.block_on_incoming else (False, [])
+            if injection:
+                return False, '提示词注入拦截', injection_hits
+            leak, leak_hits = self.detect_leak(outgoing) if self.block_on_outgoing else (False, [])
+            if leak:
+                return False, '内部上下文泄露拦截', leak_hits
         incoming_hits = []
         outgoing_hits = []
 

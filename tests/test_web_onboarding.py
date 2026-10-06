@@ -39,6 +39,42 @@ def test_log_template_uses_structured_error_detection_for_candidates():
     assert "/api/onboarding" in template
 
 
+def test_first_use_uses_learning_companion_without_a_mode_picker():
+    template = (Path(__file__).resolve().parents[1] / "web_panel.html").read_text(encoding="utf-8")
+
+    assert "id=\"settingsUseModes\"" not in template
+    assert "var _firstUseMode=''" not in template
+    assert "学习 + 陪伴" in template
+    assert "showDashGuide(true)" in template
+
+
+def test_onboarding_rejects_missing_mode_and_persists_a_valid_choice(monkeypatch, tmp_path):
+    import web_panel
+    from services.learning_loop import LearningLoopService
+
+    config_file = Path(tmp_path) / "config.json"
+    monkeypatch.setattr(web_panel, "CONFIG_FILE", config_file)
+    monkeypatch.setattr(web_panel, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(web_panel, "_learning_loop", lambda: LearningLoopService(tmp_path / 'learning.sqlite3', tmp_path / 'kb'))
+    _allow_web_request(monkeypatch, web_panel)
+    client = web_panel.app.test_client()
+
+    accepted = client.post("/api/onboarding", json={"action": "configure", "topic": "Python"})
+    assert accepted.status_code == 200
+
+    saved = client.post(
+        "/api/onboarding",
+        json={"action": "configure", "mode": "learning", "topic": "Python", "level": "systematic"},
+    )
+    assert saved.status_code == 200
+    assert client.get("/api/user-experience").get_json() == {
+        "ok": True,
+        "mode": "learn_companion",
+        "topic": "Python",
+        "level": "systematic",
+    }
+
+
 def test_guide_intro_step_round_trip(monkeypatch, tmp_path):
     """教程第一步「查看项目介绍」：POST /api/guide/intro 后 guide-status 应标记完成。"""
     import web_panel

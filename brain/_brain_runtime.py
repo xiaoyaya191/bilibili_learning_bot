@@ -47,8 +47,8 @@ class BrainRuntimeMixin:
     def _load_memory(self):
         if os.path.exists(MEMORY_FILE):
             try:
-                with open(MEMORY_FILE, 'r', encoding='utf-8-sig') as f:
-                    data = json.load(f)
+                from utils.storage import JsonStore
+                data = JsonStore(MEMORY_FILE).read()
                 if isinstance(data.get("known_ups"), list):
                     old_list = data["known_ups"]
                     new_dict = {}
@@ -76,10 +76,9 @@ class BrainRuntimeMixin:
         if data is None:
             data = self.memory
         try:
-            tmp = MEMORY_FILE + '.tmp'
-            with open(tmp, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(tmp, MEMORY_FILE)
+            from utils.storage import JsonStore
+            if not JsonStore(MEMORY_FILE).write(data):
+                raise OSError("账号数据库保存失败")
         except OSError as e:
             log(f'文件操作失败: {e}', 'DEBUG')
 

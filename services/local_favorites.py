@@ -1,13 +1,13 @@
 """Shared local video-favorite storage for the bot, Web panel, and CLI."""
 
 import json
-import os
 import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
 
 from core.user_data import DATA_DIR
+from utils.storage import JsonStore
 
 
 _LOCK = threading.RLock()
@@ -21,7 +21,7 @@ def read_library(data_dir=None) -> dict:
     path = _path(data_dir)
     with _LOCK:
         try:
-            data = json.loads(path.read_text(encoding="utf-8-sig"))
+            data = JsonStore(path).read({})
         except (OSError, json.JSONDecodeError):
             data = {}
     folders = data.get("folders") if isinstance(data, dict) else []
@@ -39,10 +39,9 @@ def write_library(data: dict, data_dir=None) -> None:
         "folders": list(data.get("folders") or []),
         "items": list(data.get("items") or []),
     }
-    tmp = path.with_suffix(path.suffix + ".tmp")
     with _LOCK:
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(tmp, path)
+        if not JsonStore(path).write(payload):
+            raise OSError('本地收藏保存失败')
 
 
 def new_folder(name: str) -> dict:
@@ -59,8 +58,10 @@ def add_video(folder_name: str, video: dict, *, source="AI 自动精选", data_d
     bvid = str(video.get("bvid") or "").strip()
     if not bvid.startswith("BV"):
         return {"added": False, "reason": "invalid_bvid"}
-    with _LOCK:
-        library = read_library(data_dir)
+    outcome = {}
+    def mutate(library):
+        library.setdefault("folders", [])
+        library.setdefault("items", [])
         folder = next(
             (item for item in library["folders"] if str(item.get("name") or "").casefold() == folder_name.casefold()),
             None,
@@ -77,7 +78,8 @@ def add_video(folder_name: str, video: dict, *, source="AI 自动精选", data_d
             None,
         )
         if existing is not None:
-            return {"added": False, "reason": "duplicate", "folder": folder}
+            outcome.update(added=False, reason="duplicate", folder=folder)
+            return
         item = {
             "folder_id": folder["id"],
             "bvid": bvid,
@@ -93,14 +95,22 @@ def add_video(folder_name: str, video: dict, *, source="AI 自动精选", data_d
             "url": f"https://www.bilibili.com/video/{bvid}",
         }
         library["items"].append(item)
-        write_library(library, data_dir)
-        return {"added": True, "folder": folder, "item": item}
+        outcome.update(added=True, folder=folder, item=item)
+    with _LOCK:
+        if not JsonStore(_path(data_dir)).update(mutate):
+            raise OSError("本地收藏事务保存失败")
+    return outcome
 
 
 def auto_collect_video(config: dict, video: dict, *, interested: bool, data_dir=None) -> dict:
     settings = config.get("local_favorites", {}) if isinstance(config, dict) else {}
+    from services.action_permissions import allowed
+    if not allowed('local_favorite', config):
+        return {'added': False, 'reason': 'permission_denied'}
     if not settings.get("auto_collect_enabled", True):
         return {"added": False, "reason": "disabled"}
+    if str(settings.get("destination") or "local") != "local":
+        return {"added": False, "reason": "platform_requires_permission"}
     score = float(video.get("score") or 0)
     if score < float(settings.get("min_score", 8.0)):
         return {"added": False, "reason": "score"}
@@ -108,6 +118,18 @@ def auto_collect_video(config: dict, video: dict, *, interested: bool, data_dir=
         return {"added": False, "reason": "interest"}
     folder_name = str(settings.get("folder_name") or "AI 精选").strip() or "AI 精选"
     return add_video(folder_name, video, source="AI 自动精选", data_dir=data_dir)
+
+
+def collect_ai_intention(config: dict, video: dict, data_dir=None):
+    from services.action_permissions import allowed
+    settings = config.get('local_favorites', {})
+    if settings.get('destination', 'local') != 'local':
+        return None
+    if not allowed('local_favorite', config) or settings.get('auto_collect_enabled', True) is not True:
+        return {'ok': False, 'message': '项目内 AI 收藏已关闭', 'destination': 'local'}
+    result = add_video(settings.get('folder_name', 'AI 精选'), video, source='AI 收藏意图', data_dir=data_dir)
+    return {'ok': result.get('added') or result.get('reason') == 'duplicate',
+            'destination': 'local', 'detail': result, 'executed': bool(result.get('added'))}
 
 
 def backfill_from_history(config: dict, history: dict, *, data_dir=None) -> int:

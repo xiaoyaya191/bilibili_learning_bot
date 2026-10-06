@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import threading
 import time
 import uuid
@@ -46,7 +47,12 @@ class AgentSession:
     """一次 Agent 任务会话（面板进程内后台线程运行）。"""
 
     def __init__(self, goal: str, *, max_steps: int = 25, allow_write: bool = False,
-                 model: str = "", time_budget: int = 600):
+                 model: str = "", time_budget: int = 600, registry=None, context=None,
+                 chat_mode: bool = False, custom_prompt: str = ""):
+        self.registry = registry or GLOBAL_REGISTRY
+        self.context = context or []
+        self.chat_mode = bool(chat_mode)
+        self.custom_prompt = str(custom_prompt or "")[:4000]
         self.id = time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
         self.goal = goal.strip()
         self.max_steps = max(1, min(int(max_steps), 60))
@@ -66,6 +72,7 @@ class AgentSession:
         self._seq = 0
         self._lock = threading.Lock()
         self._stop_flag = threading.Event()
+        self._interjections: list[str] = []
         self._thread: threading.Thread | None = None
 
     # ── 事件 ──
@@ -93,6 +100,21 @@ class AgentSession:
     def stop(self) -> None:
         self._stop_flag.set()
 
+    def interject(self, message: str) -> bool:
+        text = str(message or "").strip()
+        if self.status != "running" or not text:
+            return False
+        with self._lock:
+            self._interjections.append(text[:2000])
+        self.emit("user_interjection", {"message": text[:500]})
+        return True
+
+    def _drain_interjections(self) -> list[str]:
+        with self._lock:
+            pending = list(self._interjections)
+            self._interjections.clear()
+        return pending
+
     def _run(self) -> None:
         try:
             asyncio.run(self._loop())
@@ -118,16 +140,19 @@ class AgentSession:
         })
 
         messages: list[dict] = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": self.custom_prompt if self.chat_mode else SYSTEM_PROMPT + "\n" + self.custom_prompt},
             {"role": "user", "content": f"本次任务目标：\n{self.goal}\n\n请开始自主完成。工具清单见 tools。"},
         ]
-        tools = GLOBAL_REGISTRY.schemas(include_write=True)
+        messages[1:1] = self.context[-20:]
+        tools = self.registry.schemas(include_write=self.allow_write)
 
         while self.steps < self.max_steps and not self._stop_flag.is_set():
             if time.time() - self.started_at > self.time_budget:
                 self.emit("system", {"message": f"已达时间预算 {self.time_budget}s，强制收尾"})
                 break
 
+            for interjection in self._drain_interjections():
+                messages.append({"role": "user", "content": "【主人运行中补充要求】\n" + interjection})
             self.steps += 1
             self.emit("step", {"step": self.steps, "max": self.max_steps})
 
@@ -136,12 +161,22 @@ class AgentSession:
                 temperature=0.6, max_tokens=2048, timeout=120.0,
                 verbose=False, tools=tools, tool_choice="auto",
             )
+            if self._stop_flag.is_set():
+                break
             msg = resp.choices[0].message
             content = (getattr(msg, "content", "") or "").strip()
             tool_calls = getattr(msg, "tool_calls", None) or []
 
             if content:
                 self.emit("thought", {"step": self.steps, "text": content})
+
+            if not tool_calls and self.chat_mode:
+                self.summary = content or "模型未返回内容，请重试。"
+                self.outcome = "done" if content else "blocked"
+                self.status = "finished"
+                self.emit("finish", {"summary": self.summary, "outcome": self.outcome})
+                self._persist()
+                return
 
             if not tool_calls:
                 # 没调工具也没 finish：视为想结束，引导一次
@@ -170,10 +205,14 @@ class AgentSession:
                 ],
             })
 
+            if len(tool_calls) > 20:
+                raise ValueError("单步工具请求超过20项限制")
             for tc in tool_calls:
+                if time.time() - self.started_at > self.time_budget:
+                    self._stop_flag.set()
                 if self._stop_flag.is_set():
                     break
-                name = tc.function.name
+                name = re.sub(r"<\|[^|]*\|>\w*", "", str(tc.function.name)).strip()
                 try:
                     arguments = json.loads(tc.function.arguments or "{}")
                     if not isinstance(arguments, dict):
@@ -181,7 +220,7 @@ class AgentSession:
                 except json.JSONDecodeError:
                     arguments = {}
 
-                defn = GLOBAL_REGISTRY.get(name)
+                defn = self.registry.get(name)
                 is_write = bool(defn and defn.risk == "write")
                 # 安全注入：会话未开启写权限时，写工具自动降级为 dry_run
                 if is_write and not self.allow_write:
@@ -197,7 +236,13 @@ class AgentSession:
                 })
                 self.tool_calls += 1
 
-                result = await GLOBAL_REGISTRY.invoke(name, arguments)
+                if is_write and not self.allow_write:
+                    result = {"ok": False, "error": "会话未授权写操作；工具未执行"}
+                else:
+                    import inspect
+                    if defn and "allow_write" not in inspect.signature(defn.handler).parameters:
+                        arguments.pop("allow_write", None)
+                    result = await asyncio.wait_for(self.registry.invoke(name, arguments), timeout=60)
                 self.emit("tool_result", {
                     "step": self.steps, "name": name, "result": result,
                 })
@@ -286,6 +331,13 @@ def stop_session() -> bool:
             return False
         ACTIVE_SESSION.stop()
         return True
+
+
+def interject_session(message: str) -> bool:
+    with _ACTIVE_LOCK:
+        if ACTIVE_SESSION is None:
+            return False
+        return ACTIVE_SESSION.interject(message)
 
 
 def list_history(limit: int = 30) -> list[dict]:

@@ -63,7 +63,9 @@ def is_our_panel(port: int, timeout: float = 1.0) -> bool:
             payload = json.loads(response.read().decode("utf-8"))
     except (OSError, ValueError, urllib.error.URLError):
         return False
-    return payload.get("ok") is True and payload.get("service") == WEB_SERVICE_ID
+    account_id = os.getenv("BILI_ACCOUNT_ID", "")
+    return (payload.get("ok") is True and payload.get("service") == WEB_SERVICE_ID
+            and (not account_id or payload.get("account_id") == account_id))
 
 
 def find_available_port(preferred: int, attempts: int = 20) -> int:

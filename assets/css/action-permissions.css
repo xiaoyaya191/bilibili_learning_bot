@@ -1,0 +1,30 @@
+.permission-hero{display:flex;align-items:center;justify-content:space-between;gap:24px;background:var(--bg-card,#fff)}
+.permission-hero p{max-width:680px;line-height:1.7;opacity:.75}
+.permission-warning{padding:16px 20px;border:1px solid #d9972e55;background:#d9972e12;border-radius:14px;margin:16px 0;line-height:1.8}
+.permission-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin:18px 0}
+.permission-card{display:grid;grid-template-columns:24px 1fr;gap:8px;padding:16px;border:1px solid var(--border,#8193a633);border-radius:12px;cursor:pointer;transition:border-color .2s,transform .2s}
+.permission-card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.permission-card small{grid-column:2;opacity:.65;line-height:1.5}.permission-card input{accent-color:var(--accent);width:17px;height:17px}
+.permission-result{white-space:pre-wrap;overflow-wrap:anywhere;max-height:420px;overflow:auto;padding:16px;background:var(--bg-alt,#8193a611);border-radius:12px;font-size:13px}
+#pg-ai-permissions [hidden]{display:none!important}
+#pg-ai-permissions .fg input,#pg-ai-permissions select{background:var(--bg-primary,#fff);color:var(--text-primary,inherit)}
+@media(max-width:640px){.permission-hero{align-items:flex-start;flex-direction:column}.permission-grid{grid-template-columns:1fr}#pg-ai-permissions .fr{display:block}#pg-ai-permissions .btn-grp{flex-wrap:wrap}#pg-ai-permissions .fg{margin-bottom:12px}}
+@media(prefers-reduced-motion:reduce){.permission-card{transition:none}.permission-card:hover{transform:none}}
+
+#pg-ai-permissions .permission-warning{background:var(--bg-secondary);border:1px solid var(--border);border-left:3px solid var(--accent);font-size:12px;color:var(--text-secondary);padding:12px 16px}
+#pg-ai-permissions .permission-hero h3{margin-bottom:8px}
+#pg-ai-permissions .permission-hero p{margin:0;font-size:13px;color:var(--text-secondary);opacity:1}
+#pg-ai-permissions .permission-hero .toggle-sw{flex-shrink:0;max-width:280px}
+#pg-ai-permissions .permission-grid{display:grid;grid-template-columns:1fr;gap:24px}
+#pg-ai-permissions .permission-scope h4{font-size:14px;margin:0 0 5px;font-weight:500}
+#pg-ai-permissions .permission-scope>p{font-size:12px;color:var(--text-secondary);line-height:1.7;margin:0 0 14px}
+#pg-ai-permissions .permission-scope-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+#pg-ai-permissions .permission-card{min-width:0;border-radius:10px;background:var(--bg-secondary);padding:13px;transform:none}
+#pg-ai-permissions .permission-card:hover{transform:none}
+#pg-ai-permissions .permission-card span{font-size:13px;line-height:1.5}
+#pg-ai-permissions .permission-card small{font-size:10px;color:var(--text-secondary);opacity:1}
+#pg-ai-permissions .permission-card:has(input:checked){border-color:color-mix(in srgb,var(--accent) 40%,var(--border));background:var(--accent-bg)}
+#pg-ai-permissions .permission-result:empty{display:none}
+#pg-ai-permissions #permission-status{font-size:12px;color:var(--text-secondary);line-height:1.7;margin-top:12px}
+@media(max-width:1100px){#pg-ai-permissions .permission-scope-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:680px){#pg-ai-permissions .permission-scope-grid{grid-template-columns:1fr}#pg-ai-permissions .permission-hero{align-items:flex-start;flex-direction:column}}

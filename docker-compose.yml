@@ -3,20 +3,23 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: bilibili_learning_bot:3.1.2
+    image: bilibili_learning_bot:3.1.6
     container_name: bilibili_learning_bot
     restart: unless-stopped
     ports:
       - "${WEB_PORT:-8080}:8080"
+      - "18083-18092:18083-18092"
     volumes:
       # 持久化数据目录（挂载到宿主机，方便备份和迁移）
       - ./Data:/app/Data
       - ./KnowledgeBase:/app/KnowledgeBase
       - ./highlights:/app/highlights
+      - ./user_data:/app/user_data
       # 可选：挂载自定义配置
       # - ./config.json:/app/Data/config.json:ro
     environment:
-      - WEB_PORT=${WEB_PORT:-8080}
+      - WEB_PORT=8080
+      - BILI_ACCOUNTS_ROOT=/app/user_data
       - WEB_HOST=0.0.0.0
       - BOT_MODE=${BOT_MODE:-web}
       # AI API 配置（推荐用 .env 文件，更安全）

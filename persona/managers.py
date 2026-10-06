@@ -36,8 +36,7 @@ class PrivateContextDB:
         with _PRIVATE_CONTEXT_LOCK:
             if os.path.exists(self.file_path):
                 try:
-                    with open(self.file_path, "r", encoding="utf-8-sig") as f:
-                        data = json.load(f)
+                    data = load_json_file(self.file_path, {})
                 except Exception:
                     pass
         # 兼容旧格式：支持从 messages 数据中加载 memories/profiles
@@ -53,10 +52,8 @@ class PrivateContextDB:
                 save_data = dict(self.data)
                 save_data["_memories"] = self._memories
                 save_data["_profiles"] = self._profiles
-                tmp = self.file_path + '.tmp'
-                with open(tmp, "w", encoding="utf-8") as f:
-                    json.dump(save_data, f, ensure_ascii=False, indent=2)
-                os.replace(tmp, self.file_path)
+                if not save_json_file(self.file_path, save_data):
+                    return False
             return True
         except Exception:
             return False
@@ -440,6 +437,14 @@ class PersonaManager:
         name = name or self.get_active_persona()
         return self.data.get("personas", {}).get(name, {})
 
+    def get_context_persona(self, context: str = "") -> str:
+        """Resolve a per-feature persona; missing mappings use the first persona."""
+        self._refresh_if_changed()
+        names = self.list_personas()
+        contexts = self.config.get("persona", {}).get("contexts", {}) if self.config else {}
+        selected = str(contexts.get(context) or "") if isinstance(contexts, dict) else ""
+        return selected if selected in names else (names[0] if names else "默认人格")
+
     def list_personas(self) -> list:
         return list(self.data.get("personas", {}).keys())
 
@@ -473,9 +478,10 @@ class PersonaManager:
         p = self.get_persona()
         return p.get("system_prompt", "")
 
-    def build_prompt_block(self) -> str:
+    def build_prompt_block(self, context: str = "") -> str:
         """构建用于 prompt 的人格描述块"""
-        p = self.get_persona()
+        persona_key = self.get_context_persona(context) if context else self.get_active_persona()
+        p = self.get_persona(persona_key)
         name = p.get("name", "")
         style = p.get("style", "")
         sp = str(p.get("system_prompt", "") or "").strip()
@@ -494,6 +500,10 @@ class PersonaManager:
         clean_rules = [str(rule).strip()[:500] for rule in rules if str(rule).strip()]
         if clean_rules:
             lines.append("【人格硬性规则】\n" + "\n".join(f"- {rule}" for rule in clean_rules[:30]))
+        from services.persona_evolution import PersonaEvolution
+        addition = PersonaEvolution(os.path.dirname(self.file_path)).prompt_block(persona_key, p)
+        if addition:
+            lines.append(addition)
         return "\n".join(lines)
 
     def build_relationship_block(self, user_id, user_name: str = "") -> str:
@@ -563,9 +573,13 @@ class MoodManager:
         }
 
     def get_current(self) -> str:
+        if not self.config.get("mood", {}).get("enabled", True):
+            return "平静"
         return self.data.get("current", "平静")
 
     def set_mood(self, mood: str):
+        if not self.config.get("mood", {}).get("enabled", True):
+            return False
         if mood in self.ALL_MOODS:
             self.data["current"] = mood
             self.data.setdefault("history", []).append({
@@ -599,6 +613,8 @@ class MoodManager:
 
     def build_prompt_block(self) -> str:
         """构建用于 prompt 的心情描述块"""
+        if not self.config.get("mood", {}).get("enabled", True):
+            return ""
         mood = self.get_current()
         modifier = self.get_style_modifier()
         return f"【当前心情】{mood}\n语气修饰: {modifier}"
@@ -607,6 +623,8 @@ class MoodManager:
         """根据事件偏移心情值。delta 为整数，正=上扬，负=下滑。
         心情按 ALL_MOODS 顺序从 0~12 编号，delta 会被 volatility 缩放。
         """
+        if not self.config.get("mood", {}).get("enabled", True):
+            return False
         mood = self.get_current()
         try:
             idx = self.ALL_MOODS.index(mood)
@@ -715,7 +733,8 @@ class BotDiaryManager:
         self.data = self._normalize_data(self._load())
 
     def _load(self):
-        return load_json_file(BOT_DIARY_FILE, {"entries": []})
+        from services import diary_store
+        return diary_store.read(self.file_path)
 
     @staticmethod
     def _normalize_data(data):
@@ -741,24 +760,14 @@ class BotDiaryManager:
         """Persist a diary entry with enough metadata for both CLI and web views."""
         if not content:
             content, title = str(title or ""), "日记记录"
-        mood = mood if isinstance(mood, dict) else {}
-        entries = self.data.setdefault("entries", [])
-        entry = {
-            "id": f"diary-{int(time.time() * 1000)}-{len(entries) + 1}",
-            "title": str(title or "日记记录")[:120],
-            "content": str(content).strip(),
-            "time": datetime.now().isoformat(),
-            "type": entry_type or source,
-            "source": source,
-            "tags": [str(tag)[:40] for tag in (tags or []) if str(tag).strip()][:12],
-            "mood": mood.get("mood", ""),
-            "energy": mood.get("energy", ""),
-        }
-        entries.append(entry)
-        self._save()
+        from services import diary_store
+        entry = diary_store.add(self.file_path, title, content, mood=mood,
+            tags=tags, source=source, entry_type=entry_type)
+        self.recheck()
         return entry
 
     def get_entries(self, limit: int = 20, entry_type: str = None) -> list:
+        self.recheck()
         entries = self.data.get("entries", [])
         if entry_type:
             entries = [e for e in entries if e.get("type") == entry_type]
@@ -812,7 +821,7 @@ class BotDiaryManager:
         api_key = api_cfg.get("unified_api_key") or api_cfg.get("api_key")
         base_url = api_cfg.get("unified_base_url") or api_cfg.get("base_url")
         model = api_cfg.get("model_brain") or api_cfg.get("model")
-        if api_key and base_url and model:
+        if self._cfg.get("api_pool", {}).get("enabled") or (api_key and base_url and model):
             event_text = "\n".join(local_content.splitlines()[1:])
             prompt = (
                 "根据以下机器人运行事件写一篇简洁、可追溯的第一人称工作日记。"
@@ -825,7 +834,7 @@ class BotDiaryManager:
             try:
                 from services._services_ai import call_ai
                 ai_content = await call_ai(
-                    [{"role": "user", "content": prompt}], model=model,
+                    [{"role": "user", "content": prompt}], model=model or "",
                     temperature=0.4, max_tokens=700, timeout=90, verbose=False,
                 )
                 if ai_content and ai_content.strip():
@@ -895,75 +904,10 @@ class SelfEvolutionManager:
         Returns:
             dict with keys: id, parsed{reflection, style_delta, relationship_delta, new_rule, mood_delta}
         """
-        import re as _re
-        
-        api_cfg = self._cfg.get("api", {})
-        base_url = api_cfg.get("unified_base_url") or api_cfg.get("base_url", "")
-        api_key = api_cfg.get("unified_api_key") or api_cfg.get("api_key", "")
-        model = api_cfg.get("model_brain", "")
-        
-        if not base_url or not api_key:
-            return {"id": len(self.data.get("items", [])), "parsed": {}, "raw": "API未配置"}
-        
-        # 构建事件摘要
-        events_text = ""
-        for i, evt in enumerate(session_events[-20:]):
-            if isinstance(evt, dict):
-                events_text += f"- {evt.get('type','event')}: {str(evt.get('summary',evt.get('text','')))[:200]}\n"
-            else:
-                events_text += f"- {str(evt)[:200]}\n"
-        
-        diary_text = ""
-        if diary_entries:
-            for d in diary_entries[-5:]:
-                diary_text += f"- {str(d.get('content', d))[:200]}\n"
-        
-        prompt = (
-            "你是一个AI角色的成长记录员。根据最近的互动和行为日志，对角色人格进行温和可控的微调建议。\n"
-            "只输出严格JSON，字段：reflection(反思), style_delta(风格调整建议), "
-            "relationship_delta(关系边界调整), new_rule(新增约束), mood_delta(心情变化值,-2到+2)。\n"
-            f"当前人格：{persona_prompt}\n当前心情：{current_mood}\n"
-            f"---\n最近互动记录：\n{events_text}\n"
-            f"---\n近期日记：\n{diary_text}\n"
-            "请分析趋势并给出建议JSON："
-        )
-        
-        try:
-            from services._services_ai import call_ai
-            raw = await call_ai(
-                messages=[
-                    {"role": "system", "content": "你是角色成长记录员，只提出温和、可控的性格演化建议。只输出JSON。"},
-                    {"role": "user", "content": prompt}
-                ],
-                model=model,
-                timeout=60,
-                temperature=0.5,
-                max_tokens=600,
-                verbose=False,
-            )
-            raw = raw.strip()
-            # 尝试提取 JSON
-            raw = raw.strip()
-            if raw.startswith("```"):
-                raw = _re.sub(r'^```\w*\n?', '', raw)
-                raw = _re.sub(r'\n?```$', '', raw)
-            parsed = json.loads(raw) if raw else {}
-            
-            item = {
-                "id": len(self.data.get("items", [])),
-                "category": "auto_reflect",
-                "suggestion": parsed.get("reflection", ""),
-                "parsed": parsed,
-                "raw": raw,
-                "time": datetime.now().isoformat(),
-                "status": "pending"
-            }
-            self.data.setdefault("items", []).append(item)
-            self._save()
-            return item
-        except Exception as e:
-            from utils.display import log
-            log(f"[EVOLVE] 自我进化反思失败: {e}", "WARN")
-            return {"id": len(self.data.get("items", [])), "parsed": {
-                "reflection": f"反思失败: {e}", "style_delta": "", "relationship_delta": "", "new_rule": "", "mood_delta": 0
-            }, "raw": str(e)}
+        from services.evolution_engine import EvolutionEngine
+        from services.evolution_settings import settings
+        preferences = settings(self._cfg)
+        result = await EvolutionEngine().generate("parameters", preferences, manual=True)
+        if not result.get("ok"):
+            return {"parsed": {}, "raw": result.get("message", "未生成提案"), "status": result.get("status")}
+        return {"id": result["proposal_id"], "parsed": {}, "raw": "已保存结构化提案，请在AI进化分区审核", "status": "pending"}

@@ -56,3 +56,19 @@ def test_response_text_accepts_reasoning_content_gateway_shape():
     message = SimpleNamespace(content="", reasoning_content='{"score": 7}')
     response = SimpleNamespace(choices=[SimpleNamespace(message=message)])
     assert response_text(response) == '{"score": 7}'
+
+
+def test_explicit_learn_and_like_decisions_are_normalized_independently():
+    raw = '{"score":9,"like_intention":"false","should_learn":false,"learning_topic":"不应归档","fav_intention":true}'
+    decision, fallback = parse_video_decision(raw, **FALLBACK_CONTEXT)
+    assert not fallback
+    assert decision["like_intention"] is False
+    assert decision["learn_intention"] is False
+    assert decision["learning_topic"] == ""
+    assert decision["fav_intention"] is True
+
+
+def test_legacy_decisions_do_not_invent_explicit_like_or_learn_intent():
+    decision, fallback = parse_video_decision('{"score":7,"learning_topic":"基础"}', **FALLBACK_CONTEXT)
+    assert "like_intention" not in decision
+    assert "learn_intention" not in decision

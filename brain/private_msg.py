@@ -168,10 +168,9 @@ class PrivateMessageManager:
             merged_ids.update(self.processed_msg_ids)
             self.processed_msg_ids = merged_ids
             self.log_data["processed_msg_ids"] = sorted(merged_ids)
-            tmp = PRIVATE_MESSAGE_LOG_FILE + '.tmp'
-            with open(tmp, 'w', encoding='utf-8') as f:
-                json.dump(self.log_data, f, ensure_ascii=False, indent=2)
-            os.replace(tmp, PRIVATE_MESSAGE_LOG_FILE)
+            from utils.storage import JsonStore
+            if not JsonStore(PRIVATE_MESSAGE_LOG_FILE).write(self.log_data):
+                raise OSError("账号数据库保存失败")
         except Exception as e:
             log(f"保存私信日志失败: {e}", "WARN")
         finally:
@@ -1070,6 +1069,8 @@ UID: {message_data.get('talker_id')}
             return 75.0
 
     async def send_reply(self, receiver_id, reply, audit_payload=None, remember_outbound=True):
+        from services.action_permissions import require
+        require('private_reply')
         from services.like_review import ActionReviewInbox, requires_review
         # Review settings are editable while the monitor is running. Do not
         # consult this module's startup-time config snapshot here.

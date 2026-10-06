@@ -77,16 +77,16 @@ _CONFIG_PATHS = {
     "PER_VIDEO_CHECK_COOLDOWN":           (("per_video_check", "cooldown_seconds"), 10),
 
     # 日记
-    "DIARY_ENABLED":              (("diary", "enabled"), False),
-    "DIARY_AUTO_ENABLED":         (("diary", "auto_enabled"), False),
-    "DIARY_AUTO_INTERVAL_MINUTES":(("diary", "auto_interval_minutes"), 60),
-    "DIARY_MIN_EVENTS_FOR_AUTO":  (("diary", "min_events_for_auto"), 3),
+    "DIARY_ENABLED":              (("diary", "enabled"), True),
+    "DIARY_AUTO_ENABLED":         (("diary", "auto_enabled"), True),
+    "DIARY_AUTO_INTERVAL_MINUTES":(("diary", "auto_interval_minutes"), 1440),
+    "DIARY_MIN_EVENTS_FOR_AUTO":  (("diary", "min_events_for_auto"), 1),
 
     # 自我进化
     "EVOLUTION_ENABLED":                  (("self_evolution", "enabled"), False),
     "EVOLUTION_AUTO_ENABLED":             (("self_evolution", "auto_enabled"), False),
     "EVOLUTION_AUTO_APPLY":               (("self_evolution", "auto_apply"), False),
-    "EVOLUTION_REFLECT_INTERVAL_EVENTS":  (("self_evolution", "reflect_interval_events"), 8),
+    "EVOLUTION_REFLECT_INTERVAL_EVENTS":  (("self_evolution", "reflect_interval_events"), 100),
     "EVOLUTION_MIN_EVENTS_FOR_REFLECT":   (("self_evolution", "min_events_for_reflect"), 3),
 
     # Agent
@@ -208,7 +208,7 @@ _CONFIG_PATHS = {
     "SESSION_MAX_DURATION_MINUTES":(("session", "max_duration_minutes"), 0),
 
     # 复习回顾
-    "REVISIT_ENABLED":                    (("revisit", "enabled"), True),
+    "REVISIT_ENABLED":                    (("revisit", "enabled"), False),
     "PROB_REVISIT":                       (("revisit", "prob_revisit"), 0.25),
     "REVISIT_COOLDOWN_MINUTES":           (("revisit", "revisit_cooldown_minutes"), 15),
     "REVISIT_MIN_SCORE":                  (("revisit", "min_score"), 7.5),

@@ -15,6 +15,10 @@ from urllib.parse import parse_qs, quote, urlsplit
 from http.cookiejar import CookieJar
 from urllib.request import HTTPCookieProcessor, Request, build_opener, urlopen
 
+if __name__ == '__main__' and not os.getenv('BILI_ACCOUNT_ID'):
+    from core.account_workspaces import configure_default_account
+    configure_default_account()
+
 # ── 线程安全 JSON 工具 ──
 from utils.storage import JsonStore, sanitize_config_for_export, is_safe_path, get_backup_dir, strip_hidden_placeholders
 from utils.bili_compat import patch_bili_api_headers as _patch_bili_headers
@@ -120,6 +124,8 @@ except OSError:
     APP_VERSION = "dev"
 
 app = Flask(__name__, static_folder=None)
+if os.getenv('BILI_ACCOUNT_ID'):
+    app.config['SESSION_COOKIE_NAME'] = 'bililearn_' + os.environ['BILI_ACCOUNT_ID']
 
 # ── 密码哈希（SHA-256 + salt，不引入额外依赖） ──
 def _hash_password(password: str) -> str:
@@ -404,7 +410,7 @@ async def _poll_qr_login_event(qr):
     return await Api(credential=Credential(), **event_api).update_params(qrcode_key=qr_key).result
 
 def log_line(msg: str):
-    ts = datetime.now().strftime("%H:%M:%S")
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     line = f"[{ts}] {redact_sensitive_text(msg)}"
     with bot_output_lock:
         bot_output_lines.append(line)
@@ -506,7 +512,30 @@ def read_json(path: Path, default=None):
 
 def write_json(path: Path, data):
     """线程安全写入 JSON（原子写临时文件再 rename）。"""
+    if Path(path).resolve() == Path(CONFIG_FILE).resolve():
+        from core.config_schema import validate_config
+        from core.config import DEFAULT_CONFIG
+        try:
+            validate_config(data, DEFAULT_CONFIG)
+        except (ValueError, TypeError) as error:
+            log_line(f'配置校验未通过，未写入: {error}')
+            return False
     return JsonStore(path).write(data)
+
+def _ensure_default_panel_account() -> bool:
+    """Seed the requested local-only account without replacing an existing one."""
+    config = read_json(CONFIG_FILE, {})
+    web_cfg = config.setdefault("web", {})
+    if web_cfg.get("username") and web_cfg.get("password"):
+        return False
+    web_cfg.update({
+        "username": "yaya",
+        "password": _hash_password("yaya"),
+        "onboarding_state": "pending",
+        "default_credentials": True,
+        "password_change_recommended": True,
+    })
+    return bool(write_json(CONFIG_FILE, config))
 
 def file_stat(path: Path):
     if not path.exists(): return {"exists": False, "size": 0, "mtime": None, "size_fmt": "0 B"}
@@ -1945,6 +1974,7 @@ a:hover{color:var(--purple)}
 <button class="ni" data-pg="monitor" onclick="nav('monitor',this)"><span class="ic"></span>实时监听<span class="bd" id="monitorBadge">●</span></button>
 <button class="ni" data-pg="login" onclick="nav('login',this)"><span class="ic"></span>B站登录<span class="bd" id="loginBadge">●</span></button>
 <div class="ns">系统配置</div>
+<button class="ni" data-pg="accounts" onclick="nav('accounts',this)"><span class="ic"><i data-lucide="users-round"></i></span>账号管理</button>
 <button class="ni" data-pg="conf" onclick="nav('conf',this)"><span class="ic"></span>配置编辑</button>
 <button class="ni" data-pg="psna" onclick="nav('psna',this)"><span class="ic"></span>人格管理</button>
 <button class="ni" data-pg="mood" onclick="nav('mood',this)"><span class="ic"></span>心情管理</button>
@@ -2085,6 +2115,11 @@ a:hover{color:var(--purple)}
 </div>
 
 <!-- CONFIG -->
+<div class="page" id="pg-accounts">
+<div class="ph"><h1>账号管理</h1><p>最多 10 个账号 · 独立端口、配置与数据</p></div>
+<div class="pc"><p id="accountsContext" role="status">进入分区后自动识别当前账号。</p><a class="btn btn-out" id="accountsStandalone" href="/accounts" target="_blank" rel="noopener" hidden>在独立窗口打开管理页</a><a class="btn btn-pr" id="accountsPrimary" target="_blank" rel="noopener" hidden>打开主账号管理面板</a><button class="btn btn-out" onclick="rf_accounts()">重新加载</button></div>
+<iframe id="accountsFrame" title="独立账号管理工作区" style="width:100%;height:760px;border:1px solid var(--border);border-radius:12px;background:var(--bg-primary)" hidden></iframe>
+</div>
 <div class="page" id="pg-conf">
 <div class="ph"><h1>配置编辑</h1><p>用户数据目录 / config.json</p></div>
 <!-- 可视化快捷配置 -->
@@ -2395,6 +2430,15 @@ a:hover{color:var(--purple)}
 
 <script>
 // ── NAV ──
+async function rf_accounts(){
+var info=document.getElementById('accountsContext'),frame=document.getElementById('accountsFrame'),standalone=document.getElementById('accountsStandalone'),primary=document.getElementById('accountsPrimary');
+info.textContent='正在识别账号工作空间…';frame.hidden=true;standalone.hidden=true;primary.hidden=true;
+try{
+var result=await api('GET','/api/accounts/context');if(!result||!result.ok)throw Error(result&&result.message||'读取账号信息失败，请重新登录或重启面板');
+if(result.is_primary){info.textContent='当前为主账号，可在下方直接添加和管理账号。每个账号仍需分别设置 AI、登录 B 站并启动机器人。';standalone.hidden=false;frame.src='/accounts?embedded=1';frame.hidden=false;}
+else{info.textContent='当前为副账号 '+(result.current_account_id||'未初始化')+'，只能修改自己的配置。请打开主账号面板管理全部账号，原面板不会被关闭。';var target=new URL(location.href);target.port=String(result.primary_port);target.pathname='/';target.search='';target.hash='accounts';primary.href=target.href;primary.hidden=false;frame.removeAttribute('src');}
+}catch(error){info.textContent='无法加载账号管理：'+error.message;frame.removeAttribute('src');}
+}
 function nav(p,el){
 document.querySelectorAll('.page').forEach(x=>x.classList.remove('on'));
 document.querySelectorAll('.ni').forEach(x=>x.classList.remove('ac'));
@@ -2724,6 +2768,7 @@ document.getElementById('cqModelVision').value=p.vision||'';
 toast('已填入预设: '+(p.name||key),'ok');
 }catch(e){toast('读取预设失败: '+e.message,'err')}
 }
+function warnVisualFrameCost(value){if(Number(value)<1){alert('额度消耗警告！！！低于 1 秒一帧会显著增加多模态额度消耗。0.5 秒时，首分钟最多 120 帧，默认 4×3 拼图约 10 张；深入视频还会继续消耗额度。');}}
 async function loadConfQuick(){
 if(!_confData){var r=await api('GET','/api/config');_confData=r}
 var c=_confData;
@@ -2753,7 +2798,9 @@ h+='<div class="fg"><label>视频模式</label><select id="cqVideoMode"><option 
 h+='<div class="fg"><label>最大时长(秒)</label><input id="cqMaxDuration" type="number" value="'+((c.video?c.video.max_duration_seconds:0)||900)+'"></div>';
 h+='<div class="fg"><label>图文笔记模式</label><select id="cqNoteMode"><option value="visual_note"'+(c.video&&c.video.frame_note_mode!=='classic'?' selected':'')+'>图文学习笔记+目录</option><option value="classic"'+(c.video&&c.video.frame_note_mode=='classic'?' selected':'')+'>经典仅理解</option></select></div>';
 h+='<div class="fg"><label>候选视频数量</label><input id="cqCandidatePoolSize" type="number" min="5" max="100" value="'+((c.video?c.video.candidate_pool_size:0)||20)+'"></div>';
-  h+='<div class="fr"><div class="fg"><label>图文抽帧间隔(秒)</label><input id="cqVisualNoteInterval" type="number" min="1" max="60" value="'+((c.video?c.video.visual_note_frame_interval:0)||6)+'"></div><div class="fg"><label>图文最多抽帧数</label><input id="cqVisualNoteMaxFrames" type="number" min="9" max="360" value="'+((c.video?c.video.visual_note_max_frames:0)||240)+'"></div><div class="fg"><label>网格列数</label><input id="cqVisualNoteCols" type="number" min="1" max="4" value="'+((c.video?c.video.visual_note_grid_cols:0)||3)+'"></div><div class="fg"><label>网格行数</label><input id="cqVisualNoteRows" type="number" min="1" max="4" value="'+((c.video?c.video.visual_note_grid_rows:0)||3)+'"></div></div>';
+  h+='<div class="fr"><div class="fg"><label>图文抽帧间隔(秒)</label><input id="cqVisualNoteInterval" type="number" min="0.5" max="60" step="0.5" onchange="warnVisualFrameCost(this.value)" value="'+((c.video?c.video.visual_note_frame_interval:0)||5)+'"></div><div class="fg"><label>图文最多抽帧数</label><input id="cqVisualNoteMaxFrames" type="number" min="9" max="360" value="'+((c.video?c.video.visual_note_max_frames:0)||240)+'"></div><div class="fg"><label>网格列数</label><input id="cqVisualNoteCols" type="number" min="1" max="6" value="'+((c.video?c.video.visual_note_grid_cols:0)||4)+'"></div><div class="fg"><label>网格行数</label><input id="cqVisualNoteRows" type="number" min="1" max="6" value="'+((c.video?c.video.visual_note_grid_rows:0)||3)+'"></div></div>';
+h+='<p style="color:var(--text-muted);font-size:12px">默认字幕 → ASR → 视觉兜底；先读标题/封面/简介/评论，再预览前 60 秒。默认 5 秒一帧、4×3 拼图。匹配主题或兴趣才深入；低于 1 秒：额度消耗警告！！！最多抽帧数是每阶段预算，长视频会扩大采样间距覆盖全时段。</p>';
+h+='<div class="fr"><div class="fg"><label>场景切换优选</label><input id="cqVisualSceneDetection" type="checkbox" '+((!c.video||c.video.visual_note_scene_detection!==false)?'checked':'')+'></div><div class="fg"><label>场景阈值（0.05–0.9）</label><input id="cqVisualSceneThreshold" type="number" min="0.05" max="0.9" step="0.05" value="'+((c.video?c.video.visual_note_scene_threshold:0)||0.3)+'"></div></div>';
 h+='<div class="fg"><label>自定义笔记提示词</label><textarea id="cqVideoPrompt" style="width:100%;min-height:50px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:12px;padding:8px;font-family:inherit;resize:vertical" placeholder="如：更口语化、以表格形式输出、突出技术要点...">'+(c.video&&c.video.custom_video_prompt?c.video.custom_video_prompt:'')+'</textarea></div>';
 h+='</fieldset>';
 // 行为
@@ -2820,10 +2867,12 @@ c.video.mode=document.getElementById('cqVideoMode').value;
 c.video.max_duration_seconds=parseInt(document.getElementById('cqMaxDuration').value)||900;
 c.video.frame_note_mode=document.getElementById('cqNoteMode').value;
 c.video.candidate_pool_size=Math.min(100,Math.max(5,parseInt(document.getElementById('cqCandidatePoolSize').value)||20));
-  c.video.visual_note_frame_interval=Math.min(60,Math.max(1,parseInt(document.getElementById('cqVisualNoteInterval').value)||6));
+  c.video.visual_note_frame_interval=Math.min(60,Math.max(0.5,parseFloat(document.getElementById('cqVisualNoteInterval').value)||5));
+c.video.visual_note_scene_detection=document.getElementById('cqVisualSceneDetection').checked;
+c.video.visual_note_scene_threshold=Math.min(0.9,Math.max(0.05,parseFloat(document.getElementById('cqVisualSceneThreshold').value)||0.3));
   c.video.visual_note_max_frames=Math.min(360,Math.max(9,parseInt(document.getElementById('cqVisualNoteMaxFrames').value)||240));
-  c.video.visual_note_grid_cols=Math.min(4,Math.max(1,parseInt(document.getElementById('cqVisualNoteCols').value)||3));
-  c.video.visual_note_grid_rows=Math.min(4,Math.max(1,parseInt(document.getElementById('cqVisualNoteRows').value)||3));
+  c.video.visual_note_grid_cols=Math.min(6,Math.max(1,parseInt(document.getElementById('cqVisualNoteCols').value)||4));
+  c.video.visual_note_grid_rows=Math.min(6,Math.max(1,parseInt(document.getElementById('cqVisualNoteRows').value)||3));
 c.video.custom_video_prompt=(document.getElementById('cqVideoPrompt')||{}).value||'';
 // Behavior
 c.behavior=c.behavior||{};
@@ -3468,7 +3517,7 @@ if(msg){msg.textContent='已恢复默认';msg.style.color='var(--green)';setTime
 
 // ── INIT ──
 applyTheme();applyBg();
-rf_dash();auto();syncBotMode();
+if(location.hash==='#accounts')nav('accounts');else rf_dash();auto();syncBotMode();
 (async function(){try{var d=await api('GET','/api/info');document.getElementById('uptime').textContent=d.uptime}catch(e){}})();
 </script>
 </body>
@@ -3495,11 +3544,35 @@ def api_onboarding():
     web_cfg = config.setdefault('web', {})
     if request.method == 'GET':
         state = str(web_cfg.get('onboarding_state') or 'legacy')
+        experience = config.get('user_experience') if isinstance(config.get('user_experience'), dict) else {}
         # legacy（全新安装/升级上来从未见过教程）与 pending 都自动展开；
         # 用户明确 completed / skipped 后不再打扰。
-        return jsonify(ok=True, state=state, auto_show=(state not in {'completed', 'skipped'}))
+        payload = dict(ok=True, state=state, auto_show=(state not in {'completed', 'skipped'}))
+        if experience:
+            payload.update(learning_mode='learn_companion', topic=experience.get('topic', ''),
+                           learning_level=experience.get('level', 'foundation'))
+        return jsonify(payload)
 
     body = request.get_json(force=True, silent=True) or {}
+    if body.get('action') == 'configure':
+        mode = 'learn_companion'
+        topic = str(body.get('topic') or '').strip()
+        level = str(body.get('level') or 'foundation').strip()
+        config['user_experience'] = {'mode': mode, 'topic': topic[:160], 'level': level,
+                                     'configured_at': datetime.now().isoformat(timespec='seconds')}
+        web_cfg['onboarding_state'] = 'completed'
+        if not write_json(CONFIG_FILE, config):
+            return jsonify(ok=False, message='首次使用设置保存失败'), 500
+        goal = None
+        try:
+            if topic:
+                goal = _learning_loop().create_goal(topic, '', level, mode)
+                with _interest_engine_lock:
+                    _load_interest_engine().add_interest(topic, source='manual')
+                    _reset_interest_engine_cache()
+        except Exception as exc:
+            log_line(f'[ONBOARDING] 学习目标初始化失败: {redact_sensitive_text(str(exc))}')
+        return jsonify(ok=True, state='completed', auto_show=False, learning_mode=mode, goal=goal)
     state = str(body.get('state') or '').strip().lower()
     if state not in {'completed', 'skipped'}:
         return jsonify(ok=False, message='Invalid onboarding state'), 400
@@ -3507,6 +3580,277 @@ def api_onboarding():
     if not write_json(CONFIG_FILE, config):
         return jsonify(ok=False, message='Failed to save onboarding state'), 500
     return jsonify(ok=True, state=state, auto_show=False)
+
+
+@app.route('/api/user-experience', methods=['GET', 'POST'])
+def api_user_experience():
+    config = read_json(CONFIG_FILE, {})
+    current = config.get('user_experience') if isinstance(config.get('user_experience'), dict) else {}
+    if request.method == 'GET':
+        return jsonify(ok=True, mode='learn_companion',
+                       topic=current.get('topic', ''), level=current.get('level', 'foundation'))
+    body = request.get_json(silent=True) or {}
+    mode = 'learn_companion'
+    topic = str(body.get('topic') or '').strip()
+    level = str(body.get('level') or 'foundation').strip()
+    config['user_experience'] = {'mode': mode, 'topic': topic[:160], 'level': level,
+                                 'configured_at': datetime.now().isoformat(timespec='seconds')}
+    if not write_json(CONFIG_FILE, config):
+        return jsonify(ok=False, message='保存失败'), 500
+    return jsonify(ok=True, message='已固定为学习+陪伴；学习主题可选', **config['user_experience'])
+
+
+# ── Goal-driven learning loop (3.1.6) ──
+def _learning_loop():
+    from services.learning_loop import LearningLoopService
+    return LearningLoopService()
+
+
+@app.route('/api/learning-loop/summary')
+def api_learning_loop_summary():
+    try:
+        return jsonify(ok=True, **_learning_loop().summary(request.args.get('goal_id', '')))
+    except Exception as exc:
+        return jsonify(ok=False, message=redact_sensitive_text(str(exc))), 500
+
+
+@app.route('/api/learning-loop/goals', methods=['GET', 'POST'])
+def api_learning_loop_goals():
+    service = _learning_loop()
+    if request.method == 'GET':
+        return jsonify(ok=True, goals=service.list_goals())
+    body = request.get_json(force=True, silent=True) or {}
+    try:
+        goal = service.create_goal(body.get('topic', ''), body.get('objective', ''),
+                                   body.get('level', 'foundation'), 'learn_companion')
+        return jsonify(ok=True, goal=goal, summary=service.summary(goal['id']))
+    except (TypeError, ValueError) as exc:
+        return jsonify(ok=False, message=str(exc)), 400
+
+
+@app.route('/api/learning-loop/goals/<goal_id>/nodes', methods=['GET', 'POST'])
+def api_learning_loop_nodes(goal_id):
+    service = _learning_loop()
+    if request.method == 'GET':
+        return jsonify(ok=True, nodes=service.list_nodes(goal_id))
+    body = request.get_json(force=True, silent=True) or {}
+    try:
+        node = service.add_node(goal_id, body.get('title', ''), body.get('description', ''),
+                                body.get('parent_id'), body.get('source', 'user'), body.get('mastery', 0))
+        return jsonify(ok=True, node=node)
+    except (TypeError, ValueError) as exc:
+        return jsonify(ok=False, message=str(exc)), 400
+
+
+@app.route('/api/learning-loop/nodes/<node_id>/evidence', methods=['POST'])
+def api_learning_loop_evidence(node_id):
+    body = request.get_json(force=True, silent=True) or {}
+    try:
+        node = _learning_loop().record_evidence(node_id, body.get('score', 0), body.get('kind', 'assessment'),
+                                                body.get('weight', 1), body.get('detail', ''))
+        return jsonify(ok=True, node=node)
+    except (TypeError, ValueError) as exc:
+        return jsonify(ok=False, message=str(exc)), 400
+
+
+@app.route('/api/learning-loop/goals/<goal_id>/candidates', methods=['POST'])
+def api_learning_loop_candidate(goal_id):
+    body = request.get_json(force=True, silent=True) or {}
+    try:
+        item = _learning_loop().add_candidate(goal_id, body.get('bvid', ''), body.get('title', ''), body.get('node_id'),
+                                              body.get('score', 0), body.get('reason', ''), body.get('author', ''), body.get('url', ''), body.get('search_round_id'))
+        return jsonify(ok=True, candidate=item)
+    except (TypeError, ValueError) as exc:
+        return jsonify(ok=False, message=str(exc)), 400
+
+
+@app.route('/api/learning-loop/goals/<goal_id>/learning', methods=['POST'])
+def api_learning_loop_learning(goal_id):
+    body = request.get_json(force=True, silent=True) or {}
+    try:
+        item = _learning_loop().record_learning(goal_id, body.get('node_id'), body.get('bvid', ''), body.get('title', ''), body.get('note_path', ''), body.get('outcome', 'learned'))
+        return jsonify(ok=True, learning=item)
+    except (TypeError, ValueError) as exc:
+        return jsonify(ok=False, message=str(exc)), 400
+
+
+@app.route('/api/learning-loop/goals/<goal_id>/quiz', methods=['POST'])
+def api_learning_loop_quiz(goal_id):
+    body = request.get_json(force=True, silent=True) or {}
+    try:
+        result = _learning_loop().record_quiz(goal_id, body.get('node_id', ''), body.get('correct', 0), body.get('total', 1), body.get('mistakes', []))
+        return jsonify(ok=True, **result)
+    except (TypeError, ValueError) as exc:
+        return jsonify(ok=False, message=str(exc)), 400
+
+
+def _learning_candidate_score(video, goal, node):
+    """Transparent local ranking used before any optional AI reranking."""
+    import math
+    title = str(video.get('title') or '')
+    description = str(video.get('description') or '')
+    target = ' '.join((str(goal.get('topic') or ''), str((node or {}).get('title') or '')))
+    terms = set(re.findall(r'[A-Za-z][A-Za-z0-9_+.-]{1,}|[\u4e00-\u9fff]{2,6}', target.lower()))
+    haystack = (title + ' ' + description).lower()
+    overlap = sum(1 for term in terms if term in haystack)
+    play = video.get('play', 0)
+    try:
+        play = int(play)
+    except (TypeError, ValueError):
+        play = 0
+    duration = str(video.get('duration') or '')
+    duration_bonus = 0.5 if re.match(r'^(?:0?[6-9]|[1-5]\d):', duration) else 0
+    score = min(10.0, 4.0 + overlap * 1.15 + min(2.0, math.log10(max(1, play)) / 3) + duration_bonus)
+    reason = f'关键词命中 {overlap} 项；播放量 {play or "未知"}'
+    return round(score, 2), reason
+
+
+@app.route('/api/learning-loop/goals/<goal_id>/build-tree', methods=['POST'])
+def api_learning_loop_build_tree(goal_id):
+    service = _learning_loop()
+    goal = service.get_goal(goal_id)
+    if not goal:
+        return jsonify(ok=False, message='学习目标不存在'), 404
+    if service.list_nodes(goal_id):
+        return jsonify(ok=True, created=0, message='知识树已存在', summary=service.summary(goal_id))
+    titles = []
+    try:
+        from services._services_ai import call_ai
+        prompt = (
+            '你是学习规划器。针对下面目标输出 JSON 数组，只包含 5 到 8 个按先修顺序排列的知识点。'
+            '每项格式为 {"title":"简短名称","description":"需要掌握的可验证内容"}，不要输出 Markdown。\n'
+            f'主题：{goal["topic"]}\n目标层级：{goal["level"]}\n用户目标：{goal["objective"]}'
+        )
+        raw = asyncio.run(call_ai([{'role': 'user', 'content': prompt}], temperature=0.2, max_tokens=1800, verbose=False))
+        match = re.search(r'\[[\s\S]*\]', raw or '')
+        parsed = json.loads(match.group(0)) if match else []
+        if isinstance(parsed, list):
+            titles = [item for item in parsed if isinstance(item, dict) and str(item.get('title') or '').strip()][:8]
+    except Exception as exc:
+        log_line('[LEARNING] AI 知识树不可用，使用本地规划: ' + redact_sensitive_text(str(exc)))
+    if not titles:
+        topic = goal['topic']
+        titles = [
+            {'title': f'{topic} 基础概念', 'description': '理解核心术语、边界和使用场景'},
+            {'title': f'{topic} 环境与工具', 'description': '能够搭建环境并完成最小可运行示例'},
+            {'title': f'{topic} 核心方法', 'description': '掌握高频方法并解释其原理'},
+            {'title': f'{topic} 实战应用', 'description': '独立完成一个小型实践任务'},
+            {'title': f'{topic} 排错与复盘', 'description': '识别常见错误并总结改进方法'},
+        ]
+    for item in titles:
+        service.add_node(goal_id, item['title'], item.get('description', ''), source='ai_plan')
+    return jsonify(ok=True, created=len(titles), message=f'已建立 {len(titles)} 个知识点', summary=service.summary(goal_id))
+
+
+@app.route('/api/learning-loop/goals/<goal_id>/search', methods=['POST'])
+def api_learning_loop_search(goal_id):
+    service = _learning_loop()
+    goal = service.get_goal(goal_id)
+    if not goal:
+        return jsonify(ok=False, message='学习目标不存在'), 404
+    if goal.get('mode') == 'companion':
+        return jsonify(ok=False, message='纯陪伴模式不会自动搜索学习视频'), 400
+    body = request.get_json(silent=True) or {}
+    limit = max(3, min(20, int(body.get('limit') or 10)))
+    plan = service.next_plan(goal_id)
+    query = str(body.get('query') or (plan.get('search_queries') or [goal['topic']])[0]).strip()
+    node = plan.get('current_node')
+    search_round = service.start_search(goal_id, query, (node or {}).get('id'))
+    try:
+        from api.client import BiliClient
+        videos = asyncio.run(BiliClient().search_bilibili(query, limit=limit))
+        added = []
+        for video in videos or []:
+            bvid = str(video.get('bvid') or '').strip()
+            if not bvid:
+                continue
+            score, reason = _learning_candidate_score(video, goal, node)
+            added.append(service.add_candidate(
+                goal_id, bvid, video.get('title', ''), (node or {}).get('id'), score, reason,
+                video.get('author', ''), f'https://www.bilibili.com/video/{bvid}', search_round['id']))
+        service.finish_search(search_round['id'], 'completed')
+        return jsonify(ok=True, query=query, added=len(added), candidates=added,
+                       message=f'搜索完成，已筛选 {len(added)} 个候选视频', summary=service.summary(goal_id))
+    except Exception as exc:
+        service.finish_search(search_round['id'], 'failed')
+        return jsonify(ok=False, message='B 站搜索失败：' + redact_sensitive_text(str(exc))), 502
+
+
+@app.route('/api/learning-loop/goals/<goal_id>/cycle', methods=['POST'])
+def api_learning_loop_cycle(goal_id):
+    service = _learning_loop()
+    if not service.get_goal(goal_id):
+        return jsonify(ok=False, message='学习目标不存在'), 404
+    if not service.list_nodes(goal_id):
+        tree_response = api_learning_loop_build_tree(goal_id)
+        if isinstance(tree_response, tuple) or not tree_response.get_json().get('ok'):
+            return tree_response
+    return api_learning_loop_search(goal_id)
+
+
+@app.route('/api/persona-contexts', methods=['GET', 'POST'])
+def api_persona_contexts():
+    from core.config import load_config, save_config
+    from persona.managers import PersonaManager
+    config = load_config()
+    manager = PersonaManager(config)
+    names = manager.list_personas()
+    contexts = config.setdefault('persona', {}).setdefault('contexts', {})
+    supported = ['web_chat', 'agent', 'learning', 'comment', 'private_message', 'dynamic']
+    if request.method == 'POST':
+        body = request.get_json(force=True, silent=True) or {}
+        context = str(body.get('context') or '')
+        persona = str(body.get('persona') or '')
+        if context not in supported or persona not in names:
+            return jsonify(ok=False, message='分区或人格无效'), 400
+        contexts[context] = persona
+        if not save_config(config):
+            return jsonify(ok=False, message='人格分区设置保存失败'), 500
+    resolved = {key: (contexts.get(key) if contexts.get(key) in names else (names[0] if names else '')) for key in supported}
+    return jsonify(ok=True, personas=names, contexts=resolved, supported=supported)
+
+
+@app.route('/api/home-chat/conversations', methods=['GET', 'POST'])
+def api_home_chat_conversations():
+    from services.home_chat import create_conversation, list_conversations
+    if request.method == 'GET':
+        return jsonify(ok=True, conversations=list_conversations())
+    body = request.get_json(force=True, silent=True) or {}
+    mode = 'agent' if body.get('mode') == 'agent' else 'ai'
+    conv = create_conversation(str(body.get('title') or ''), mode, str(body.get('context_mode') or 'persistent'))
+    return jsonify(ok=True, conversation=conv)
+
+
+@app.route('/api/home-chat/conversations/<conv_id>', methods=['GET', 'PATCH', 'DELETE'])
+def api_home_chat_conversation(conv_id):
+    from services.home_chat import delete_conversation, get_conversation, rename_conversation
+    if request.method == 'DELETE':
+        return jsonify(ok=delete_conversation(conv_id))
+    if request.method == 'PATCH':
+        body = request.get_json(force=True, silent=True) or {}
+        ok = rename_conversation(conv_id, str(body.get('title') or ''))
+        return jsonify(ok=ok)
+    conv = get_conversation(conv_id)
+    return (jsonify(ok=True, conversation=conv) if conv else
+            (jsonify(ok=False, message='会话不存在'), 404))
+
+
+@app.route('/api/home-chat/send', methods=['POST'])
+def api_home_chat_send():
+    body = request.get_json(force=True, silent=True) or {}
+    message = str(body.get('message') or '').strip()
+    if not message:
+        return jsonify(ok=False, message='请输入消息'), 400
+    try:
+        import asyncio as _asyncio
+        from core.config import load_config
+        from services.home_chat import home_chat
+        mode = 'agent' if body.get('mode') == 'agent' else 'ai'
+        result = _asyncio.run(home_chat(message, mode=mode, cfg=load_config(), conv_id=body.get('conv_id'),
+                                        context_mode=body.get('context_mode') or 'persistent'))
+        return jsonify(result)
+    except Exception as exc:
+        return jsonify(ok=False, message=redact_sensitive_text(str(exc))), 500
 
 
 @app.route('/api/guide-status')
@@ -3534,8 +3878,7 @@ def api_guide_status():
     except Exception:
         steps['login'] = False
     try:
-        from services.utils import InterestManager
-        steps['interests'] = len(InterestManager().get_interests() or []) > 0
+        steps['interests'] = len(_load_interest_engine().get_keywords() or []) > 0
     except Exception:
         steps['interests'] = False
     try:
@@ -3569,6 +3912,15 @@ def api_guide_intro():
 
 # 项目图标（网页左上角 logo / favicon）—— 从仓库根目录的 image.png 提供
 _ICON_FILE = BASE_DIR / "app-icons" / "7de15f3bb6e5ac30291e48bc3f15e23f.png"
+
+
+@app.route('/assets/css/<path:filename>')
+def assets_css(filename):
+    safe = Path(filename).name
+    asset_file = BASE_DIR / 'assets' / 'css' / safe
+    if asset_file.is_file() and safe.endswith('.css'):
+        return Response(asset_file.read_bytes(), mimetype='text/css')
+    return Response(status=404)
 
 
 @app.route('/assets/js/<path:filename>')
@@ -3610,6 +3962,71 @@ def _has_valid_bili_cookies():
         return len(sessdata) >= 10 and len(bili_jct) >= 8 and uid.isdigit()
     except Exception:
         return False
+
+
+def _normalize_bili_cookie_input(raw) -> dict:
+    """Accept a browser Cookie header, a JSON object, or name/value lines."""
+    if isinstance(raw, dict):
+        pairs = raw.items()
+    else:
+        text = str(raw or "").replace("\r", "\n").replace(";", "\n")
+        pairs = []
+        for line in text.split("\n"):
+            if "=" in line:
+                name, value = line.split("=", 1)
+                pairs.append((name.strip(), value.strip()))
+    allowed = {"SESSDATA", "bili_jct", "DedeUserID", "buvid3", "buvid4", "sid"}
+    return {
+        str(key).strip(): str(value).strip()
+        for key, value in pairs
+        if str(key).strip() in allowed and str(value).strip()
+    }
+
+
+@app.route('/api/bili/cookie', methods=['POST'])
+def api_bili_cookie_import():
+    """Verify and import Bilibili browser credentials without exposing them."""
+    body = request.get_json(silent=True) or {}
+    cookies = _normalize_bili_cookie_input(body.get('cookie') or body.get('cookies') or body)
+    if not (len(cookies.get('SESSDATA', '')) >= 10 and len(cookies.get('bili_jct', '')) >= 8):
+        return jsonify(ok=False, message='Cookie 至少需要 SESSDATA 和 bili_jct'), 400
+    cookie_header = '; '.join(f'{key}={value}' for key, value in cookies.items())
+    try:
+        req = Request('https://api.bilibili.com/x/web-interface/nav', headers={
+            'User-Agent': 'Mozilla/5.0',
+            'Referer': 'https://www.bilibili.com/',
+            'Cookie': cookie_header,
+        })
+        with urlopen(req, timeout=10) as response:
+            payload = json.loads(response.read().decode('utf-8', errors='replace'))
+        data = payload.get('data') if isinstance(payload, dict) else {}
+        if not isinstance(data, dict) or not data.get('isLogin'):
+            return jsonify(ok=False, message='Cookie 已失效或未登录 B 站'), 401
+        uid = str(data.get('mid') or cookies.get('DedeUserID') or '')
+        if not uid.isdigit():
+            return jsonify(ok=False, message='B 站未返回有效的账号 UID'), 502
+        cookies['DedeUserID'] = uid
+        if not write_json(COOKIE_FILE, cookies):
+            return jsonify(ok=False, message='Cookie 保存失败，请检查数据目录权限'), 500
+        _clear_bili_profile_cache()
+        log_line(f'[LOGIN] 浏览器 Cookie 导入并验证成功 UID={uid}')
+        return jsonify(ok=True, message='Cookie 验证并导入成功', uid=uid,
+                       cookie_file=str(COOKIE_FILE))
+    except Exception as exc:
+        log_line(f'[LOGIN] 浏览器 Cookie 验证失败: {redact_sensitive_text(str(exc))}')
+        return jsonify(ok=False, message='Cookie 验证失败，请检查网络或 Cookie 是否过期'), 502
+
+
+@app.route('/api/bili/cookie', methods=['DELETE'])
+def api_bili_cookie_delete():
+    try:
+        if COOKIE_FILE.exists():
+            COOKIE_FILE.unlink()
+        _clear_bili_profile_cache()
+        log_line('[LOGIN] 浏览器 Cookie 已清除')
+        return jsonify(ok=True, message='已清除 B 站 Cookie')
+    except OSError as exc:
+        return jsonify(ok=False, message=redact_sensitive_text(str(exc))), 500
 
 
 def _clear_bili_profile_cache() -> None:
@@ -3683,7 +4100,7 @@ def api_check_update():
     pi = cfg.get("project_info", {}) if isinstance(cfg, dict) else {}
     _verf = Path(BASE_DIR) / "VERSION"
     _rver = _verf.read_text(encoding="utf-8", errors="replace").strip() if _verf.exists() else ""
-    current = str(_rver or pi.get('version') or getattr(sys, 'app_version', '') or APP_VERSION or '3.1.3')
+    current = str(_rver or pi.get('version') or getattr(sys, 'app_version', '') or APP_VERSION or '3.1.6')
     retries = int((cfg.get("update", {}) or {}).get("retry_count", 5) or 5) if isinstance(cfg, dict) else 5
     # 面板按需检查必须快速返回：最多 2 次尝试、单次 8 秒，
     # 避免 5×12s 长挂起导致浏览器中止请求（net::ERR_ABORTED）并阻塞面板其它接口。
@@ -3701,7 +4118,7 @@ def api_project_intro():
     html_doc = project_intro.read_text(encoding="utf-8", errors="replace")
     cfg = read_json(CONFIG_FILE, {})
     pi = cfg.get("project_info", {}) if isinstance(cfg, dict) else {}
-    version = str(getattr(sys, 'app_version', '') or pi.get('version') or APP_VERSION or '3.1.3')
+    version = str(getattr(sys, 'app_version', '') or pi.get('version') or APP_VERSION or '3.1.6')
     return jsonify(ok=True, html=html_doc, version=version)
 
 
@@ -3752,10 +4169,10 @@ def api_info():
 
     comment_mode = config.get('behavior', {}).get('comment_mode', 'real')
     ai_marker = config.get('behavior', {}).get('ai_marker', '')
-    safety_enabled = config.get('reply_safety', {}).get('enabled', False)
+    safety_enabled = config.get('reply_safety', {}).get('enabled', True)
     # These preview features are intentionally not exposed in public builds.
-    diary_enabled = False
-    evolution_enabled = False
+    diary_enabled = bool(config.get("diary", {}).get("enabled", True))
+    evolution_enabled = bool(config.get("self_evolution", {}).get("enabled", False))
     agent_enabled = config.get('agent', {}).get('enabled', False)
     pm_enabled = config.get('private_message', {}).get('enabled', False)
     notification_mode = config.get('standby', {}).get('notification_mode', True) if config.get('standby') else True
@@ -3818,19 +4235,212 @@ def api_info():
 
 @app.route('/api/interaction-switches', methods=['GET', 'POST'])
 def api_interaction_switches():
-    from core.config import config as _cfg, save_config
+    from core.config import load_config, save_config
+    _cfg = load_config()
     if request.method == 'GET':
         switches = _cfg.get("interaction", {})
-        defaults = {"enable_comment": True, "enable_reply_comment": True, "enable_reply_dm": True, "enable_active_dm": True, "enable_like": True, "enable_coin": True, "enable_favorite": True, "enable_follow": True, "enable_watch_later": True, "enable_owner_share": True, "enable_dynamic_draft": True, "enable_dynamic_publish": False, "enable_asr": False, "enable_monitor": False}
+        defaults = {"enable_comment": False, "enable_reply_comment": False, "enable_reply_dm": False, "enable_active_dm": False, "enable_like": False, "enable_coin": False, "enable_favorite": False, "enable_follow": False, "enable_watch_later": False, "enable_owner_share": False, "enable_dynamic_draft": True, "enable_dynamic_publish": False, "enable_monitor": False}
         result = {k: bool(switches.get(k, defaults[k])) for k in defaults}
+        result["enable_asr"] = bool(_cfg.get("asr", {}).get("enabled", False))
+        result["subtitles_enabled"] = bool(_cfg.get("subtitles", {}).get("enabled", True))
+        from services.action_permissions import allowed
+        from services.permission_routes import LEGACY_ACTIONS
+        result.update({key: allowed(action, _cfg) for key, action in LEGACY_ACTIONS.items()})
         return jsonify(ok=True, switches=result)
-    else:
+    body = request.get_json(silent=True)
+    from services.permission_routes import LEGACY_ACTIONS
+    keys = set(LEGACY_ACTIONS) | {'enable_asr', 'subtitles_enabled', 'enable_monitor'}
+    if not isinstance(body, dict) or set(body) - keys or any(type(value) is not bool for value in body.values()):
+        return jsonify(ok=False, message='开关必须是已知名称和布尔值'), 400
+    if set(body) & set(LEGACY_ACTIONS):
+        return jsonify(ok=False, message='平台操作权限请从 AI API 权限分区设置'), 409
+    if 'enable_asr' in body:
+        _cfg.setdefault('asr', {})['enabled'] = body['enable_asr']
+    if 'subtitles_enabled' in body:
+        _cfg.setdefault('subtitles', {})['enabled'] = body['subtitles_enabled']
+    if 'enable_monitor' in body:
+        _cfg.setdefault('interaction', {})['enable_monitor'] = body['enable_monitor']
+    if not save_config(_cfg):
+        return jsonify(ok=False, message='保存失败'), 500
+    return jsonify(ok=True, switches=body)
+
+
+@app.route('/api/ai-permissions', methods=['GET', 'POST'])
+def api_ai_permissions():
+    from core.config import load_config, save_config
+    _cfg = load_config()
+    from services.action_permissions import ACTIONS, settings as permission_settings
+    if request.method == 'GET':
+        current = permission_settings(_cfg)
+        return jsonify(ok=True, enabled=current['enabled'], actions=current['actions'],
+                       definitions={key: {'label': value[0], 'scope': value[1], 'safe_default': value[2]} for key, value in ACTIONS.items()})
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or set(body) - {'enabled', 'actions'}:
+        return jsonify(ok=False, message='请求必须是对象'), 400
+    if 'enabled' in body and type(body['enabled']) is not bool:
+        return jsonify(ok=False, message='enabled 必须是布尔值'), 400
+    actions = body.get('actions', {})
+    if not isinstance(actions, dict) or set(actions) - set(ACTIONS) or any(type(value) is not bool for value in actions.values()):
+        return jsonify(ok=False, message='actions 必须是已知权限到布尔值的映射'), 400
+    _cfg.setdefault('ai_permissions', {})
+    if 'enabled' in body: _cfg['ai_permissions']['enabled'] = body['enabled']
+    _cfg['ai_permissions'].setdefault('actions', {})
+    _cfg['ai_permissions']['actions'].update(actions)
+    if not save_config(_cfg):
+        return jsonify(ok=False, message='权限配置保存失败'), 500
+    current = permission_settings(_cfg)
+    return jsonify(ok=True, enabled=current['enabled'], actions=current['actions'])
+
+
+@app.route('/api/watch-queue', methods=['GET', 'POST', 'DELETE'])
+def api_video_watch_queue():
+    from services.video_watch_queue import VideoWatchQueue, settings
+    from core.config import load_config
+    try:
+        queue = VideoWatchQueue(Path(DATA_DIR) / 'video_watch_queue.sqlite3')
+        if request.method == 'GET':
+            page = max(1, int(request.args.get('history_page', 1)))
+            page_size = max(1, min(100, int(request.args.get('history_size', 20))))
+            snapshot = queue.snapshot(history_limit=page_size, history_offset=(page - 1) * page_size)
+            for row in snapshot['items']:
+                row['error'] = redact_sensitive_text(row.get('error', ''))
+            return jsonify(ok=True, **snapshot, settings=settings(load_config()), history_page=page, history_size=page_size)
         body = request.get_json(silent=True) or {}
-        if "interaction" not in _cfg: _cfg["interaction"] = {}
-        for key in ["enable_comment", "enable_reply_comment", "enable_reply_dm", "enable_active_dm", "enable_like", "enable_coin", "enable_favorite", "enable_follow", "enable_watch_later", "enable_owner_share", "enable_dynamic_draft", "enable_dynamic_publish", "enable_asr", "enable_monitor"]:
-            if key in body: _cfg["interaction"][key] = bool(body[key])
-        save_config(_cfg)
-        return jsonify(ok=True, switches=_cfg["interaction"])
+        if not isinstance(body, dict):
+            return jsonify(ok=False, message='请求必须是对象'), 400
+        bvid = str(body.get('bvid') or '').strip()
+        if not re.fullmatch(r'BV[0-9A-Za-z]{8,20}', bvid):
+            return jsonify(ok=False, message='请输入有效 BV 号'), 400
+        if request.method == 'DELETE':
+            if body.get('confirmed') is not True:
+                return jsonify(ok=False, message='移除本地队列需要确认'), 400
+            queue.remove(bvid)
+        elif body.get('action') == 'retry':
+            queue.retry(bvid)
+        elif body.get('action') == 'restore':
+            queue.restore(bvid)
+        elif body.get('action') == 'prioritize':
+            queue.prioritize(bvid)
+        elif body.get('action') in (None, 'add'):
+            preferences = settings(load_config())
+            added = queue.enqueue([{'bvid': bvid, 'title': str(body.get('title') or bvid)[:200], '_source': 'manual_queue'}], preferences)
+            if not added:
+                return jsonify(ok=False, message='视频已在队列或去重记录中，可从历史重新加入'), 409
+        else:
+            return jsonify(ok=False, message='未知队列操作'), 400
+        return jsonify(ok=True, message='本地观看队列已更新')
+    except (ValueError, TypeError) as error:
+        return jsonify(ok=False, message=str(error)), 400
+    except Exception as error:
+        return jsonify(ok=False, message=redact_sensitive_text(str(error))), 500
+
+
+@app.route('/api/video-review', methods=['GET'])
+def api_video_review():
+    from services.video_review import VideoReview, settings, in_schedule
+    try:
+        preferences = settings()
+        review = VideoReview(DATA_DIR)
+        candidates = review.candidates(preferences)
+        return jsonify(ok=True, settings=preferences, candidates=candidates[:100], candidate_total=len(candidates), history=review.snapshot(), in_schedule=in_schedule(preferences, datetime.now()), automatic=preferences['enabled'] and preferences['rules_confirmed'])
+    except (ValueError, TypeError) as error:
+        return jsonify(ok=False, message=str(error)), 400
+    except Exception as error:
+        return jsonify(ok=False, message=redact_sensitive_text(str(error))), 500
+
+
+@app.route('/api/video-review/settings', methods=['POST'])
+def api_video_review_settings():
+    from services.video_review import settings, validate_settings
+    from core.config import load_config, save_config
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify(ok=False, message='设置必须为对象'), 400
+    try:
+        config_data = load_config()
+        preferences = settings(config_data)
+        preferences.update(body)
+        preferences['rules_confirmed'] = True
+        config_data['revisit'] = validate_settings(preferences)
+    except ValueError as error:
+        return jsonify(ok=False, message=str(error)), 400
+    if not save_config(config_data):
+        return jsonify(ok=False, message='复习设置保存失败'), 500
+    import core.config as core_config
+    core_config.config.clear()
+    core_config.config.update(load_config())
+    return jsonify(ok=True, message='复习规则已保存，下一个视频生效', settings=config_data['revisit'])
+
+
+@app.route('/api/video-review/run', methods=['POST'])
+def api_video_review_run():
+    from services.video_review import VideoReview, settings
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or body.get('confirmed') is not True:
+        return jsonify(ok=False, message='手动复习需明确确认'), 400
+    bvid = body.get('bvid')
+    if bvid is not None and (not isinstance(bvid, str) or not re.fullmatch(r'BV[0-9A-Za-z]{8,20}', bvid)):
+        return jsonify(ok=False, message='BV号无效'), 400
+    try:
+        task_id = VideoReview(DATA_DIR).reserve(settings(), manual=True, bvid=bvid)
+        if not task_id:
+            return jsonify(ok=False, message='无符合规则的视频或已达每日任务上限'), 409
+        return jsonify(ok=True, task_id=task_id, message='单次复习已保存；机器人运行后，在观看队列完成后执行，不开启自动复习')
+    except ValueError as error:
+        return jsonify(ok=False, message=str(error)), 409
+    except Exception as error:
+        return jsonify(ok=False, message=redact_sensitive_text(str(error))), 500
+
+
+@app.route('/api/video-review/cancel', methods=['POST'])
+def api_video_review_cancel():
+    from services.video_review import VideoReview
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or type(body.get('task_id')) is not int or body.get('confirmed') is not True:
+        return jsonify(ok=False, message='取消任务需提供任务编号并确认'), 400
+    try:
+        VideoReview(DATA_DIR).cancel(body['task_id'])
+        return jsonify(ok=True, message='已取消待执行复习')
+    except ValueError as error:
+        return jsonify(ok=False, message=str(error)), 409
+
+
+@app.route('/api/watch-queue/settings', methods=['GET', 'POST'])
+def api_video_watch_queue_settings():
+    from services.video_watch_queue import settings, validate_settings
+    from core.config import load_config, save_config
+    config_data = load_config()
+    if request.method == 'GET':
+        return jsonify(ok=True, settings=settings(config_data))
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify(ok=False, message='设置必须是对象'), 400
+    try:
+        preferences = settings(config_data)
+        preferences.update(body)
+        config_data['watch_queue'] = validate_settings(preferences)
+    except ValueError as error:
+        return jsonify(ok=False, message=str(error)), 400
+    if not save_config(config_data):
+        return jsonify(ok=False, message='设置保存失败'), 500
+    import core.config as core_config
+    core_config.config.clear()
+    core_config.config.update(load_config())
+    return jsonify(ok=True, settings=config_data['watch_queue'], message='观看队列设置已保存，下一个视频生效')
+
+
+@app.route('/api/watch-queue/history', methods=['DELETE'])
+def api_video_watch_queue_history():
+    from services.video_watch_queue import VideoWatchQueue
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict) or body.get('confirmed') is not True:
+        return jsonify(ok=False, message='清除需要确认'), 400
+    queue = VideoWatchQueue(Path(DATA_DIR) / 'video_watch_queue.sqlite3')
+    if body.get('reset_seen') is True:
+        queue.clear_seen()
+    else:
+        queue.clear_history()
+    return jsonify(ok=True, message='已清除去重记录' if body.get('reset_seen') else '已清除队列观看历史')
 
 
 @app.route('/api/watch-later', methods=['GET', 'POST', 'DELETE'])
@@ -4109,7 +4719,19 @@ def api_config():
         current = load_config()
         # 防 '[已隐藏]' 占位符通过保存写回真实配置（有现有值保留，无则删字段）
         from utils.storage import strip_hidden_placeholders
+        if "api_pool" in data:
+            from services.ai_pool import merge_secret_endpoints, validate_settings
+            incoming_pool = merge_secret_endpoints(data["api_pool"], current.get("api_pool", {}))
+            pool_value = dict(current.get("api_pool", {}), **incoming_pool)
+            data["api_pool"] = validate_settings(pool_value)
         data = strip_hidden_placeholders(data, current)
+        if 'direct_video' in data:
+            from services.direct_video import settings as video_settings
+            native = video_settings(data['direct_video'])
+            previous = video_settings(current.get('direct_video', {}))
+            if native['enabled'] and native != previous:
+                return jsonify(ok=False, message='启用或修改视频投喂请使用视频直传设置区完成隐私与额度确认'), 400
+            data['direct_video'] = native
         _deep_merge_config(current, data)
         ok = save_config(current)
         if ok:
@@ -4119,6 +4741,72 @@ def api_config():
         return jsonify(dict(ok=ok, message='配置已保存' if ok else '保存失败'))
     except Exception as e:
         return jsonify(dict(ok=False, message=redact_sensitive_text(str(e)))), 400
+
+
+@app.route('/api/ai-pool', methods=['GET', 'POST'])
+def api_ai_pool():
+    from core.config import load_config, save_config
+    from services.ai_pool import settings, validate_settings, merge_secret_endpoints, public_settings, EndpointPool, endpoints_for
+    try:
+        config_data = load_config()
+        preferences = settings(config_data)
+        if request.method == 'POST':
+            body = request.get_json(silent=True)
+            if not isinstance(body, dict):
+                raise ValueError('接口池设置必须为对象')
+            merged = dict(preferences, **merge_secret_endpoints(body, preferences))
+            preferences = validate_settings(merged)
+            if preferences['enabled'] and not preferences['include_primary'] and not any(item['enabled'] for item in preferences['endpoints']):
+                raise ValueError('启用时至少选择一个接口')
+            config_data['api_pool'] = preferences
+            if not save_config(config_data):
+                return jsonify(ok=False, message='接口池设置保存失败'), 500
+            import core.config as core_config
+            core_config.config.clear()
+            core_config.config.update(load_config())
+        active = endpoints_for(config_data, preferences, {})
+        return jsonify(ok=True, settings=public_settings(preferences), status=EndpointPool(DATA_DIR).status(active), message='接口池已保存，下一次AI请求生效')
+    except (ValueError, TypeError, AttributeError) as error:
+        return jsonify(ok=False, message=redact_sensitive_text(str(error))), 400
+    except Exception as error:
+        return jsonify(ok=False, message=redact_sensitive_text(str(error))), 500
+
+
+@app.route('/api/ai-pool/reset', methods=['POST'])
+def api_ai_pool_reset():
+    from services.ai_pool import EndpointPool
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or body.get('confirmed') is not True:
+        return jsonify(ok=False, message='重置冷却和统计需要确认'), 400
+    EndpointPool(DATA_DIR).reset()
+    return jsonify(ok=True, message='当前账号的接口池冷却、统计和轮询位置已重置')
+
+
+@app.route('/api/ai-pool/test', methods=['POST'])
+def api_ai_pool_test():
+    from core.config import load_config
+    from services.ai_pool import settings, route
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or body.get('confirmed') is not True:
+        return jsonify(ok=False, message='接口测试会调用AI并可能扣费，需要确认'), 400
+    config_data = load_config()
+    try:
+        preferences = settings(config_data)
+        endpoint = next((item for item in preferences['endpoints'] if item['id'] == body.get('id')), None)
+        if endpoint is None:
+            raise ValueError('请先保存接口，再选择测试')
+        if not endpoint['enabled']:
+            raise ValueError('接口已停用，请先开启并保存')
+        preferences.update(enabled=True, include_primary=False, endpoints=[endpoint], rounds=1, attempt_limit=1, total_timeout_seconds=min(30, preferences['total_timeout_seconds']))
+        config_data['api_pool'] = preferences
+        model = endpoint['model_chat'] or config_data.get('api', {}).get('model_brain', '')
+        started = time.monotonic()
+        _run_coro(route({'model': model, 'messages': [{'role': 'user', 'content': 'Reply with OK.'}], 'max_tokens': 12}, config_data=config_data, timeout=30, data_dir=DATA_DIR))
+        return jsonify(ok=True, message='接口真实请求成功（仅文本，未验证视觉或工具能力）', elapsed_ms=round((time.monotonic()-started)*1000))
+    except ValueError as error:
+        return jsonify(ok=False, message=str(error)), 400
+    except Exception as error:
+        return jsonify(ok=False, message=redact_sensitive_text(str(error))), 502
 
 
 @app.route('/api/quota-alert/settings', methods=['GET', 'POST'])
@@ -4305,10 +4993,13 @@ def _interest_engine_payload(engine) -> dict:
         'settings': {
             'proxy_mode': settings.get('proxy_mode') if settings.get('proxy_mode') in _INTEREST_MODES else 'smart',
             'serendipity_rate': max(0, min(0.5, float(settings.get('serendipity_rate', 0.0) or 0))),
-            'auto_sync_psycho': bool(settings.get('auto_sync_psycho', True)),
+            'auto_sync_psycho': bool(settings.get('auto_sync_psycho', False)),
             'use_synonyms': bool(settings.get('use_synonyms', True)),
-            'ai_suggest': bool(settings.get('ai_suggest', True)),
+            'ai_suggest': bool(settings.get('ai_suggest', False)),
+            'ai_suggest_probability': max(0, min(1, float(settings.get('ai_suggest_probability', 0.0) or 0))),
             'ai_suggest_interval': max(1, min(200, int(settings.get('ai_suggest_interval', 20) or 20))),
+            'max_auto_interests': max(0, min(1000, int(settings.get('max_auto_interests', 30)))),
+            'max_suggestions_per_batch': max(0, min(100, int(settings.get('max_suggestions_per_batch', 3)))),
             'scoring_enabled': bool(scoring.get('enabled', True)),
             'dynamic_threshold': bool(scoring.get('dynamic_threshold', True)),
             'threshold_base': max(0, min(10, float(scoring.get('threshold_base', 6) or 6))),
@@ -4336,21 +5027,25 @@ def api_interests_compat():
                 term = _clean_interest_term(value)
                 if term not in clean:
                     clean.append(term)
-            # This legacy endpoint only receives plain strings. Preserve the
-            # structured metadata already held by the v2 engine, especially
-            # ``auto_suggested``; otherwise a routine compatibility save
-            # turns every AI suggestion into a manual interest.
+            # A legacy plain-list save is additive in 3.1.6. It cannot express
+            # item ownership safely, so it must never remove existing entries.
             existing = {
                 str(item.get('keyword', '')).strip().lower(): item
                 for item in engine.interests_list
                 if isinstance(item, dict) and str(item.get('keyword', '')).strip()
             }
-            engine.config['interests'] = [
-                dict(existing[term]) if term in existing else {
-                    'keyword': term, 'weight': 'medium', 'synonyms': [], 'auto_suggested': False,
-                }
-                for term in clean[:100]
-            ]
+            merged = [dict(item) if isinstance(item, dict) else {
+                'keyword': str(item), 'weight': 'medium', 'synonyms': [],
+                'auto_suggested': False, 'source': 'manual', 'user_protected': True,
+            } for item in engine.interests_list]
+            for term in clean[:100]:
+                current = existing.get(term)
+                if current is not None:
+                    # Compatibility saves preserve the structured owner.
+                    continue
+                merged.append({'keyword': term, 'weight': 'medium', 'synonyms': [],
+                               'auto_suggested': False, 'source': 'manual', 'user_protected': True})
+            engine.config['interests'] = merged
             if not engine.save():
                 return jsonify(ok=False, message='兴趣列表保存失败'), 500
             _reset_interest_engine_cache()
@@ -4389,6 +5084,16 @@ def api_interest_engine():
                     settings[key] = bool(body[key])
             if 'ai_suggest_interval' in body:
                 settings['ai_suggest_interval'] = max(1, min(200, int(body['ai_suggest_interval'])))
+            for key, maximum in (('max_auto_interests', 1000), ('max_suggestions_per_batch', 100)):
+                if key in body:
+                    if type(body[key]) is not int or not 0 <= body[key] <= maximum:
+                        return jsonify(ok=False, message=key + ' 必须是有效范围内整数'), 400
+                    settings[key] = body[key]
+            if 'ai_suggest_probability' in body:
+                probability = float(body['ai_suggest_probability'])
+                if not 0 <= probability <= 1:
+                    return jsonify(ok=False, message='AI 添加概率必须在 0% 到 100% 之间'), 400
+                settings['ai_suggest_probability'] = probability
             scoring = settings.setdefault('scoring', {})
             if 'scoring_enabled' in body:
                 scoring['enabled'] = bool(body['scoring_enabled'])
@@ -4432,16 +5137,18 @@ def api_interest_engine_upsert():
             engine = _load_interest_engine()
             found = next((item for item in engine.interests_list if isinstance(item, dict) and str(item.get('keyword', '')).lower() == keyword), None)
             if found is None:
+                is_ai = bool(body.get('auto_suggested', False))
                 engine.config.setdefault('interests', []).append({
                     'keyword': keyword, 'weight': weight, 'synonyms': synonyms[:20],
-                    'auto_suggested': bool(body.get('auto_suggested', False)),
+                    'auto_suggested': is_ai, 'source': 'ai_suggested' if is_ai else 'manual',
+                    'user_protected': not is_ai,
                 })
                 message = f'已添加兴趣：{keyword}'
             else:
                 found['weight'] = weight
                 found['synonyms'] = synonyms[:20]
-                if 'auto_suggested' in body:
-                    found['auto_suggested'] = bool(body.get('auto_suggested'))
+                # Editing in the UI always means the user owns the item.
+                found.update(source='manual', auto_suggested=False, user_protected=True)
                 message = f'已更新兴趣：{keyword}'
             if not engine.save():
                 return jsonify(ok=False, message='兴趣保存失败'), 500
@@ -4526,6 +5233,8 @@ def api_ai_presets():
 @app.route('/api/kb/path', methods=['GET', 'POST'])
 def api_kb_path():
     """查看/设置知识库路径。"""
+    if request.method == 'POST' and os.getenv('BILI_ACCOUNT_ID'):
+        return jsonify(ok=False, message='多账号知识库固定在各自工作空间内'), 400
     from core.config import save_config, resolve_knowledge_base_dir
     config = read_json(CONFIG_FILE, {})
     if request.method == 'GET':
@@ -4566,6 +5275,8 @@ def _storage_groups_payload(root: Path) -> dict:
 @app.route('/api/storage', methods=['GET', 'POST'])
 def api_storage():
     """Show or persist the user-data root; a path change takes effect on restart."""
+    if request.method == 'POST' and os.getenv('BILI_ACCOUNT_ID'):
+        return jsonify(ok=False, message='多账号使用固定隔离工作空间，不能修改总数据目录'), 400
     default_root = Path(os.getenv("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))) / "BiliLearn"
     pointer = default_root / "Data" / "storage_location.json"
     if request.method == 'GET':
@@ -4592,8 +5303,11 @@ def api_storage():
 @app.route('/api/storage/open', methods=['POST'])
 def api_storage_open():
     """Open a known user-data directory without accepting arbitrary paths."""
-    body = request.get_json(silent=True) or {}
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify(ok=False, message='请求必须是 JSON 对象'), 400
     groups = _storage_groups_payload(Path(USER_DATA_DIR))
+    groups['root'] = {'path': str(USER_DATA_DIR)}
     key = str(body.get('group') or '').strip()
     if key not in groups:
         return jsonify(ok=False, message='未知的数据分区'), 400
@@ -4607,7 +5321,7 @@ def api_storage_open():
             os.startfile(str(target))
         else:
             subprocess.Popen(['xdg-open', str(target)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return jsonify(ok=True, message='已打开数据位置')
+        return jsonify(ok=True, message='已在运行面板的电脑上打开数据位置', path=str(target))
     except OSError as exc:
         return jsonify(ok=False, message=f'无法打开数据位置: {exc}'), 400
 
@@ -4651,77 +5365,19 @@ def api_storage_pick():
         return jsonify(ok=False, message=f'无法打开系统选择器: {redact_sensitive_text(str(exc))}'), 500
 
 
-@app.route('/api/free-channel', methods=['GET', 'POST'])
-def api_free_channel():
-    """内置 OpenCode Zen 免费渠道：一键切换 / 查看状态。
-    GET: 返回当前是否使用免费渠道 + 免费模型列表
-    POST {enable:true}: 把 unified_base_url 切到本地 proxy，api_key 置为任意值
-    POST {enable:false}: 提示需手动恢复原配置（保留原值备份在 web.free_channel_prev）
-    """
-    from core.config import save_config
-    config = read_json(CONFIG_FILE, {})
-    api_cfg = config.setdefault("api", {})
-    web_cfg = config.setdefault("web", {})
-    zen_base = "http://127.0.0.1:18508/v1"
-    free_models = ["deepseek-v4-flash-free", "mimo-v2.5-free", "ling-3.0-flash-free",
-                   "nemotron-3-ultra-free", "north-mini-code-free", "laguna-s-2.1-free"]
-
-    current = str(api_cfg.get("unified_base_url", "") or "").rstrip("/")
-    using_free = current == zen_base
-
-    if request.method == "GET":
-        # 探测本地 proxy 是否在运行
-        proxy_ok = False
-        try:
-            import urllib.request
-            with urllib.request.urlopen("http://127.0.0.1:18508/health", timeout=3) as _r:
-                proxy_ok = _r.status == 200
-        except Exception:
-            proxy_ok = False
-        return jsonify(ok=True, using_free=using_free, proxy_running=proxy_ok,
-                       zen_base=zen_base, free_models=free_models,
-                       current_base_url=current, current_model=api_cfg.get("model_brain", ""))
-
-    body = request.get_json(silent=True) or {}
-    enable = bool(body.get("enable"))
-    if enable:
-        if not using_free:
-            # 保存原配置以便恢复
-            web_cfg["free_channel_prev"] = {
-                "base_url": api_cfg.get("unified_base_url", ""),
-                "api_key": api_cfg.get("unified_api_key", ""),
-                "model": api_cfg.get("model_brain", ""),
-            }
-            api_cfg["unified_base_url"] = zen_base
-            if not api_cfg.get("unified_api_key"):
-                api_cfg["unified_api_key"] = "zen-free-token"
-            api_cfg["model_brain"] = free_models[0]
-            save_config(config)
-        return jsonify(ok=True, using_free=True, message="已切换到内置免费渠道（OpenCode Zen）")
-    else:
-        prev = web_cfg.get("free_channel_prev") or {}
-        if prev.get("base_url"):
-            api_cfg["unified_base_url"] = prev["base_url"]
-            api_cfg["model_brain"] = prev.get("model") or api_cfg.get("model_brain", "")
-            web_cfg.pop("free_channel_prev", None)
-            save_config(config)
-            return jsonify(ok=True, using_free=False, message="已恢复原渠道配置")
-        return jsonify(ok=False, using_free=using_free, message="没有可恢复的原配置（当前即非免费渠道）")
-
-
-@app.route('/api/models/list')
+@app.route('/api/models/list', methods=['GET', 'POST'])
 def api_models_list():
     """从配置的 API 端点获取可用模型列表"""
     config = read_json(CONFIG_FILE)
     # 面板下发配置已脱敏：输入框里的 '[已隐藏]' 占位符视为未传 key，
     # 回退到已保存的真实配置，避免把占位符当 Bearer 凭据发出去。
-    _raw_key = (request.args.get('api_key') or '').strip()
+    submitted = (request.get_json(silent=True) or {}) if request.method == 'POST' else request.args
+    _raw_key = str(submitted.get('api_key') or '').strip()
     if _raw_key == '[已隐藏]':
         _raw_key = ''
     api_key = _raw_key or config.get('api', {}).get('unified_api_key', '') or os.getenv('BILI_AI_API_KEY', '')
-    base_url = (request.args.get('base_url') or '').strip() or config.get('api', {}).get('unified_base_url', '') or os.getenv('BILI_AI_BASE_URL', '')
-    is_local_proxy = '127.0.0.1:18508' in base_url
-    if not base_url or (not api_key and not is_local_proxy):
+    base_url = str(submitted.get('base_url') or '').strip() or config.get('api', {}).get('unified_base_url', '') or os.getenv('BILI_AI_BASE_URL', '')
+    if not base_url or not api_key:
 
         return jsonify(dict(ok=False, message='请先配置 API Key 和 Base URL', models=[]))
     
@@ -4744,7 +5400,9 @@ def api_models_list():
             data = _pool.submit(_fetch_models).result(timeout=10)
         finally:
             _pool.shutdown(wait=False)
-        raw_models = data.get('data', data if isinstance(data, list) else [])
+        raw_models = data if isinstance(data, list) else data.get('data', [])
+        if not isinstance(raw_models, list):
+            raise ValueError('模型列表格式不正确，预期为数组')
         models = []
         for m in raw_models:
             mid = m.get('id', '') if isinstance(m, dict) else str(m)
@@ -4753,8 +5411,11 @@ def api_models_list():
                     id=mid,
                     owned_by=m.get('owned_by', '') if isinstance(m, dict) else '',
                 ))
+        models = list({item['id']: item for item in models}.values())
         models.sort(key=lambda x: x['id'])
-        return jsonify(dict(ok=True, models=models, count=len(models)))
+        # Return the complete provider response. Older builds silently sliced
+        # this list to 200 in the test endpoint, which hid valid models.
+        return jsonify(dict(ok=True, models=models, count=len(models), total=len(models)))
     except concurrent.futures.TimeoutError:
         return jsonify(dict(ok=False, message='获取模型列表超时（10 秒）：请检查 Base URL 是否正确、网络是否通畅，或稍后重试', models=[]))
     except urllib.error.HTTPError as e:
@@ -4787,8 +5448,8 @@ def _test_single_model(base_url, api_key, model, timeout, max_tokens, prompt):
     ctx = ssl.create_default_context()
     t0 = time.time()
     try:
-        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
-            body = json.loads(resp.read() or b'{}')
+        from services.token_observability import observed_urlopen
+        body = observed_urlopen(urllib.request.urlopen, req, model=model, data_dir=DATA_DIR, timeout=timeout, context=ctx)
         ms = int((time.time() - t0) * 1000)
         choices = body.get('choices') or []
         if not choices:
@@ -4841,15 +5502,16 @@ def api_models_test_start():
         _raw_key = ''
     api_key = _raw_key or config.get('api', {}).get('unified_api_key', '') or os.getenv('BILI_AI_API_KEY', '')
     base_url = (body.get('base_url') or '').strip() or config.get('api', {}).get('unified_base_url', '') or os.getenv('BILI_AI_BASE_URL', '')
-    is_local_proxy = '127.0.0.1:18508' in base_url
-    if not base_url or (not api_key and not is_local_proxy):
+    if not base_url or not api_key:
         return jsonify(dict(ok=False, message='请先配置 API Key 和 Base URL'))
     models = []
     for m in (body.get('models') or []):
         mid = str(m or '').strip()
         if mid and mid not in models:
             models.append(mid)
-    models = models[:200]
+    # Keep a generous safety ceiling, but do not impose the old 200-model cap.
+    # The UI lets users select a subset before starting a test.
+    models = models[:5000]
     if not models:
         return jsonify(dict(ok=False, message='没有可测试的模型：请先获取模型列表，或手动输入模型名'))
     try:
@@ -5034,13 +5696,45 @@ def api_bot_restart():
 @app.route('/api/bot/clear', methods=['POST'])
 def api_bot_clear():
     global bot_output_lines
-    with bot_output_lock:
-        bot_output_lines.clear()
     try:
-        BOT_RUNTIME_LOG_FILE.write_text('', encoding='utf-8')
-    except OSError:
-        pass
-    return jsonify(dict(ok=True, message='日志已清空'))
+        with bot_output_lock:
+            BOT_RUNTIME_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+            BOT_RUNTIME_LOG_FILE.write_text('', encoding='utf-8')
+            bot_output_lines.clear()
+    except OSError as exc:
+        return jsonify(ok=False, message=f'日志文件清理失败：{exc}'), 500
+    return jsonify(dict(ok=True, message='机器人日志已清空'))
+
+
+@app.route('/api/logs/clear', methods=['POST'])
+def api_logs_clear():
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify(ok=False, message='日志清理请求必须为 JSON 对象'), 400
+    source = str(body.get('source') or 'all').strip().lower()
+    if source not in {'all', 'bot', 'monitor', 'reviews'}:
+        return jsonify(ok=False, message='日志范围不正确'), 400
+    cleared = []
+    if source in {'all', 'bot'}:
+        response = api_bot_clear()
+        result = (response[0] if isinstance(response, tuple) else response).get_json()
+        if not result.get('ok'):
+            return jsonify(result), 500
+        cleared.append('bot')
+    if source in {'all', 'monitor'}:
+        response = api_monitor_clear()
+        result = (response[0] if isinstance(response, tuple) else response).get_json()
+        if not result.get('ok'):
+            return jsonify(result), 500
+        cleared.append('monitor')
+    if source in {'all', 'reviews'}:
+        try:
+            from services.like_review import ActionReviewInbox
+            ActionReviewInbox(DATA_DIR).clear_audit()
+        except OSError as exc:
+            return jsonify(ok=False, message=f'审核日志清理失败：{exc}'), 500
+        cleared.append('reviews')
+    return jsonify(ok=True, message='已清理：' + '、'.join(cleared))
 
 
 @app.route('/api/logs')
@@ -5065,6 +5759,9 @@ def api_logs():
             if not detail and entry.get('execution'):
                 detail = _review_execution_display(entry.get('action_type', ''), entry.get('execution'))
             entries.append(('review', f"[{entry.get('time', '')}] [REVIEW] {entry.get('event', '')}: {entry.get('action_label') or entry.get('action_type')} | {entry.get('title', '')}" + (f" | {detail}" if detail else '')))
+    # Do not surface legacy built-in/free-channel bootstrap noise in the web
+    # viewer. It is implementation detail and can expose stale local ports.
+    entries = [item for item in entries if not any(token in item[1].lower() for token in ('免费渠道', 'free channel', '18508'))]
     entries = [
         item for _, item in sorted(
             enumerate(entries),
@@ -5134,7 +5831,7 @@ def _monitor_reader(pipe, prefix=""):
                 rendered = _timestamp_runtime_line(prefix + text)
                 with monitor_output_lock:
                     monitor_output_lines.append(rendered)
-                _append_runtime_log(MONITOR_RUNTIME_LOG_FILE, rendered)
+                    _append_runtime_log(MONITOR_RUNTIME_LOG_FILE, rendered)
     except OSError:
         pass
     finally:
@@ -5323,12 +6020,13 @@ def api_monitor_output():
 
 @app.route('/api/monitor/clear', methods=['POST'])
 def api_monitor_clear():
-    with monitor_output_lock:
-        monitor_output_lines.clear()
     try:
-        MONITOR_RUNTIME_LOG_FILE.write_text('', encoding='utf-8')
-    except OSError:
-        pass
+        with monitor_output_lock:
+            MONITOR_RUNTIME_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+            MONITOR_RUNTIME_LOG_FILE.write_text('', encoding='utf-8')
+            monitor_output_lines.clear()
+    except OSError as exc:
+        return jsonify(ok=False, message=f'监听日志文件清理失败：{exc}'), 500
     return jsonify(ok=True, message='监听日志已清空')
 
 # ── 待机模式（Standby） ──
@@ -5545,12 +6243,11 @@ def api_ppt_list():
 
 @app.route('/api/ppt/themes')
 def api_ppt_themes():
-    """返回可用主题列表"""
-    from services.video_to_ppt import THEMES
-    return jsonify(dict(themes=[
-        {'id': k, 'name': v['name'], 'preview_colors': [v['primary'], v['accent'], v['bg_start']]}
-        for k, v in THEMES.items()
-    ]))
+    """返回统一导出布局，保留旧接口字段以兼容客户端。"""
+    return jsonify(dict(themes=[{
+        'id': 'claude_slides', 'name': '统一参考布局 · 项目介绍 / 内容总结',
+        'preview_colors': ['#0D0D0D', '#D97757', '#FFFFFF'],
+    }]))
 
 # ── B站登录 ──
 @app.route('/api/bili/qr/start', methods=['POST'])
@@ -6112,8 +6809,9 @@ def api_agent_events():
         s = ag.get_active()
         if s is None:
             return jsonify(ok=True, events=[], last_seq=0, status='none')
-        return jsonify(ok=True, events=s.events_after(after),
-                       last_seq=s._seq, status=s.status)
+        events = s.events_after(after)
+        return jsonify(ok=True, events=events,
+                       last_seq=events[-1]['seq'] if events else after, status=s.status, session_id=s.id)
     except Exception as exc:
         return jsonify(ok=False, message=str(exc)[:200]), 500
 
@@ -6123,6 +6821,12 @@ def api_agent_start():
     try:
         import agent.core as ag
         body = request.get_json(silent=True) or {}
+        if not isinstance(body, dict) or type(body.get('allow_write', False)) is not bool:
+            return jsonify(ok=False, message='任务设置无效'), 400
+        if body.get('allow_write') and body.get('confirmed') is not True:
+            return jsonify(ok=False, message='写操作需要明确确认'), 400
+        if _agent_workspace_config()['enabled'] is False:
+            return jsonify(ok=False, message='Agent总开关已关闭'), 400
         goal = str(body.get('goal', '')).strip()
         if not goal:
             return jsonify(ok=False, message='请填写任务目标'), 400
@@ -6145,6 +6849,19 @@ def api_agent_stop():
     try:
         import agent.core as ag
         return jsonify(ok=ag.stop_session())
+    except Exception as exc:
+        return jsonify(ok=False, message=str(exc)[:200]), 500
+
+
+@app.route('/api/agent/interject', methods=['POST'])
+def api_agent_interject():
+    try:
+        import agent.core as ag
+        message = str((request.get_json(silent=True) or {}).get('message') or '').strip()
+        if not message:
+            return jsonify(ok=False, message='请输入补充要求'), 400
+        ok = ag.interject_session(message)
+        return jsonify(ok=ok, message='补充要求已送入 Agent 下一步决策' if ok else '当前没有运行中的 Agent')
     except Exception as exc:
         return jsonify(ok=False, message=str(exc)[:200]), 500
 
@@ -7121,10 +7838,52 @@ def api_favorite_import_history():
 
 
 # ── 日记进化 ──
+@app.route('/api/diary/settings', methods=['GET', 'POST'])
+def api_diary_settings():
+    from core.config import load_config, save_config
+    from services.diary_scheduler import DiaryScheduler, settings, validate_settings
+    try:
+        config_data = load_config()
+        if request.method == 'POST':
+            preferences = validate_settings(request.get_json(force=True))
+            config_data['diary'] = preferences
+            if not save_config(config_data):
+                return jsonify(ok=False, message='保存失败'), 500
+        else:
+            preferences = settings(config_data)
+        scheduler = DiaryScheduler(DATA_DIR)
+        collected = scheduler.collect(preferences)
+        return jsonify(ok=True, settings=preferences, state=scheduler.snapshot(preferences),
+                       counts=collected['counts'], warnings=collected['warnings'], message='日记设置已保存')
+    except (ValueError, TypeError) as error:
+        return jsonify(ok=False, message=redact_sensitive_text(str(error))), 400
+
+
+@app.route('/api/diary/generate', methods=['POST'])
+def api_diary_generate():
+    from services.diary_scheduler import DiaryScheduler, settings
+    body = request.get_json(silent=True) or {}
+    if body.get('confirmed') is not True:
+        return jsonify(ok=False, message='请确认AI额度消耗及所选来源会发送给模型'), 400
+    scheduler = DiaryScheduler(DATA_DIR)
+    try:
+        preferences = settings()
+    except (ValueError, TypeError) as error:
+        return jsonify(ok=False, message=redact_sensitive_text(str(error))), 400
+    job_id = scheduler.begin(manual=True, timeout=preferences['ai_timeout_seconds'])
+    if job_id is None:
+        return jsonify(ok=False, message='已有日记任务运行中'), 409
+    def generate():
+        asyncio.run(scheduler.generate(preferences, manual=True, job_id=job_id))
+    threading.Thread(target=generate, daemon=True, name='diary-generation').start()
+    return jsonify(ok=True, job_id=job_id, message='已提交生成任务，请刷新查看状态（自动开关不受影响）'), 202
+
+
 @app.route('/api/diary')
 def api_diary():
+    from services import diary_store
     return jsonify(dict(
-        diary=_web_diary_payload(read_json(DATA_DIR / "bot_diary.json", {})),
+        diary=_web_diary_payload(diary_store.read(DATA_DIR / "bot_diary.json")),
         evolution=_web_evolution_payload(read_json(DATA_DIR / "self_evolution.json", {})),
     ))
 
@@ -7167,23 +7926,8 @@ def api_diary_entry_update(entry_id):
         content = str(body.get('content') or '').strip()
         if not content:
             return jsonify(ok=False, message='日记内容不能为空'), 400
-        data = read_json(DATA_DIR / 'bot_diary.json', {'entries': []})
-        entries = data.get('entries') if isinstance(data, dict) else []
-        if not isinstance(entries, list):
-            entries = data.get('diaries', []) if isinstance(data, dict) else []
-            data = {'entries': entries}
-        index = _diary_entry_index(entries, str(entry_id))
-        if index is None:
-            return jsonify(ok=False, message='未找到该日记'), 404
-        item = dict(entries[index])
-        item['id'] = item.get('id') or f"diary-{int(time.time() * 1000)}-{index + 1}"
-        item['title'] = str(body.get('title') or item.get('title') or '日记记录').strip()[:120]
-        item['content'] = content
-        item['updated_at'] = datetime.now().isoformat(timespec='seconds')
-        entries[index] = item
-        data['entries'] = entries
-        data.pop('diaries', None)
-        write_json(DATA_DIR / 'bot_diary.json', data)
+        from services import diary_store
+        item = diary_store.update(DATA_DIR / 'bot_diary.json', entry_id, body.get('title'), content)
         log_line(f"[DIARY] 已编辑日记: {item['id']}")
         return jsonify(ok=True, entry=item, message='日记已更新')
     except Exception as exc:
@@ -7194,18 +7938,8 @@ def api_diary_entry_update(entry_id):
 def api_diary_entry_delete(entry_id):
     """Delete one explicitly selected diary entry after the browser confirmation."""
     try:
-        data = read_json(DATA_DIR / 'bot_diary.json', {'entries': []})
-        entries = data.get('entries') if isinstance(data, dict) else []
-        if not isinstance(entries, list):
-            entries = data.get('diaries', []) if isinstance(data, dict) else []
-            data = {'entries': entries}
-        index = _diary_entry_index(entries, str(entry_id))
-        if index is None:
-            return jsonify(ok=False, message='未找到该日记'), 404
-        removed = entries.pop(index)
-        data['entries'] = entries
-        data.pop('diaries', None)
-        write_json(DATA_DIR / 'bot_diary.json', data)
+        from services import diary_store
+        removed = diary_store.delete(DATA_DIR / 'bot_diary.json', entry_id)
         log_line(f"[DIARY] 已删除日记: {removed.get('id', entry_id)}")
         return jsonify(ok=True, message='日记已删除')
     except Exception as exc:
@@ -7305,7 +8039,8 @@ def api_mood_status():
     config = read_json(CONFIG_FILE, {})
     mc = config.get('mood', {})
     return jsonify(dict(
-        current_mood=mood.get('mood', mc.get('default_mood', '平静')),
+        enabled=mc.get('enabled', True),
+        current_mood=mood.get('current', mood.get('mood', mc.get('default_mood', '平静'))),
         energy=mood.get('energy', 100),
         random_enabled=mc.get('random_enabled', False),
         random_interval=mc.get('random_interval_minutes', 5),
@@ -7320,6 +8055,7 @@ def api_mood_set():
         body = request.get_json(force=True)
         config = read_json(CONFIG_FILE, {})
         mc = config.setdefault('mood', {})
+        if 'enabled' in body: mc['enabled'] = bool(body['enabled'])
         if 'random_enabled' in body: mc['random_enabled'] = bool(body['random_enabled'])
         if 'random_interval_minutes' in body: mc['random_interval_minutes'] = int(body['random_interval_minutes'])
         if 'custom_enabled' in body: mc['custom_enabled'] = bool(body['custom_enabled'])
@@ -7329,7 +8065,8 @@ def api_mood_set():
         # 同时更新当前心情
         mood = read_json(DATA_DIR / "mood_state.json", {})
         if 'current_mood' in body:
-            mood['mood'] = str(body['current_mood'])
+            mood['current'] = str(body['current_mood'])
+            mood.pop('mood', None)
             mood['updated_at'] = datetime.now().isoformat()
             write_json(DATA_DIR / "mood_state.json", mood)
         log_line(f"心情设置已更新")
@@ -7569,18 +8306,70 @@ def api_import_apply():
 # ── 恢复出厂设置 ──
 # 服务端二次确认：需要前端先生成确认令牌
 _factory_reset_pending_token = None
+_factory_reset_lock = threading.RLock()
 _FACTORY_RESET_TOKEN_TTL_SECONDS = 60
 
+
+def _serialize_factory_reset(function):
+    from functools import wraps
+
+    @wraps(function)
+    def guarded(*args, **kwargs):
+        with _factory_reset_lock:
+            return function(*args, **kwargs)
+    return guarded
+
+
+
+def _reset_busy_tasks():
+    from services.agent_workspace import LIVE, LIVE_LOCK
+    from agent.core import get_active
+    active = []
+    for name in ('bot', 'monitor', 'standby'):
+        process = globals().get(name + '_process')
+        if globals().get(name + '_running') or (process is not None and process.poll() is None):
+            active.append(name)
+    with LIVE_LOCK:
+        if any(key[0] == str(Path(DATA_DIR) / 'agent_workspace.sqlite3') for key in LIVE):
+            active.append('Agent 助理')
+    agent = get_active()
+    if agent is not None and agent.status == 'running':
+        active.append('Agent 任务')
+    if any(task.get('status') == 'running' for task in list(globals().get('TASKS', {}).values())):
+        active.append('后台生成任务')
+    if any(not job.get('finished') for job in list(globals().get('_model_test_jobs', {}).values())):
+        active.append('模型测试')
+    if any(globals().get(name, {}).get('state') == 'running' for name in ('_asr_download_job', '_asr_test_job')):
+        active.append('ASR 任务')
+    import sqlite3
+    for filename, label in (('diary_schedule.sqlite3', '日记生成'), ('evolution.sqlite3', '进化生成')):
+        path = Path(DATA_DIR) / filename
+        if not path.exists():
+            continue
+        try:
+            with sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True, timeout=1) as database:
+                if database.execute("SELECT 1 FROM jobs WHERE status='running' AND deadline>? LIMIT 1", (datetime.now().isoformat(),)).fetchone():
+                    active.append(label)
+        except sqlite3.Error:
+            active.append(label + '状态无法确认')
+    return active
+
 @app.route('/api/factory-reset/request', methods=['POST'])
+@_serialize_factory_reset
 def api_factory_reset_request():
     """请求恢复出厂设置，返回一次性确认令牌（60秒有效）。"""
     global _factory_reset_pending_token
     from core.config import CIPHER_KEY_FILE
-    body = request.get_json(silent=True) or {}
-    selected_groups = body.get('selected_groups') or list(DEFAULT_RESET_GROUP_IDS)
+    body = request.get_json(silent=True)
+    if body is None:
+        body = {}
+    if not isinstance(body, dict):
+        return jsonify(ok=False, message='请求必须是 JSON 对象'), 400
+    selected_groups = body.get('selected_groups', list(DEFAULT_RESET_GROUP_IDS))
     if not isinstance(selected_groups, list) or not selected_groups:
         return jsonify(ok=False, message='请至少选择一个清理范围'), 400
-    selected_groups = [str(group) for group in selected_groups]
+    if any(not isinstance(group, str) for group in selected_groups):
+        return jsonify(ok=False, message='清理范围必须是字符串列表'), 400
     try:
         preview = preview_reset_targets(
             data_dir=Path(DATA_DIR), user_data_dir=Path(USER_DATA_DIR),
@@ -7594,32 +8383,46 @@ def api_factory_reset_request():
         'token': _uuid_module.uuid4().hex,
         'created_at': time.time(),
         'selected_groups': preview['selected_groups'],
+        'owner': session.get('factory_reset_owner') or _uuid_module.uuid4().hex,
+        'paths': {group['id']: group['paths'] for group in preview['groups'] if group['selected']},
     }
+    session['factory_reset_owner'] = _factory_reset_pending_token['owner']
     log_line("收到恢复出厂设置请求，等待二次确认...")
     return jsonify(dict(ok=True, token=_factory_reset_pending_token['token'], preview=preview,
                         message='请核对清理范围，并在60秒内输入确认令牌完成操作'))
 
 @app.route('/api/factory-reset', methods=['POST'])
+@_serialize_factory_reset
 def api_factory_reset():
     global _factory_reset_pending_token, bot_output_lines
     try:
-        body = request.get_json(silent=True) or {}
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return jsonify(ok=False, message='请求必须是 JSON 对象'), 400
         confirm_token = body.get('confirm_token', '')
         # 必须有未过期的一次性确认令牌
         pending = _factory_reset_pending_token
-        selected_groups = body.get('selected_groups') or (pending.get('selected_groups') if pending else [])
+        selected_groups = body.get('selected_groups', pending.get('selected_groups') if pending else [])
         is_valid = (
             pending
             and confirm_token == pending.get('token')
             and time.time() - pending.get('created_at', 0) <= _FACTORY_RESET_TOKEN_TTL_SECONDS
+            and session.get('factory_reset_owner') == pending.get('owner')
             and selected_groups == pending.get('selected_groups')
         )
         if not is_valid:
-            _factory_reset_pending_token = None
             return jsonify(dict(ok=False, message='确认令牌无效或已过期，请重新请求令牌')), 403
-        _factory_reset_pending_token = None
+        busy = _reset_busy_tasks()
+        if busy:
+            return jsonify(ok=False, message='请先停止或等待以下任务完成：' + '、'.join(busy)), 409
         from core.config import CIPHER_KEY_FILE
         reset_config = read_json(CONFIG_FILE, {})
+        current_preview = preview_reset_targets(data_dir=Path(DATA_DIR), user_data_dir=Path(USER_DATA_DIR), project_dir=Path(BASE_DIR), backup_dir=Path(get_backup_dir()), cipher_key_file=Path(CIPHER_KEY_FILE), config=reset_config, selected_groups=selected_groups)
+        current_paths = {group['id']: group['paths'] for group in current_preview['groups'] if group['selected']}
+        if current_paths != pending.get('paths'):
+            _factory_reset_pending_token = None
+            return jsonify(ok=False, message='清理路径已发生变化，请重新预览并确认'), 409
+        _factory_reset_pending_token = None
         result = erase_all_user_data(
             data_dir=Path(DATA_DIR),
             user_data_dir=Path(USER_DATA_DIR),
@@ -7632,12 +8435,20 @@ def api_factory_reset():
         if 'credentials_runtime' in selected_groups:
             with bot_output_lock:
                 bot_output_lines.clear()
+            with monitor_output_lock:
+                monitor_output_lines.clear()
+            import core.config as core_config
+            core_config.config.clear()
+            app.secret_key = _uuid_module.uuid4().hex
+            _bili_profile_cache.update(expires_at=0.0, profile=None)
             session.clear()
         if result['failures']:
             return jsonify(dict(ok=False, message='部分项目未能清除', failures=result['failures'], deleted=result['deleted'])), 500
         return jsonify(dict(ok=True, message='已清除所选的私人数据和生成产物', deleted=result['deleted'],
-                            selected_groups=result['selected_groups']))
+                            selected_groups=result['selected_groups'], setup_required='credentials_runtime' in selected_groups))
 
+    except ValueError as e:
+        return jsonify(ok=False, message=str(e)), 400
     except Exception as e:
         return jsonify(dict(ok=False, message=str(e))), 500
 
@@ -8563,25 +9374,12 @@ async def _analyze_visual_note(bvid: str, custom_prompt: str = "") -> dict:
 
     vu = VideoUnderstanding(settings, model)
     try:
-        # 直接调用图文学习笔记管线
-        asset = await vu.fetch_metadata(bvid)
-        await vu.fetch_subtitles(asset)
-
-        if asset.duration and asset.duration > settings.video_max_duration_seconds:
-            return dict(ok=False, error=f"视频时长 {asset.duration}s 超过上限 {settings.video_max_duration_seconds}s")
-
-        video_path = await vu.download_video(asset)
-        grid_imgs = gf.extract_visual_note_grids(
-            video_path, read_json(CONFIG_FILE, {}).get("video", {})
-        )
-        if not grid_imgs:
-            return dict(ok=False, error="网格抽帧为空，无法生成图文笔记")
-
-        summary = await vu.summarize_with_grid(asset, video_path, grid_imgs, True, settings.custom_video_prompt)
-
-        # 清理
-        if settings.video_delete_after_understand:
-            vu.delete_downloaded_video(video_path)
+        result = await vu.understand(bvid, mode="frames")
+        asset = result.asset
+        summary = result.summary
+        if not result.gate.get("completed"):
+            return dict(ok=False, error=result.skipped_download_reason or "首分钟预览未通过",
+                        markdown=summary, preview_only=True)
 
         # 提取 TOC
         toc = []
@@ -8641,6 +9439,8 @@ def _review_execution_display(action_type: str, execution) -> str:
 def _execute_review_action(item: dict) -> dict:
     """Execute one approved action without persisting account credentials."""
     action_type = item.get('action_type') or 'video_like'
+    from services.action_permissions import require
+    require(action_type)
     payload = item.get('payload') or {}
     from api.client import BiliClient
     client = BiliClient()
@@ -8651,7 +9451,15 @@ def _execute_review_action(item: dict) -> dict:
     current_uid = str(getattr(client.credential, 'dedeuserid', '') or '').strip()
     if proposed_for and current_uid and proposed_for != current_uid:
         raise RuntimeError('审核动作属于先前登录的账号，已拒绝执行')
-    if action_type == 'video_like':
+    if payload.get('operation'):
+        from services.platform_favorites import OPERATIONS, execute
+        if OPERATIONS.get(payload['operation']) != action_type:
+            raise RuntimeError('收藏夹审核类型不匹配')
+        result = _run_coro(execute(payload['operation'], payload, client.credential))
+    elif action_type in {'video_unlike', 'public_comment', 'comment_like', 'comment_delete', 'danmaku_like', 'dynamic_delete', 'dynamic_like', 'dynamic_repost'}:
+        from services.platform_management import execute
+        result = _run_coro(execute(action_type, payload, client.credential))
+    elif action_type == 'video_like':
         from bilibili_api.video import Video
         result = _run_coro(Video(bvid=str(payload.get('bvid') or ''), credential=client.credential).like(status=True))
     elif action_type == 'follow_up':
@@ -8700,6 +9508,8 @@ def _execute_review_action(item: dict) -> dict:
             result = publish_dynamic_draft(str(payload.get('draft_id') or ''))
     else:
         raise RuntimeError('该行为尚未接入自动执行器，只能保留为人工审核记录')
+    if isinstance(result, dict) and result.get('code') not in (None, 0, '0'):
+        raise RuntimeError('平台未接受操作: ' + str(result.get('message') or result.get('msg') or result['code']))
     execution = {
         'executed': True,
         'result': _review_execution_display(action_type, result),
@@ -8740,7 +9550,10 @@ def api_review_audit():
 def api_review_audit_clear():
     """Clear historical review events without changing review queue items."""
     from services.like_review import ActionReviewInbox
-    cleared = ActionReviewInbox(DATA_DIR).clear_audit()
+    try:
+        cleared = ActionReviewInbox(DATA_DIR).clear_audit()
+    except OSError as exc:
+        return jsonify(ok=False, message='审核日志清理失败：' + redact_sensitive_text(str(exc))), 500
     return jsonify(ok=True, cleared=cleared, message=f'已清空 {cleared} 条审核执行记录')
 
 
@@ -8841,23 +9654,43 @@ def api_review_decision():
             'action_label': item.get('action_label') or item.get('action_type', ''),
         }
         if decision == 'approved':
-            try:
-                execution = _execute_review_action(item)
-                executed_at = datetime.now().isoformat(timespec='seconds')
-                inbox.update(item_id, status='executed', executed_at=executed_at, execution=execution)
-                if item.get('action_type') == 'private_reply':
-                    _record_executed_private_reply_context(item)
-                message = str(execution.get('result') or '平台已返回执行成功')[:500]
-                _sync_owner_share_review(item, 'executed', message)
-                log_line(f"[REVIEW] 已执行 {details['action_label']}: {details['title']} | {message}")
-                results.append({**details, 'ok': True, 'status': 'executed', 'executed_at': executed_at, 'message': message})
-            except Exception as exc:
-                error = redact_sensitive_text(str(exc))
+            execution = None
+            error = ''
+            for attempt in range(1, 4):
+                try:
+                    execution = _execute_review_action(item)
+                    error = ''
+                    break
+                except Exception as exc:
+                    error = redact_sensitive_text(str(exc))
+                    transient = any(token in error.lower() for token in (
+                        '429', '频繁', 'rate limit', 'too many', 'timeout', 'timed out',
+                        'temporar', 'connection reset', '网络', '超时'))
+                    if not transient or attempt >= 3:
+                        break
+                    time.sleep((0.35, 1.0)[attempt - 1])
+            if execution is not None:
+                try:
+                    executed_at = datetime.now().isoformat(timespec='seconds')
+                    inbox.update(item_id, status='executed', executed_at=executed_at, execution=execution,
+                                 error='', retryable=False)
+                    if item.get('action_type') == 'private_reply':
+                        _record_executed_private_reply_context(item)
+                    message = str(execution.get('result') or '平台已返回执行成功')[:500]
+                    _sync_owner_share_review(item, 'executed', message)
+                    log_line(f"[REVIEW] 已执行 {details['action_label']}: {details['title']} | {message}")
+                    results.append({**details, 'ok': True, 'status': 'executed', 'executed_at': executed_at, 'message': message})
+                except Exception as exc:
+                    error = redact_sensitive_text(str(exc))
+                    execution = None
+            if execution is None:
                 failed_at = datetime.now().isoformat(timespec='seconds')
-                inbox.update(item_id, status='failed', failed_at=failed_at, error=error)
+                inbox.update(item_id, status='failed', failed_at=failed_at, error=error,
+                             retryable=True)
                 _sync_owner_share_review(item, 'failed', error)
                 log_line(f"[REVIEW] 执行失败 {details['action_label']}: {details['title']} | {error}")
-                results.append({**details, 'ok': False, 'status': 'failed', 'failed_at': failed_at, 'message': error})
+                results.append({**details, 'ok': False, 'status': 'failed', 'failed_at': failed_at,
+                                'retryable': True, 'message': error})
         else:
             _sync_owner_share_review(item, 'rejected', '用户在审核中拒绝')
             log_line(f"[REVIEW] 已拒绝 {details['action_label']}: {details['title']}")
@@ -9002,6 +9835,8 @@ def api_mindmaps_delete():
         configured = BASE_DIR / configured
     from core.user_data import MINDMAPS_DIR
     allowed_roots = {Path(MINDMAPS_DIR).resolve(), (BASE_DIR / 'MindMaps').resolve(), configured.resolve()}
+    if os.getenv('BILI_ACCOUNT_ID'):
+        allowed_roots = {Path(MINDMAPS_DIR).resolve()}
     allowed = (
         requested.is_file()
         and requested.name.endswith('.mindmap.html')
@@ -9116,6 +9951,8 @@ def api_action_mindmap_view():
     if not configured.is_absolute():
         configured = BASE_DIR / configured
     allowed_roots = {Path(MINDMAPS_DIR).resolve(), (BASE_DIR / 'MindMaps').resolve(), configured.resolve()}
+    if os.getenv('BILI_ACCOUNT_ID'):
+        allowed_roots = {Path(MINDMAPS_DIR).resolve()}
     allowed = requested.is_file() and requested.suffix.lower() == '.html' and any(
         requested == root or root in requested.parents for root in allowed_roots
     )
@@ -10375,6 +11212,27 @@ def api_action_agent_skill():
 
 
 # ── Agent workspace: configuration, reusable skills, and MCP registration ──
+from services.agent_workspace_routes import blueprint as agent_assistant_blueprint
+app.config['AGENT_WORKSPACE_DATA_DIR'] = lambda: DATA_DIR
+app.register_blueprint(agent_assistant_blueprint)
+from services.persona_evolution_routes import blueprint as persona_experiment_blueprint
+app.config['PERSONA_EVOLUTION_DATA_DIR'] = lambda: DATA_DIR
+app.config['PERSONA_EVOLUTION_PERSONAS'] = lambda: _load_persona_envelope()
+app.register_blueprint(persona_experiment_blueprint)
+from services.data_settings_routes import blueprint as data_settings_blueprint
+app.config['DATA_SETTINGS_DIRECTORY'] = lambda: DATA_DIR
+app.register_blueprint(data_settings_blueprint)
+from services.token_routes import blueprint as token_dashboard_blueprint
+app.config['TOKEN_DATA_DIRECTORY'] = lambda: DATA_DIR
+app.register_blueprint(token_dashboard_blueprint)
+from services.learning_settings_routes import blueprint as learning_settings_blueprint
+app.config['LEARNING_DATA_DIRECTORY'] = lambda: DATA_DIR
+app.config['LEARNING_READ_CONFIG'] = lambda: read_json(CONFIG_FILE, {})
+app.config['LEARNING_WRITE_CONFIG'] = lambda value: write_json(CONFIG_FILE, value)
+app.register_blueprint(learning_settings_blueprint)
+from services.permission_routes import blueprint as permission_blueprint
+app.register_blueprint(permission_blueprint)
+
 def _agent_workspace_config() -> dict:
     config = read_json(CONFIG_FILE, {})
     agent = config.get('agent', {}) if isinstance(config.get('agent'), dict) else {}
@@ -10486,7 +11344,13 @@ def api_agent_mcp_create():
     services = agent.setdefault('mcp_servers', [])
     if not isinstance(services, list):
         services = agent['mcp_servers'] = []
-    services.append({'id': f'mcp-{int(time.time() * 1000)}', 'name': name, 'endpoint': endpoint, 'enabled': True})
+    timeout = max(2, min(60, int(body.get('timeout_seconds') or 10)))
+    permission = str(body.get('permission') or 'read').strip()
+    if permission not in {'read', 'write'}:
+        permission = 'read'
+    services.append({'id': f'mcp-{int(time.time() * 1000)}', 'name': name, 'endpoint': endpoint,
+                     'enabled': True, 'permission': permission, 'timeout_seconds': timeout,
+                     'last_test': None})
     agent['mcp_servers'] = services[-30:]
     write_json(CONFIG_FILE, config)
     return jsonify(ok=True, message='MCP 服务已登记（尚未联网调用）')
@@ -10503,6 +11367,55 @@ def api_agent_mcp_delete(mcp_id):
     agent['mcp_servers'] = kept
     write_json(CONFIG_FILE, config)
     return jsonify(ok=True, message='MCP 服务已移除')
+
+
+@app.route('/api/agent/mcp/<mcp_id>', methods=['PATCH'])
+def api_agent_mcp_update(mcp_id):
+    body = request.get_json(silent=True) or {}
+    config = read_json(CONFIG_FILE, {})
+    agent = config.setdefault('agent', {})
+    rows = agent.get('mcp_servers', []) if isinstance(agent.get('mcp_servers'), list) else []
+    item = next((row for row in rows if str(row.get('id')) == mcp_id), None)
+    if not item:
+        return jsonify(ok=False, message='MCP 服务不存在'), 404
+    if 'enabled' in body:
+        item['enabled'] = bool(body['enabled'])
+    if 'permission' in body and body['permission'] in {'read', 'write'}:
+        item['permission'] = body['permission']
+    if 'timeout_seconds' in body:
+        item['timeout_seconds'] = max(2, min(60, int(body['timeout_seconds'])))
+    write_json(CONFIG_FILE, config)
+    return jsonify(ok=True, message='MCP 服务设置已保存', service=item)
+
+
+@app.route('/api/agent/mcp/<mcp_id>/test', methods=['POST'])
+def api_agent_mcp_test(mcp_id):
+    import time as _time
+    import urllib.request
+    config = read_json(CONFIG_FILE, {})
+    rows = config.setdefault('agent', {}).get('mcp_servers', [])
+    item = next((row for row in rows if str(row.get('id')) == mcp_id), None)
+    if not item:
+        return jsonify(ok=False, message='MCP 服务不存在'), 404
+    timeout = max(2, min(60, int(item.get('timeout_seconds') or 10)))
+    started = _time.perf_counter()
+    error = ''
+    status = 0
+    for attempt in range(2):
+        try:
+            req = urllib.request.Request(item['endpoint'], headers={'Accept': 'application/json, text/event-stream'})
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                status = int(response.status or 0)
+            error = ''
+            break
+        except Exception as exc:
+            error = redact_sensitive_text(str(exc))[:240]
+    elapsed = round((_time.perf_counter() - started) * 1000)
+    result = {'ok': bool(status and status < 500), 'status': status, 'latency_ms': elapsed,
+              'message': f'连接成功（HTTP {status}，{elapsed} ms）' if status else f'连接失败：{error}'}
+    item['last_test'] = {**result, 'tested_at': datetime.now().isoformat(timespec='seconds')}
+    write_json(CONFIG_FILE, config)
+    return jsonify(result), (200 if result['ok'] else 502)
 
 # ── 功能中心·知识库维护：后台直连执行 ──
 # 旧版把任务写进 web_action_queue.json 等主进程消费，但主进程从未读取，
@@ -10527,34 +11440,7 @@ def _run_kb_organize_bg():
             log_line(f"[KB] 知识库整理失败: {e}", "WARN")
 
 
-def _run_kb_revisit_bg():
-    """后台线程：挑最久未复习的已学视频做轻量重温（optimize，不重新下载视频）。"""
-    import asyncio
-    from brain.video_analysis import _scan_knowledge_base_md_files
-    from knowledge.revisit import revisit_knowledge_video
-    with _KB_TASK_LOCK:
-        try:
-            candidates = _scan_knowledge_base_md_files()
-        except Exception as e:
-            log_line(f"[KB] 扫描知识库失败: {e}", "WARN")
-            return
-        if not candidates:
-            log_line("[KB] 知识库为空：先让机器人学习一些视频再复习", "WARN")
-            return
 
-        def _mtime(item):
-            try:
-                return os.path.getmtime(item[2])
-            except OSError:
-                return 0
-
-        bvid, title, fpath, up, cat_path = min(candidates, key=_mtime)
-        log_line(f"[KB] 开始复习（最久未复习）: {title[:50]}")
-        try:
-            asyncio.run(revisit_knowledge_video(bvid, title, up, cat_path, fpath, mode='optimize'))
-            log_line(f"[KB] 复习完成: {title[:50]}")
-        except Exception as e:
-            log_line(f"[KB] 复习失败: {e}", "WARN")
 
 
 @app.route('/api/action/kb-organize', methods=['POST'])
@@ -10568,11 +11454,8 @@ def api_action_kb_organize():
 
 @app.route('/api/action/kb-revisit', methods=['POST'])
 def api_action_kb_revisit():
-    """知识库复习 — 后台直连执行，优先最久未复习的视频。"""
-    if _kb_task_running():
-        return jsonify(dict(ok=False, message='知识库整理/复习正在进行中，请稍候')), 409
-    threading.Thread(target=_run_kb_revisit_bg, daemon=True).start()
-    return jsonify(dict(ok=True, message='知识库复习已开始（优先最久未复习），进度见「实时监听」日志'))
+    """Compatibility entry: explicit one-off task in the isolated review workspace."""
+    return api_video_review_run()
 
 # ── 知识辅导 (v2.0.3) ──
 
@@ -10628,113 +11511,34 @@ def api_kb_export_file():
         title = str(item.get("title") or source.stem or "knowledge")[:120]
         safe_name = re.sub(r"[\\/:*?\"<>|]+", "_", title).strip() or "knowledge"
         if fmt == "png":
-            from PIL import Image, ImageDraw, ImageFont, ImageOps
-
-            # ── 跨平台字体：Windows/Linux/macOS/Android(Termux) 常见中文字体 ──
-            # 旧实现只找 Windows 字体，其它平台回退到 Pillow 位图默认字体导致中文乱码；
-            # 找不到任何可用字体时明确报错，绝不输出一张乱码图。
-            font_raw = str(body.get("font_path") or "").strip()
-            font_candidates = ([Path(font_raw)] if font_raw else []) + [
-                Path(r"C:\Windows\Fonts\msyh.ttc"), Path(r"C:\Windows\Fonts\msyh.ttf"),
-                Path(r"C:\Windows\Fonts\simhei.ttf"), Path(r"C:\Windows\Fonts\simsun.ttc"),
-                Path("/system/fonts/NotoSansCJK-Regular.ttc"), Path("/system/fonts/DroidSansFallback.ttf"),
-                Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
-                Path("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"),
-                Path("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc"),
-                Path("/System/Library/Fonts/PingFang.ttc"),
-            ]
-            chosen_font_path = next(
-                (c for c in font_candidates
-                 if c.exists() and c.suffix.lower() in {".ttf", ".ttc", ".otf"}), None)
-            if chosen_font_path is None:
-                return jsonify(ok=False, message="未找到可渲染中文的系统字体，请指定 font_path（ttf/ttc/otf）后重试"), 400
-
-            def load_font(size):
-                return ImageFont.truetype(str(chosen_font_path), size)
-
-            # ── 按像素测宽排版：旧实现按固定 42 字符折行且只画 25 行，
-            # 标题/长行会横向溢出卡片，正文超 25 行被直接丢弃 ──
-            measure_img = Image.new("RGB", (8, 8))
-            measure = ImageDraw.Draw(measure_img)
-
-            def text_width(text, font):
-                try:
-                    return measure.textlength(text, font=font)
-                except AttributeError:  # 兼容旧版 Pillow
-                    box = font.getbbox(text)
-                    return box[2] - box[0]
-
-            def wrap_by_width(text, font, max_w):
-                lines = []
-                for raw_line in text.replace("\r", "").split("\n"):
-                    line = raw_line.rstrip()
-                    if not line:
-                        lines.append("")
-                        continue
-                    cur = ""
-                    for ch in line:
-                        if not cur or text_width(cur + ch, font) <= max_w:
-                            cur += ch
-                        else:
-                            lines.append(cur)
-                            cur = ch
-                    lines.append(cur)
-                return lines
-
-            width = 1600
-            text_x = 125
-            max_w = (width - 70 - 55) - text_x  # 卡片右缘(含内边距)到正文左缘
-
-            title_font = load_font(48)
-            size = 48
-            while size > 28 and text_width(title, title_font) > max_w:
-                size -= 2
-                title_font = load_font(size)
-            shown_title = title
-            while shown_title and text_width(shown_title + "…", title_font) > max_w:
-                shown_title = shown_title[:-1]
-            if shown_title != title:
-                shown_title += "…"
-
-            small_font = load_font(21)
-            body_font = load_font(27)
-            body_line_h = 38
-            meta = " · ".join(str(v) for v in (item.get("category_path") or "知识库", item.get("up_name") or "", item.get("bvid") or "") if v)
-            if text_width(meta, small_font) > max_w:
-                while meta and text_width(meta + "…", small_font) > max_w:
-                    meta = meta[:-1]
-                meta += "…"
-
-            body_lines = wrap_by_width(content, body_font, max_w)
-            max_body_lines = 400  # 封顶防巨图：约 1.6 万像素高
-            if len(body_lines) > max_body_lines:
-                body_lines = body_lines[:max_body_lines - 1] + ["……（内容过长已截断，完整内容请导出 Markdown 查看）"]
-            top_y = 245
-            height = max(1000, top_y + len(body_lines) * body_line_h + 150)
-
-            background = Image.new("RGB", (width, height), (255, 239, 247))
-            bg_raw = str(body.get("background_path") or "").strip()
-            if bg_raw:
-                bg_path = Path(bg_raw).expanduser().resolve()
-                allowed = [Path(USER_DATA_DIR).resolve(), (BASE_DIR / "assets").resolve()]
-                if not any(bg_path == root or root in bg_path.parents for root in allowed):
-                    return jsonify(ok=False, message="背景图必须来自用户数据目录或项目 assets 目录"), 400
-                if bg_path.exists():
-                    background = ImageOps.fit(Image.open(bg_path).convert("RGB"), (width, height))
-            draw = ImageDraw.Draw(background, "RGBA")
-            draw.rounded_rectangle((70, 65, width - 70, height - 65), radius=28, fill=(255, 255, 255, 218), outline=(255, 175, 205, 210), width=3)
-            draw.text((text_x, 115), shown_title, font=title_font, fill=(80, 42, 68, 255))
-            draw.text((text_x, 185), meta, font=small_font, fill=(135, 95, 120, 255))
-            y = top_y
-            for line in body_lines:
-                if line:
-                    draw.text((text_x, y), line, font=body_font, fill=(54, 48, 56, 255))
-                y += body_line_h
-            draw.text((text_x, height - 115), "BiliLearn · 本地知识导出", font=small_font, fill=(150, 115, 140, 230))
+            import zipfile
+            from services.image_export import render_images
+            image_options = read_json(CONFIG_FILE, {}).get('image_export', {})
+            stored_background = image_options.get('background', '')
+            if stored_background and not Path(stored_background).resolve().is_relative_to(Path(DATA_DIR).resolve() / 'image_backgrounds'):
+                return jsonify(ok=False, message='背景图片不属于当前账号'), 400
+            configured_background = str(body.get('background_path') or '').strip()
+            if configured_background:
+                background_candidate = Path(configured_background).expanduser().resolve()
+                allowed_background = Path(DATA_DIR).resolve() / 'image_backgrounds'
+                if not background_candidate.is_relative_to(allowed_background):
+                    return jsonify(ok=False, message='PNG 背景必须先通过当前账号上传'), 400
+                image_options = read_json(CONFIG_FILE, {}).get('image_export', {})
+                image_result = render_images(content, title, Path(DATA_DIR) / 'image_exports',
+                                             image_options, background_candidate)
+            else:
+                image_options = read_json(CONFIG_FILE, {}).get('image_export', {})
+                image_result = render_images(content, title, Path(DATA_DIR) / 'image_exports', image_options)
+            if image_result['pages'] == 1:
+                return send_file(image_result['paths'][0], mimetype='image/png', as_attachment=True,
+                                 download_name=f'{safe_name}.png')
             output = io.BytesIO()
-            background.save(output, format="PNG", optimize=True)
+            with zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as archive:
+                for image_path in image_result['paths']:
+                    archive.write(image_path, Path(image_path).name)
             output.seek(0)
-            return send_file(output, mimetype="image/png", as_attachment=True, download_name=f"{safe_name}.png")
+            return send_file(output, mimetype='application/zip', as_attachment=True,
+                             download_name=f'{safe_name}_images.zip')
         if fmt in {"docx", "pdf"}:
             import tempfile
             from services.document_export import export_docx_text, export_pdf_text
@@ -11026,6 +11830,16 @@ def api_behavior_ai_marker_toggle():
     try:
         body = request.get_json(force=True)
         enabled = bool(body.get('enabled', True))
+        if not enabled:
+            challenge = session.get('ai_marker_disable_challenge') or {}
+            token = str(body.get('challenge_token') or '')
+            issued_at = float(challenge.get('issued_at') or 0)
+            if not token or not secrets.compare_digest(token, str(challenge.get('token') or '')):
+                return jsonify(ok=False, message='请先完整阅读风险说明'), 409
+            remaining = 10 - (time.time() - issued_at)
+            if remaining > 0:
+                return jsonify(ok=False, message=f'请继续阅读 {max(1, int(remaining + 0.999))} 秒'), 425
+            session.pop('ai_marker_disable_challenge', None)
         config = read_json(CONFIG_FILE, {})
         behavior = config.setdefault('behavior', {})
         if enabled:
@@ -11038,6 +11852,13 @@ def api_behavior_ai_marker_toggle():
         return jsonify(dict(ok=True, message=msg, marker=behavior['ai_marker']))
     except Exception as e:
         return jsonify(dict(ok=False, message=str(e))), 400
+
+
+@app.route('/api/behavior/ai-marker/disable-challenge', methods=['POST'])
+def api_behavior_ai_marker_disable_challenge():
+    token = secrets.token_urlsafe(24)
+    session['ai_marker_disable_challenge'] = {'token': token, 'issued_at': time.time()}
+    return jsonify(ok=True, challenge_token=token, wait_seconds=10)
 
 @app.route('/api/behavior/save', methods=['POST'])
 def api_behavior_save():
@@ -11656,6 +12477,7 @@ body{background:var(--bg)!important;color:var(--text)!important}
 .theme-switching *,.theme-switching *::before,.theme-switching *::after{transition:none!important}
 body.theme-flash::after{content:'';position:fixed;inset:0;z-index:99999;pointer-events:none;background:radial-gradient(circle at var(--fx-x,50%) var(--fx-y,50%),rgba(255,255,255,.55),rgba(255,255,255,0) 55%);opacity:0;animation:themeFlash .45s cubic-bezier(.4,0,.2,1) both}
 @keyframes themeFlash{0%{opacity:0}22%{opacity:1}60%{opacity:.55}100%{opacity:0}}
+.current-user{margin:-8px 0 16px;padding:10px 12px;border:1px solid var(--border);border-radius:6px;background:var(--input);font-size:13px;color:var(--muted)}.current-user strong{color:var(--text);word-break:break-all}
 .recovery-tip{margin-top:18px;padding:14px;border:1px dashed var(--border);border-radius:8px;text-align:left;background:var(--input)!important}
 .rt-title{font-size:13px;font-weight:600;color:var(--text)!important;margin-bottom:8px}
 .recovery-tip p{font-size:12px;color:var(--muted)!important;margin:0 0 6px;line-height:1.6}
@@ -11668,6 +12490,7 @@ body.theme-flash::after{content:'';position:fixed;inset:0;z-index:99999;pointer-
 <script>if(typeof lucide==='undefined'){window.lucide={createIcons:function(){}}}</script>
 </head><body>
 <button class="theme-btn" type="button" onclick="toggleTheme(event)" id="themeBtn" aria-label="切换暗色模式">◐</button><div class="card"><h2>找回网页端密码</h2>
+<div class="current-user">当前本地用户名：<strong id="currentUsername"></strong></div>
 <div class="tabs"><button type="button" class="tab-btn active" id="tabBtnQ" onclick="switchTab('q')">密保问题</button><button type="button" class="tab-btn" id="tabBtnE" onclick="switchTab('e')">邮箱验证</button></div>
 <div id="paneQ"><div id="lookupQ"><div class="fg"><label>用户名</label><input id="username" placeholder="输入用户名" autocomplete="username"></div><button class="btn" onclick="loadQuestion()">下一步</button></div>
 <div id="resetQ" style="display:none"><div class="question" id="question"></div><div class="fg"><label>密保答案</label><input id="answer" type="password" autocomplete="off"></div><div class="fg"><label>新密码</label><input id="password" type="password" autocomplete="new-password"></div><div class="fg"><label>确认新密码</label><input id="password2" type="password" autocomplete="new-password"></div><button class="btn" onclick="resetPassword()">重置密码</button></div></div>
@@ -11675,7 +12498,7 @@ body.theme-flash::after{content:'';position:fixed;inset:0;z-index:99999;pointer-
 <div id="emailPane" style="display:none"><div class="fg"><label>选择接收验证码的邮箱</label><div id="emailOpts"></div></div><div class="fg"><label>验证码</label><div class="code-row"><input id="emailCode" placeholder="输入收到的验证码" autocomplete="one-time-code"><button type="button" class="btn" id="sendCodeBtn" onclick="sendEmailCode()">发送验证码</button></div></div><div class="fg"><label>新密码</label><input id="passwordE" type="password" autocomplete="new-password"></div><div class="fg"><label>确认新密码</label><input id="passwordE2" type="password" autocomplete="new-password"></div><button class="btn" onclick="resetPasswordEmail()">重置密码</button></div></div>
 <div class="msg" id="msg"></div><div class="recovery-tip"><div class="rt-title">找回不了？直接用「一次性恢复码」登录</div><p>用记事本打开这个文件（随软件安装自动生成）：</p><div class="rt-path"><code id="recPath"></code><button type="button" class="rt-copy" onclick="copyRecPath()">复制路径</button></div><p class="rt-use">把文件里的「一次性恢复码」<b>直接填到登录页的密码框</b>（用户名不变）即可登录，无需重置密码。登录成功后恢复码会自动更新，旧码立即失效。</p></div><a class="back" href="/login">返回登录</a></div><script>
 var msg=document.getElementById('msg');
-var _RECOVERY_FILE=__RECOVERY_FILE_PATH__;document.getElementById('recPath').textContent=_RECOVERY_FILE;
+var _RECOVERY_FILE=__RECOVERY_FILE_PATH__,_CURRENT_USERNAME=__CURRENT_USERNAME__;document.getElementById('recPath').textContent=_RECOVERY_FILE;document.getElementById('currentUsername').textContent=_CURRENT_USERNAME||'尚未设置';if(_CURRENT_USERNAME){document.getElementById('username').value=_CURRENT_USERNAME;document.getElementById('usernameE').value=_CURRENT_USERNAME}
 function copyRecPath(){var btn=document.querySelector('.rt-copy');try{navigator.clipboard.writeText(_RECOVERY_FILE)}catch(e){}btn.textContent='已复制';setTimeout(function(){btn.textContent='复制路径'},1500)}
 function el(id){return document.getElementById(id)}
 function showMsg(t,c){msg.textContent=t;msg.className='msg '+c}
@@ -11721,9 +12544,12 @@ applyTheme();
 </script>
 </body></html>"""
     # 运行时注入一次性恢复码文件的真实路径（C 盘完整路径，告知用户直接填入即可登录）
-    return html.replace(
-        '__RECOVERY_FILE_PATH__',
-        json.dumps(str(_recovery_file_path()), ensure_ascii=False))
+    config = read_json(CONFIG_FILE, {})
+    web_cfg = config.get('web', {}) if isinstance(config, dict) else {}
+    username = str(web_cfg.get('username') or '') if isinstance(web_cfg, dict) else ''
+    return (html
+            .replace('__RECOVERY_FILE_PATH__', json.dumps(str(_recovery_file_path()), ensure_ascii=False))
+            .replace('__CURRENT_USERNAME__', json.dumps(username, ensure_ascii=False)))
 
 
 def _account_security_html():
@@ -11735,7 +12561,7 @@ function toggleCustom(){document.getElementById('customRow').style.display=docum
 </script></body></html>"""
 
 
-def _forgot_password_html():
+def _legacy_forgot_password_html_unused():
     return r"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>忘记密码 · 管理面板</title><style>
@@ -11769,7 +12595,7 @@ applyTheme();
 </body></html>"""
 
 
-def _account_security_html():
+def _legacy_account_security_html_unused():
     return r"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>账号安全 · 管理面板</title><style>
 *{box-sizing:border-box}body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Microsoft YaHei',sans-serif;background:#f7f7f7;color:#111;display:flex;align-items:center;justify-content:center;min-height:100vh}.card{background:#fff;border:1px solid #e6e6e6;border-radius:8px;padding:32px;max-width:420px;width:92%;box-shadow:0 4px 24px rgba(0,0,0,.06)}h2{font-size:20px;margin:0 0 24px}.fg{margin-bottom:15px}.fg label{display:block;font-size:12px;color:#777;margin-bottom:6px}.fg input,.fg select{width:100%;padding:10px 12px;border:1px solid #ddd;border-radius:6px;font-size:15px;background:#fff}.btn{width:100%;padding:11px;border:0;border-radius:6px;background:#D97757;color:#fff;font-size:14px;cursor:pointer}.msg{font-size:13px;min-height:20px;margin-top:12px}.err{color:#b42318}.ok{color:#267a45}.back{display:block;text-align:center;margin-top:16px;color:#666;text-decoration:none;font-size:13px}
@@ -12287,6 +13113,7 @@ def api_health():
         return jsonify({
             'ok': True,
             'service': WEB_SERVICE_ID,
+            'account_id': os.getenv('BILI_ACCOUNT_ID', ''),
             'status': 'ok',
             'version': APP_VERSION,
             'uptime_seconds': round(time.time() - _START_TIME, 1),
@@ -12984,6 +13811,8 @@ def main():
     host = os.getenv('WEB_HOST', '127.0.0.1')
     account_label = ""
 
+    if _ensure_default_panel_account():
+        print("[Account] 已创建本地默认账号 yaya；首次登录后建议修改默认密码。", flush=True)
     if _ensure_recovery_file():
         print(f"[Account] 忘记账号或密码时，请查看: {_recovery_file_path()}", flush=True)
 
@@ -12995,6 +13824,8 @@ def main():
             webbrowser.open(url)
         return
     if is_port_open(port):
+        if os.getenv('BILI_ACCOUNT_ID'):
+            raise RuntimeError(f'账号端口 {port} 已占用，禁止自动切换端口')
         fallback_port = find_available_port(port + 1)
         print(f"[Web] 端口 {port} 已被其他程序占用，自动改用 {fallback_port}。", flush=True)
         port = fallback_port
@@ -13008,20 +13839,6 @@ def main():
     # 终端已确认免责声明，直接标记 session 跳过网页端再次确认
     with app.test_request_context():
         session['disclaimer_agreed'] = True
-
-    # ── 自动拉起内置 OpenCode Zen 免费代理（异步，不阻塞面板启动）──
-    try:
-        from services.opencode_zen_proxy import ensure_proxy_running
-        _zen = ensure_proxy_running()
-        if _zen.get("running"):
-            # 只有本次真正拉起子进程才播报；复用已在运行的实例时保持安静，
-            # 避免面板每次重启都往日志末尾重复追加"[Zen] 已就绪"。
-            if str(_zen.get("reason") or "").startswith("已启动"):
-                log_line(f"[Zen] 免费渠道代理已就绪 (port {_zen.get('port')})")
-        else:
-            log_line(f"[Zen] 免费渠道代理启动失败: {_zen.get('reason')}", "WARN" if _zen.get("reason") else "INFO")
-    except Exception as _e:
-        log_line(f"[Zen] 免费渠道代理启动异常: {_e}", "WARN")
 
     _lan_line = (f"║   局域网: http://{host}:{port}"
                  if host not in ("127.0.0.1", "localhost")
@@ -13063,6 +13880,8 @@ def main():
 
         threading.Thread(target=_auto_start_bot, daemon=True).start()
     def _exit_web_from_tray() -> None:
+        if account_web.manager is not None:
+            account_web.manager.close()
         stop_bot_process()
         # [N1] 给托盘线程时间真正移除图标，硬杀会留下"幽灵图标"
         time.sleep(0.8)
@@ -13109,9 +13928,49 @@ def main():
                     tray.notify("BiliLearn 提醒", content)
 
         threading.Thread(target=_dispatch_local_reminders, daemon=True).start()
+    from services.diary_scheduler import DiaryScheduler, settings as diary_settings
+    diary_stop = threading.Event()
+    diary_scheduler = DiaryScheduler(DATA_DIR)
+    def run_diary_schedule():
+        while not diary_stop.is_set():
+            try:
+                preferences = diary_settings()
+                if diary_scheduler.due(preferences):
+                    from persona.managers import PersonaManager, MoodManager
+                    result = asyncio.run(diary_scheduler.generate(preferences,
+                        persona_prompt=PersonaManager().build_prompt_block(), mood=MoodManager().get_current()))
+                    if result.get('ok'):
+                        log_line('[DIARY] 自动日记已生成')
+                    elif result.get('status') == 'failed':
+                        log_line('[DIARY] ' + result['message'])
+            except Exception as error:
+                log_line('[DIARY] 调度检查失败：' + type(error).__name__)
+            diary_stop.wait(60)
+    threading.Thread(target=run_diary_schedule, daemon=True, name='diary-schedule').start()
+    from services.evolution_engine import EvolutionEngine
+    from services.evolution_settings import settings as evolution_settings
+    evolution_engine = EvolutionEngine(DATA_DIR)
+    def run_evolution_schedule():
+        while not diary_stop.is_set():
+            try:
+                preferences = evolution_settings()
+                layer = evolution_engine.due_layer(preferences)
+                if layer:
+                    result = asyncio.run(evolution_engine.generate(layer, preferences))
+                    if result.get('ok'):
+                        log_line('[EVOLVE] 已生成进化提案，等待审核或参数观察')
+                    elif result.get('status') == 'failed':
+                        log_line('[EVOLVE] ' + result['message'])
+            except Exception as error:
+                log_line('[EVOLVE] 调度检查失败：' + type(error).__name__)
+            diary_stop.wait(60)
+    threading.Thread(target=run_evolution_schedule, daemon=True, name='evolution-schedule').start()
     try:
         app.run(host=host, port=port, debug=False, threaded=True)
     finally:
+        diary_stop.set()
+        if account_web.manager is not None:
+            account_web.manager.close()
         tray.stop()
         _system_tray = None
 # 私聊系统默认黑名单：B站官方机器人（哔哩哔哩智能机）总是被拉黑，
@@ -13643,14 +14502,77 @@ def api_skills():
 
 @app.route('/api/evolution')
 def api_evolution():
+    from services.evolution_engine import EvolutionEngine
+    from services.evolution_settings import settings
     try:
-        evo_file = DATA_DIR / "evolution_log.json"
-        if not evo_file.exists(): return jsonify(ok=True, logs=[], mood={})
-        import json as _json
-        data = _json.loads(evo_file.read_text(encoding="utf-8-sig"))
-        return jsonify(ok=True, logs=data.get("logs", []), mood=data.get("mood", {}))
-    except Exception as e:
-        return jsonify(ok=False, message=str(e)), 500
+        preferences = settings()
+        return jsonify(ok=True, settings=preferences, **EvolutionEngine(DATA_DIR).snapshot(preferences))
+    except (ValueError, TypeError, OSError) as error:
+        return jsonify(ok=False, message='进化数据读取失败：' + type(error).__name__), 400
+
+
+@app.route('/api/evolution/settings', methods=['POST'])
+def api_evolution_settings():
+    from services.evolution_settings import validate_settings
+    from core.config import load_config, save_config
+    try:
+        body = request.get_json(force=True)
+        preferences = validate_settings(body)
+        config_data = load_config()
+        config_data['self_evolution'] = preferences
+        if not save_config(config_data):
+            return jsonify(ok=False, message='保存失败'), 500
+        return jsonify(ok=True, settings=preferences, message='进化设置已保存；安全规则不会随提案改变')
+    except (ValueError, TypeError) as error:
+        return jsonify(ok=False, message=redact_sensitive_text(str(error))), 400
+
+
+@app.route('/api/evolution/generate', methods=['POST'])
+def api_evolution_generate():
+    from services.evolution_engine import EvolutionEngine
+    from services.evolution_settings import settings
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict) or body.get('confirmed') is not True:
+        return jsonify(ok=False, message='请确认来源隐私与AI额度消耗'), 400
+    try:
+        preferences = settings()
+        layer = body.get('layer', 'parameters')
+        engine = EvolutionEngine(DATA_DIR)
+        job_id = engine.reserve(layer, preferences, manual=True)
+    except (ValueError, TypeError) as error:
+        return jsonify(ok=False, message=redact_sensitive_text(str(error))), 400
+    def generate():
+        asyncio.run(engine.generate(layer, preferences, manual=True, job_id=job_id))
+    threading.Thread(target=generate, daemon=True, name='evolution-generation').start()
+    return jsonify(ok=True, job_id=job_id, message='已提交提案任务，不会自动开启进化'), 202
+
+
+@app.route('/api/evolution/action', methods=['POST'])
+def api_evolution_action():
+    from services.evolution_engine import EvolutionEngine
+    from services.evolution_settings import settings
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict) or body.get('confirmed') is not True:
+        return jsonify(ok=False, message='需要确认应用、拒绝、固化或回滚操作'), 400
+    try:
+        engine = EvolutionEngine(DATA_DIR)
+        action = body.get('action')
+        if action == 'apply':
+            engine.apply(str(body.get('proposal_id') or ''), settings())
+        elif action == 'reject':
+            engine.reject(str(body.get('proposal_id') or ''))
+        elif action == 'rollback':
+            if type(body.get('version_id')) is not int:
+                raise ValueError('版本ID无效')
+            engine.rollback(body['version_id'])
+        elif action == 'finalize':
+            engine.finalize()
+        else:
+            raise ValueError('未知进化操作')
+        log_line('[EVOLVE] 已执行本地进化操作：' + action)
+        return jsonify(ok=True, message='操作已完成，原始知识文件与外部OB配置保持不变')
+    except (ValueError, TypeError) as error:
+        return jsonify(ok=False, message=redact_sensitive_text(str(error))), 400
 
 
 @app.route('/api/export-multi', methods=['POST'])
@@ -13689,6 +14611,9 @@ def api_update_unskip():
     except Exception as exc:
         return jsonify(ok=False, message=redact_sensitive_text(str(exc))), 500
 
+
+from core.account_web import account_web
+account_web.register(app)
 
 if __name__ == '__main__':
     main()

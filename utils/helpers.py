@@ -74,29 +74,16 @@ def _clean_ai_output(text):
 
 
 def _load_json_file(path, default=None):
-    """安全加载 JSON 文件，不存在或损坏时返回 default"""
-    if os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8-sig") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError):
-            pass
-    return default.copy() if isinstance(default, dict) else default
+    from utils.storage import JsonStore
+    store = JsonStore(path)
+    if not store.exists():
+        return default.copy() if isinstance(default, dict) else default
+    return store.read(default)
 
 
 def _save_json_file(path, data):
-    """原子写入 JSON 文件（先写临时文件再重命名）"""
-    try:
-        os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
-        tmp_path = f"{path}.tmp"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp_path, path)
-        return True
-    except OSError:
-        return False
-
-
+    from utils.storage import JsonStore
+    return JsonStore(path).write(data)
 
 
 def _safe_task_callback(task_name="unknown"):

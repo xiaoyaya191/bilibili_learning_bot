@@ -20,20 +20,14 @@ class JsonStore:
         self.default = default
 
     def read(self) -> Any:
-        if not self.path.exists():
-            return self.default.copy() if isinstance(self.default, dict) else self.default
-        try:
-            return json.loads(self.path.read_text(encoding="utf-8-sig"))
-        except (OSError, json.JSONDecodeError):
-            return self.default.copy() if isinstance(self.default, dict) else self.default
+        from copy import deepcopy
+        from utils.storage import JsonStore as SharedStore
+        return SharedStore(self.path).read(deepcopy(self.default))
 
     def write(self, data: Any) -> None:
-        content = json.dumps(data, ensure_ascii=False, indent=2)
-        with NamedTemporaryFile("w", encoding="utf-8", dir=self.path.parent, delete=False) as tmp:
-            tmp.write(content)
-            tmp.write("\n")
-            temp_name = tmp.name
-        Path(temp_name).replace(self.path)
+        from utils.storage import JsonStore as SharedStore
+        if not SharedStore(self.path).write(data):
+            raise OSError('账号数据库保存失败')
 
 
 DEFAULT_PERSONA = {

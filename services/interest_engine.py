@@ -13,11 +13,16 @@ services/interest_engine.py — 智能兴趣引擎 v2.0
 import json
 import os
 import random
+import copy
 from datetime import datetime
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple, Set
 from colorama import Fore, Style
 from core.user_data import DATA_DIR
+from pathlib import Path
+from utils.storage import JsonStore
+from utils.database import register_directory
+from services.interest_persistence import canonical_keyword, merge_delta
 
 # ── 默认配置 ──
 DEFAULT_ENGINE_CONFIG = {
@@ -30,9 +35,12 @@ DEFAULT_ENGINE_CONFIG = {
         # Interests should be strict by default. Exploration is opt-in from
         # the Interest page instead of silently admitting unrelated videos.
         "serendipity_rate": 0.0,
-        "auto_sync_psycho": True,    # 从PsychoProfile自动同步
+        "auto_sync_psycho": False,   # 用户显式开启后才从 PsychoProfile 同步
         "use_synonyms": True,        # 启用同义词扩展
-        "ai_suggest": True,          # AI定期建议关键词
+        "ai_suggest": False,         # AI 自动添加默认关闭
+        "ai_suggest_probability": 0.0,  # 每次到达触发点后实际添加概率
+        "max_auto_interests": 30,
+        "max_suggestions_per_batch": 3,
         "ai_suggest_interval": 20,   # 每看20个视频后AI建议一次
         "scoring": {
             "enabled": True,
@@ -124,7 +132,11 @@ class InterestEngine:
     # ── 初始化 ──
     def __init__(self, config_file: str = None):
         self.config_file = config_file or ENGINE_CONFIG_FILE
+        register_directory(Path(self.config_file).resolve().parent)
+        self._store = JsonStore(self.config_file)
+        self._base = copy.deepcopy(DEFAULT_ENGINE_CONFIG)
         self.config = self._load_or_init()
+        self._base = copy.deepcopy(self.config)
         self._ensure_dirs()
 
     def _ensure_dirs(self):
@@ -134,23 +146,57 @@ class InterestEngine:
         """加载配置，如不存在则尝试从旧格式迁移"""
         if os.path.exists(self.config_file):
             try:
-                with open(self.config_file, 'r', encoding='utf-8-sig') as f:
-                    cfg = json.load(f)
-                # 确保所有字段存在
-                return self._merge_defaults(cfg)
-            except (json.JSONDecodeError, OSError):
-                pass
+                with open(self.config_file, 'r', encoding='utf-8-sig') as source:
+                    raw = json.load(source)
+                if not isinstance(raw, dict):
+                    raise ValueError('兴趣配置必须为对象，原文件未修改')
+            except (json.JSONDecodeError, UnicodeDecodeError, OSError) as error:
+                raise ValueError(f'兴趣配置损坏，原文件未修改: {error}') from error
+            cfg = self._store.read()
+            if not isinstance(cfg, dict):
+                raise ValueError("兴趣配置必须为对象，原文件未修改")
+            return self._merge_defaults(cfg)
         # 尝试迁移旧 interests.json
         migrated = self._migrate_from_legacy()
         if migrated:
             return self._merge_defaults(migrated)
-        return dict(DEFAULT_ENGINE_CONFIG)  # 全新默认
+        # Each profile owns its nested lists and settings. A shallow copy here
+        # would let one new profile mutate the process-wide defaults and leak
+        # interests into every engine created afterwards.
+        return copy.deepcopy(DEFAULT_ENGINE_CONFIG)
 
     def _merge_defaults(self, cfg: dict) -> dict:
         """深度合并默认值，保证新字段存在"""
-        import copy
         merged = copy.deepcopy(DEFAULT_ENGINE_CONFIG)
         self._deep_update(merged, cfg)
+        # v3.1.6: every item has an explicit owner.  Legacy items without
+        # provenance are user-owned, so upgrades can never hand them to AI.
+        normalized = []
+        seen = {}
+        for raw in merged.get("interests", []):
+            if isinstance(raw, str):
+                raw = {"keyword": raw, "weight": "medium", "synonyms": []}
+            if not isinstance(raw, dict):
+                continue
+            keyword = canonical_keyword(raw.get("keyword", ""))
+            if not keyword:
+                continue
+            item = dict(raw)
+            item["keyword"] = keyword
+            source = str(item.get("source") or "").strip().lower()
+            if source not in {"manual", "ai_suggested", "psycho_sync"}:
+                source = "ai_suggested" if item.get("auto_suggested", False) else "manual"
+            item["source"] = source
+            item["auto_suggested"] = source != "manual"
+            item["user_protected"] = source == "manual"
+            if keyword in seen:
+                previous = normalized[seen[keyword]]
+                if source == 'manual' and previous.get('source') != 'manual':
+                    normalized[seen[keyword]] = item
+                continue
+            seen[keyword] = len(normalized)
+            normalized.append(item)
+        merged["interests"] = normalized
         return merged
 
     def _deep_update(self, target: dict, source: dict):
@@ -174,10 +220,11 @@ class InterestEngine:
             if not old_interests:
                 return None
             new_interests = [
-                {"keyword": kw.lower(), "weight": "medium", "synonyms": [], "auto_suggested": False}
+                {"keyword": kw.lower(), "weight": "medium", "synonyms": [],
+                 "auto_suggested": False, "source": "manual", "user_protected": True}
                 for kw in old_interests if isinstance(kw, str)
             ]
-            cfg = dict(DEFAULT_ENGINE_CONFIG)
+            cfg = copy.deepcopy(DEFAULT_ENGINE_CONFIG)
             cfg["interests"] = new_interests
             cfg["updated_at"] = datetime.now().isoformat()
             self.config = cfg
@@ -189,15 +236,35 @@ class InterestEngine:
 
     # ── 持久化 ──
     def save(self):
-        self.config["updated_at"] = datetime.now().isoformat()
-        try:
-            tmp = self.config_file + '.tmp'
-            with open(tmp, 'w', encoding='utf-8') as f:
-                json.dump(self.config, f, ensure_ascii=False, indent=2)
-            os.replace(tmp, self.config_file)
-            return True
-        except OSError:
+        desired = self._merge_defaults(self.config)
+        merged = {}
+        def update(current):
+            latest = self._merge_defaults(current)
+            merged.update(merge_delta(self._base, desired, latest))
+            limit = max(0, int(merged.get('settings', {}).get('max_auto_interests', 30)))
+            existing = {item['keyword'] for item in latest['interests']}
+            automatic = sum(item.get('source') != 'manual' for item in latest['interests'])
+            retained = []
+            for item in merged['interests']:
+                if item.get('source') != 'manual' and item['keyword'] not in existing:
+                    if automatic >= limit:
+                        continue
+                    automatic += 1
+                retained.append(item)
+            merged['interests'] = retained
+            merged["updated_at"] = datetime.now().isoformat()
+            current.clear()
+            current.update(merged)
+        if not self._store.update(update):
             return False
+        self.config = merged
+        self._base = copy.deepcopy(merged)
+        return True
+
+    def refresh(self):
+        latest = self._merge_defaults(self._store.read({}))
+        self.config = merge_delta(self._base, self.config, latest)
+        self._base = copy.deepcopy(latest)
 
     # ── 便利属性 ──
     @property
@@ -230,6 +297,7 @@ class InterestEngine:
 
     # ── 获取纯关键词列表（向后兼容）──
     def get_keywords(self) -> List[str]:
+        self.refresh()
         return [item.get("keyword", item) if isinstance(item, dict) else item
                 for item in self.interests_list]
 
@@ -238,18 +306,35 @@ class InterestEngine:
 
     # ── 兴趣管理 CRUD ──
     def add_interest(self, keyword: str, weight: str = "medium",
-                     synonyms: List[str] = None, auto_suggested: bool = False) -> bool:
-        keyword = keyword.strip().lower()
+                     synonyms: List[str] = None, auto_suggested: bool = False,
+                     source: str = "") -> bool:
+        keyword = canonical_keyword(keyword)
         if not keyword:
             return False
-        existing = [i.get("keyword", "") for i in self.interests_list if isinstance(i, dict)]
-        if keyword in existing:
+        source = source if source in {"manual", "ai_suggested", "psycho_sync"} else (
+            "ai_suggested" if auto_suggested else "manual"
+        )
+        self.refresh()
+        if source != "manual" and sum(item.get("source") != "manual" for item in self.interests_list) >= int(self.settings.get("max_auto_interests", 30)):
+            return False
+        existing = next((i for i in self.interests_list
+                         if isinstance(i, dict) and i.get("keyword", "") == keyword), None)
+        if existing is not None:
+            # A user re-adding an AI item takes permanent ownership. Automated
+            # callers may never edit a pre-existing item.
+            if source == "manual" and existing.get("source") != "manual":
+                existing.update(weight=weight, synonyms=synonyms or existing.get("synonyms", []),
+                                source="manual", auto_suggested=False, user_protected=True)
+                self.save()
+                return True
             return False
         item = {
             "keyword": keyword,
             "weight": weight,
             "synonyms": synonyms or [],
-            "auto_suggested": auto_suggested
+            "auto_suggested": source != "manual",
+            "source": source,
+            "user_protected": source == "manual",
         }
         self.interests_list.append(item)
         # 自动扩充同义词
@@ -259,7 +344,7 @@ class InterestEngine:
         return True
 
     def remove_interest(self, keyword: str) -> bool:
-        keyword = keyword.strip().lower()
+        keyword = canonical_keyword(keyword)
         for i, item in enumerate(self.interests_list):
             k = item.get("keyword", "") if isinstance(item, dict) else item
             if k == keyword:
@@ -537,7 +622,7 @@ class InterestEngine:
         从 PsychoProfile 的 L1 表层兴趣同步关键词
         返回新增数量
         """
-        if not self.settings.get("auto_sync_psycho", True) or not psycho_profile:
+        if not self.settings.get("auto_sync_psycho", False) or not psycho_profile:
             return 0
 
         added = 0
@@ -551,11 +636,11 @@ class InterestEngine:
                     for kw, score_val in l1.items():
                         if score_val > 0.5:
                             weight = "high" if score_val > 0.8 else "medium"
-                            if self.add_interest(str(kw), weight=weight, auto_suggested=True):
+                            if self.add_interest(str(kw), weight=weight, auto_suggested=True, source="psycho_sync"):
                                 added += 1
                 elif isinstance(l1, list):
                     for kw in l1:
-                        if self.add_interest(str(kw), auto_suggested=True):
+                        if self.add_interest(str(kw), auto_suggested=True, source="psycho_sync"):
                             added += 1
 
             # L4: 深层动机 → 权重调整（仅自动建议的兴趣，手动设置不覆盖）
@@ -608,7 +693,10 @@ class InterestEngine:
 
     def should_suggest_keywords(self) -> bool:
         """是否应该触发AI建议新关键词"""
-        if not self.settings.get("ai_suggest", True):
+        if not self.settings.get("ai_suggest", False):
+            return False
+        probability = max(0.0, min(1.0, float(self.settings.get("ai_suggest_probability", 0.0) or 0.0)))
+        if probability <= 0 or random.random() >= probability:
             return False
         interval = self.settings.get("ai_suggest_interval", 20)
         count = self.config.get("videos_watched_count", 0)
@@ -632,9 +720,17 @@ class InterestEngine:
 
     def apply_ai_suggestions(self, suggestions: List[str]):
         """应用AI建议的关键词"""
+        probability = max(0.0, min(1.0, float(
+            self.settings.get("ai_suggest_probability", 0.0) or 0.0
+        )))
+        # This is a second safety boundary for callers that bypass
+        # should_suggest_keywords(). The random roll happens only there; here
+        # we merely require the user to have enabled a non-zero probability.
+        if not self.settings.get("ai_suggest", False) or probability <= 0:
+            return 0
         added = 0
-        for kw in suggestions:
-            if self.add_interest(kw, auto_suggested=True):
+        for kw in suggestions[:max(0, int(self.settings.get("max_suggestions_per_batch", 3)))]:
+            if self.add_interest(kw, auto_suggested=True, source="ai_suggested"):
                 added += 1
         if added:
             _elog(f"AI建议: 新增 {added} 个关键词 ({', '.join(suggestions)})", "OK")
@@ -666,8 +762,9 @@ class InterestEngine:
             "proxy_mode": self.proxy_mode,
             "scoring_enabled": self.scoring_enabled,
             "serendipity": f"{self.serendipity_rate*100:.0f}%",
-            "auto_sync_psycho": self.settings.get("auto_sync_psycho", True),
-            "ai_suggest": self.settings.get("ai_suggest", True),
+            "auto_sync_psycho": self.settings.get("auto_sync_psycho", False),
+            "ai_suggest": self.settings.get("ai_suggest", False),
+            "ai_suggest_probability": self.settings.get("ai_suggest_probability", 0.0),
         }
 
     def display_settings(self):
@@ -711,6 +808,8 @@ def get_engine() -> InterestEngine:
     global _engine_instance
     if _engine_instance is None:
         _engine_instance = InterestEngine()
+    else:
+        _engine_instance.refresh()
     return _engine_instance
 
 

@@ -71,10 +71,11 @@ class ToolRegistry:
         return [t for t in self._tools.values() if t.enabled]
 
     def schemas(self, include_write: bool = True) -> list:
+        from services.action_permissions import tool_allowed
         return [
             t.openai_schema()
             for t in self._tools.values()
-            if t.enabled and (include_write or t.risk == "read")
+            if t.enabled and (include_write or t.risk == "read") and tool_allowed(t)
         ]
 
     async def invoke(self, name: str, arguments: dict) -> dict:
@@ -85,6 +86,9 @@ class ToolRegistry:
         defn = self._tools.get(name)
         if defn is None or not defn.enabled:
             return {"ok": False, "error": "未知或未启用的工具: " + str(name)}
+        from services.action_permissions import tool_allowed
+        if not tool_allowed(defn, arguments):
+            return {"ok": False, "error": "AI 工具权限未授权: " + str(name)}
         try:
             import inspect
             if inspect.iscoroutinefunction(defn.handler):

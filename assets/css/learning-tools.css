@@ -1,0 +1,41 @@
+#pg-learning-tools { --learning-border: var(--border); --learning-surface: var(--bg-card); --learning-text: var(--text-primary); --learning-input: var(--bg-secondary); }
+#pg-learning-tools > div { max-width: 1120px !important; padding: 0 !important; }
+#pg-learning-tools h1 { font-size: clamp(26px, 3vw, 34px); letter-spacing: -.8px; }
+#pg-learning-tools h2 { margin: 0 0 18px; font-size: 17px; letter-spacing: -.25px; }
+#pg-learning-tools section.card { background: var(--learning-surface); border: 1px solid var(--learning-border); border-radius: 14px; box-shadow: 0 4px 18px rgba(13,13,13,.035); }
+#pg-learning-tools p { margin: 13px 0; font-size: 13px; line-height: 1.7; color: var(--text-secondary); }
+#pg-learning-tools label { display: block; font-size: 13px; line-height: 1.8; color: var(--learning-text); }
+#pg-learning-tools input:not([type="checkbox"]):not([type="file"]), #pg-learning-tools textarea, #pg-learning-tools select { display: block; width: 100%; box-sizing: border-box; padding: 10px 12px; border: 1px solid var(--learning-border); border-radius: 8px; background: var(--learning-input); color: var(--learning-text); font: inherit; outline: none; }
+#pg-learning-tools input:not([type="checkbox"]):not([type="file"]), #pg-learning-tools textarea { margin-top: 7px; }
+#pg-learning-tools input:focus, #pg-learning-tools textarea:focus, #pg-learning-tools select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-bg); }
+#pg-learning-tools input[type="number"] { max-width: 170px; }
+#pg-learning-tools select { margin: 7px 0 14px; }
+#pg-learning-tools input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); vertical-align: middle; margin-right: 7px; }
+#pg-learning-tools input[type="file"] { display: block; margin: 12px 0; max-width: 100%; font-size: 13px; }
+#pg-learning-tools .btn { border-radius: 8px; padding: 10px 15px; min-height: 38px; border: 1px solid var(--learning-border); background: var(--learning-surface); color: var(--learning-text); transition: opacity .2s, transform .2s, border-color .2s; }
+#pg-learning-tools .btn:hover { transform: translateY(-1px); border-color: var(--accent); }
+#pg-learning-tools #learning-save, #pg-learning-tools #learning-export-images { background: var(--accent); color: #fff; border-color: var(--accent); }
+#pg-learning-tools .btn:disabled { opacity: .55; cursor: wait; }
+#pg-learning-tools #learning-status { font-size: 13px; color: var(--text-secondary); }
+#pg-learning-tools > div > div:first-of-type { margin: 18px 0 !important; }
+@media (max-width: 600px) { #pg-learning-tools h1 { font-size: 25px; } #pg-learning-tools section.card { padding: 19px !important; } }
+@media (prefers-reduced-motion: reduce) { #pg-learning-tools .btn { transition: none; } }
+
+#pg-learning-tools .learning-settings-actions{display:flex;gap:10px;flex-wrap:wrap;margin:0 0 20px!important}
+#pg-learning-tools .learning-export-layout{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(260px,1fr);gap:18px;align-items:start}
+#pg-learning-tools .learning-compose,#pg-learning-tools .learning-layout{padding:24px;min-width:0}
+#pg-learning-tools .learning-compose textarea{min-height:300px!important;line-height:1.8;resize:vertical}
+#pg-learning-tools .learning-flow{display:flex;gap:24px;flex-wrap:wrap;padding:13px 0 20px;color:var(--text-secondary);font-size:12px}
+#pg-learning-tools .learning-flow b{font-size:11px;color:var(--accent);margin-right:7px;font-variant-numeric:tabular-nums}
+#pg-learning-tools .learning-advanced{margin-top:24px;border:1px solid var(--border);border-radius:14px;background:var(--bg-card)}
+#pg-learning-tools .learning-advanced>summary{padding:18px 22px;display:flex;align-items:center;gap:12px;cursor:pointer;list-style:none;font-size:14px}
+#pg-learning-tools .learning-advanced summary small{color:var(--text-secondary);font-size:11px;font-weight:400;margin-left:auto}
+#pg-learning-tools .learning-advanced summary svg{width:16px;height:16px;color:var(--text-tertiary);transition:transform .2s}
+#pg-learning-tools .learning-advanced[open] summary svg{transform:rotate(180deg)}
+#pg-learning-tools .learning-advanced-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;padding:0 20px 20px}
+#pg-learning-tools .learning-advanced-grid .card{box-shadow:none;background:var(--bg-secondary);min-width:0}
+#pg-learning-tools #learning-status{padding:12px 0;line-height:1.7}
+@media(max-width:850px){#pg-learning-tools .learning-export-layout,#pg-learning-tools .learning-advanced-grid{grid-template-columns:1fr}}
+@media(max-width:600px){#pg-learning-tools .learning-advanced>summary{flex-wrap:wrap}#pg-learning-tools .learning-advanced summary small{margin-left:0;flex:1 1 100%}#pg-learning-tools .learning-advanced-grid{padding:0 12px 12px}}
+
+#pg-learning-tools .learning-flow b{display:inline;background:transparent;color:var(--accent);border-radius:0;padding:0;width:auto;height:auto}

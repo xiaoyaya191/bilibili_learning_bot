@@ -31,11 +31,12 @@ ENV PATH="/root/.local/bin:${PATH}"
 COPY . .
 
 # 创建运行时目录并设置权限
-RUN mkdir -p Data KnowledgeBase highlights html_exports model && \
+RUN mkdir -p Data KnowledgeBase highlights html_exports model user_data && \
     chmod -R 755 Data KnowledgeBase highlights html_exports model
 
 # 暴露 Web 控制台端口
 EXPOSE 8080
+EXPOSE 18083 18084 18085 18086 18087 18088 18089 18090 18091 18092
 
 # 健康检查
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
@@ -46,6 +47,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
 #   cli    — CLI 交互式菜单
 #   standby — 待机模式（后台监听）
 ENV WEB_PORT=8080
+ENV BILI_ACCOUNTS_ROOT=/app/user_data
 ENV BOT_MODE=web
 
 CMD if [ "$BOT_MODE" = "cli" ]; then \

@@ -85,7 +85,7 @@ def check_for_update(timeout: int = 12, current_version: str = "", retries: int 
     skipped_version, server_unknown_current, release_name, release_body,
     release_url, message, error
     """
-    current = (current_version or get_local_version() or "3.1.3")
+    current = (current_version or get_local_version() or "3.1.6")
     ver = current if current.lower().startswith("v") else "v" + current
     url = f"{UPDATE_BASE}/{ver}"
     result = {

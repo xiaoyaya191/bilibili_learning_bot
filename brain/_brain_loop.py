@@ -42,8 +42,8 @@ def _write_activity_state(state, detail="", bvid="", title=""):
         pass
 
 
-async def select_candidate_video(brain, items):
-    """Choose one recommendation from a bounded candidate pool, with safe fallbacks."""
+async def select_candidate_videos(brain, items):
+    """Select an ordered batch without discarding other worthwhile candidates."""
     # Candidate metadata is persisted in the web workspace. Keeping the
     # terminal stream concise prevents a busy recommendation loop from making
     # the full-log page expensive to render.
@@ -55,6 +55,9 @@ async def select_candidate_video(brain, items):
     except Exception:
         pass
     pool_size = max(5, min(100, int(video_config.get("candidate_pool_size", 20))))
+    from services.video_watch_queue import settings as queue_settings
+    queue_preferences = queue_settings()
+    max_selected = queue_preferences['max_selected'] or pool_size
     pool = []
     seen_bvids = set()
     for item in items:
@@ -80,7 +83,7 @@ async def select_candidate_video(brain, items):
         interests = brain.interest_mgr.get_interests() or []
     if not pool:
         log("候选筛选：推荐流中没有可用 BV 视频", "CANDIDATE")
-        return None
+        return []
 
     # 视频时效性 + 时长过滤
     from datetime import datetime, timedelta
@@ -88,8 +91,8 @@ async def select_candidate_video(brain, items):
     max_duration_limit = 18000
     try:
         from core.config import config as _cfg
-        max_age_days = int(_cfg.get("video", {}).get("max_age_days", 180))
-        max_duration_limit = int(_cfg.get("video", {}).get("max_duration_limit_seconds", 18000))
+        max_age_days = int(video_config.get("max_age_days", 180))
+        max_duration_limit = int(video_config.get("max_duration_limit_seconds", 18000))
     except Exception:
         pass
     cutoff_date = datetime.now() - timedelta(days=max_age_days)
@@ -101,19 +104,19 @@ async def select_candidate_video(brain, items):
         if pubdate and isinstance(pubdate, (int, float)):
             try:
                 pub_dt = datetime.fromtimestamp(int(pubdate))
-                if pub_dt < cutoff_date:
+                if max_age_days > 0 and pub_dt < cutoff_date:
                     log(f"候选过滤：视频《{item.get('title', '')[:30]}》发布于{pub_dt.strftime('%Y-%m-%d')}，超过{max_age_days}天，跳过", "CANDIDATE")
                     continue
             except Exception:
                 pass
         # 时长检查
-        if duration and isinstance(duration, (int, float)) and duration > max_duration_limit:
+        if max_duration_limit > 0 and duration and isinstance(duration, (int, float)) and duration > max_duration_limit:
             log(f"候选过滤：视频《{item.get('title', '')[:30]}》时长{int(duration/60)}分钟，超过{int(max_duration_limit/60)}分钟，跳过", "CANDIDATE")
             continue
         filtered_pool.append(item)
     if not filtered_pool:
         log(f"候选筛选：{len(pool)} 条视频全部被时效/时长过滤", "CANDIDATE")
-        return None
+        return []
     pool = filtered_pool
     if len(pool) < pool_size:
         log(f"候选筛选：推荐流仅返回 {len(pool)} 条不重复视频（目标 {pool_size} 条）", "CANDIDATE")
@@ -127,10 +130,9 @@ async def select_candidate_video(brain, items):
     if omitted_count > 0:
         log(f"候选详情已省略 {omitted_count} 条，可在“记忆 & 知识库”的 AI 候选筛选中查看", "CANDIDATE")
     if not interests:
-        selected = random.choice(pool)
-        log(f"无兴趣偏好，随机选择：{selected['bvid']}《{selected.get('title', '无标题')}》", "CANDIDATE")
-        return selected
-    log(f"候选兴趣引擎已加载 {len(interests)} 个关键词：{', '.join(interests[:12])}", "CANDIDATE")
+        log("无兴趣偏好，交给 AI 按知识价值选择多条视频", "CANDIDATE")
+    else:
+        log(f"候选兴趣引擎已加载 {len(interests)} 个关键词：{', '.join(interests[:12])}", "CANDIDATE")
     def candidate_keywords(item):
         owner = item.get("owner") or {}
         up_name = owner.get("name", "") if isinstance(owner, dict) else item.get("author", "")
@@ -152,27 +154,46 @@ async def select_candidate_video(brain, items):
             )).casefold()
             return [word for word in interests if word.casefold() in text]
 
+    def evolved_order(selected):
+        try:
+            from services.evolution_engine import EvolutionEngine
+            from services.evolution_settings import settings
+            preferences = settings()
+            return EvolutionEngine().rank_selected(selected, preferences) if preferences['enabled'] else selected
+        except Exception as error:
+            log('进化排序不可用，保留原观看顺序：' + type(error).__name__, 'DEBUG')
+            return selected
+
     matched = [item for item in pool if candidate_keywords(item)]
-    if not matched:
-        log("候选池没有命中当前兴趣，跳过本轮推荐流，不随机选择无关视频", "CANDIDATE")
-        return None
-    summary = "\n".join(f"{item['bvid']} | {item.get('title','')} | {(item.get('owner') or {}).get('name','')}" for item in matched)
+    summary = "\n".join(f"{item['bvid']} | {item.get('title','')} | {str(item.get('desc') or item.get('description') or '')[:180]} | 封面: {item.get('pic') or item.get('cover') or '不可用'}" for item in pool)
     try:
-        response = await brain._call_ai_with_retry(messages=[{"role":"system","content":"从候选视频中选择最符合兴趣的一条。仅输出 BV 号。"},
-            {"role":"user","content":f"兴趣：{', '.join(interests[:20])}\n候选：\n{summary}"}], temperature=0.1, max_tokens=30)
+        response = await brain._call_ai_with_retry(messages=[{"role":"system","content":f"从候选视频中选择所有值得观看的多条视频，按观看优先级排序，最多 {max_selected} 条。考虑兴趣、知识价值与主题相关性，不要只选一条，也不要只按关键词机械过滤。没有合适的输出 []。仅输出 BV 号 JSON 数组，禁止编造池外视频。封面URL不代表已经看过图片，不能据URL编造画面。"},
+            {"role":"user","content":f"兴趣：{', '.join(interests[:20]) or '不限兴趣，优先学习价值'}\n候选：\n{summary}"}], temperature=0.1, max_tokens=4096)
         chosen = response.choices[0].message.content.strip()
-        match = re.search(r"BV[0-9A-Za-z]{10}", chosen)
-        if match:
-            selected = next((item for item in matched if item["bvid"] == match.group(0)), None)
-            if selected:
-                log(f"AI 选择：{selected['bvid']}《{selected.get('title', '无标题')}》", "CANDIDATE")
-                return selected
-            log(f"AI 返回的 {match.group(0)} 不在候选池，改用本地筛选", "WARN")
+        chosen = re.sub(r'^```(?:json)?\s*|\s*```$', '', chosen, flags=re.I).strip()
+        if chosen.lower() in ('[]', 'none', '无', '没有'):
+            log("AI 未选择视频，进入下一轮", "CANDIDATE")
+            return []
+        identifiers = list(dict.fromkeys(re.findall(r"BV[0-9A-Za-z]{8,20}", chosen)))
+        by_id = {item['bvid']: item for item in pool}
+        selected = [by_id[bvid] for bvid in identifiers if bvid in by_id][:max_selected]
+        if selected:
+            log(f"AI 选择 {len(selected)} 条视频，按顺序观看全部入选项", "CANDIDATE")
+            return evolved_order(selected)
+        if identifiers:
+            log("AI 返回的视频全部不在候选池，忽略并进入下一轮", "WARN")
+            return []
+        log("AI 未返回有效候选，使用本地兴趣兜底", "WARN")
     except Exception as exc:
         log(f"候选视频 AI 筛选不可用，使用本地兜底: {exc}", "WARN")
-    selected = random.choice(matched)
-    log(f"本地兴趣匹配选择：{selected['bvid']}《{selected.get('title', '无标题')}》", "CANDIDATE")
-    return selected
+    selected = (matched if interests else pool)[:max_selected]
+    log(f"本地兴趣兜底选择 {len(selected)} 条视频", "CANDIDATE")
+    return evolved_order(selected)
+
+
+async def select_candidate_video(brain, items):
+    selected = await select_candidate_videos(brain, items)
+    return selected[0] if selected else None
 from core.platform_actions import public_commenting_enabled, video_liking_enabled
 
 
@@ -185,6 +206,15 @@ class BrainLoopMixin:
             log("[LOCK] 已有 bot 实例正在运行，退出", "ERROR")
             return
         log("[LOCK] 单实例锁已获取", "INFO")
+        from services.video_watch_queue import VideoWatchQueue, settings as queue_settings
+        from services.video_watch_workflow import next_candidate, sync_selected, finish_selected, read_content_then_comments, read_video_statistics, prepare_target
+        from services.video_review import VideoReview, settings as review_settings
+        video_review = VideoReview()
+        video_review.recover()
+        watch_queue = VideoWatchQueue()
+        recovered = watch_queue.recover()
+        if recovered:
+            log(f"恢复 {recovered} 条中断观看任务，将继续原队列", "QUEUE")
         
         log("bilibili_learning_bot - 启动...", "SUCCESS")
         self.update_runtime_clock(starting=True)
@@ -281,12 +311,27 @@ class BrainLoopMixin:
             await asyncio.sleep(startup_cool)
 
         # [FIX] 启动守卫：前几轮主循环强制跳过Agent深度搜索（防止旧pyc缓存或冷却bug导致启动即触发）
+        from services.diary_scheduler import DiaryScheduler
+        self._diary_scheduler = DiaryScheduler()
         _loop_count = 0
         completion_action = "stop"
 
         while True:
+            review_target = None
+            review_success = False
+            review_note = "未完成内容理解或流程中断"
+            review_score = None
+            queue_target = None
+            queue_outcome = None
+            queue_score = None
+            queue_actions = []
+            queue_assessment = {}
+            queue_interrupted = False
+            queue_error = "观看流程中断，等待重试"
             try:
                 _loop_count += 1
+                await self.maybe_auto_diary()
+                await self.maybe_self_evolve()
                 self.update_runtime_clock()
                 self.update_activity("检查互动消息", "正在检查评论续聊、私信和 @我提醒", phase="interaction")
 
@@ -574,38 +619,22 @@ class BrainLoopMixin:
                 revisit_target = None
 
                 async def _do_revisit():
-                    if not REVISIT_ENABLED or not self.history_videos.get("videos"):
-                        return None
-                    revisit_cooldown_ok = (datetime.now() - self.last_revisit_at).total_seconds() / 60 >= REVISIT_COOLDOWN_MINUTES
-                    if not revisit_cooldown_ok or random.random() >= PROB_REVISIT:
-                        return None
-                    candidate = self.get_revisit_candidate()
-                    if not candidate:
+                    nonlocal review_target
+                    preferences = review_settings()
+                    review_target = video_review.claim(preferences)
+                    if review_target is None:
+                        video_review.reserve(preferences)
+                        review_target = video_review.claim(preferences)
+                    if not review_target:
                         return None
                     try:
-                        log(f"学而时习之：回顾复习《{candidate.get('title','')[:30]}》({candidate.get('action')}) ...", "REVISIT")
-                        await _bili_throttle("回顾复习-get_info")
-                        v = Video(bvid=candidate.get("bvid"), credential=self.credential)
-                        vid_info = await v.get_info()
-                        if vid_info:
-                            target = {
-                                "bvid": candidate["bvid"],
-                                "title": vid_info.get("title", candidate.get("title", "")),
-                                "owner": vid_info.get("owner", {}),
-                                "id": vid_info.get("aid") or candidate.get("aid"),
-                                "pic": vid_info.get("pic", ""),
-                                "aid": vid_info.get("aid") or candidate.get("aid"),
-                                "_is_revisit": True,
-                                "_original_action": candidate.get("action", "")
-                            }
-                            self.last_revisit_at = datetime.now()
-                            self.mark_revisited(candidate["bvid"])
-                            log(f"回顾复习锁定: 《{target['title']}》", "REVISIT")
-                            return target
-                        else:
-                            log(f"获取复习视频信息失败，跳过", "WARN")
-                    except Exception as e:
-                        log(f"回顾复习异常: {e}", "WARN")
+                        await _bili_throttle("复习-get_info")
+                        info = await Video(bvid=review_target["bvid"], credential=self.credential).get_info()
+                        if not info:
+                            return None
+                        return dict(info, bvid=review_target["bvid"], _is_revisit=True, _review_id=review_target["_review_id"])
+                    except Exception as error:
+                        log(f"复习视频获取失败: {error}", "WARN")
                     return None
 
                 async def _do_chat():
@@ -614,11 +643,36 @@ class BrainLoopMixin:
                     except Exception as e:
                         log(f"主动聊天模块异常(主循环): {e}", "ERROR")
 
-                revisit_target, _ = await asyncio.gather(_do_revisit(), _do_chat(), return_exceptions=True)
+                queue_preferences = queue_settings()
+                queued_target = watch_queue.claim(queue_preferences)
+                if not queued_target and watch_queue.pending():
+                    self.update_activity("等待观看队列", "队列已暂停或等待失败重试，不重新筛选", phase="wait")
+                    await asyncio.sleep(3)
+                    continue
+                queue_target = queued_target
+                if queued_target:
+                    revisit_target = None
+                    await _do_chat()
+                else:
+                    revisit_target, _ = await asyncio.gather(_do_revisit(), _do_chat(), return_exceptions=True)
                 if isinstance(revisit_target, Exception):
                     revisit_target = None
 
-                if revisit_target:
+                if queued_target:
+                    await prepare_target(queued_target, self.credential, log)
+                    watch_queue.update_video(queued_target)
+                    target = queued_target
+                    self.videos_processed += 1
+                    bvid = target['bvid']
+                    title = target.get('title', '无标题')
+                    owner = target.get('owner') or {}
+                    up = owner.get('name', '未知') if isinstance(owner, dict) else target.get('author', '未知')
+                    up_uid = owner.get('mid', 0) if isinstance(owner, dict) else target.get('mid', 0)
+                    aid = target.get('aid') or target.get('id')
+                    pic_url = target.get('pic') or target.get('cover') or ''
+                    video_url = f"https://www.bilibili.com/video/{bvid}"
+                    log(f"继续观看队列:《{title}》- @{up}", "QUEUE")
+                elif revisit_target:
                     # 使用复习视频代替推荐流
                     target = revisit_target
                     self.videos_processed += 1
@@ -630,12 +684,7 @@ class BrainLoopMixin:
                     pic_url = target.get('pic', '')
                     video_url = f"https://www.bilibili.com/video/{bvid}"
                     log(f"复习目标:《{title}》- @{up}", "REVISIT")
-                    # 知识验证：回顾时联网核实知识的真实性和时效性（带异常回调）
-                    if not _smart_token:
-                        task = asyncio.create_task(self.verify_knowledge_file(bvid, title))
-                        task.add_done_callback(_safe_task_callback("verify_knowledge_file"))
-                    # 顺便浏览该UP的视频（副作用：记录到浏览历史）
-                    await self.maybe_browse_up_videos(force_up_uid=up_uid if up_uid else None, up_name_hint=up)
+                    self.update_activity("视频复习", "仅理解和总结，不执行平台互动", phase="review")
                 else:
                     # ── [*] 优先浏览喜欢/已知UP主的新视频 ──
                     up_browse_target = await self.maybe_browse_up_videos()
@@ -773,9 +822,17 @@ class BrainLoopMixin:
                                 browse_mode = load_config().get("video", {}).get("browse_mode", "candidate_review")
                             except Exception:
                                 browse_mode = config.get("video", {}).get("browse_mode", "candidate_review")
-                            target = await select_candidate_video(self, items) if browse_mode == "candidate_review" else random.choice(items)
+                            if browse_mode == "candidate_review":
+                                target = await next_candidate(self, watch_queue, items, queue_preferences)
+                                queue_target = target
+                                if target:
+                                    await prepare_target(target, self.credential, log)
+                                    watch_queue.update_video(target)
+                            else:
+                                target = random.choice(items)
                             if not isinstance(target, dict):
-                                log(f"推荐流返回异常元素类型: {type(target).__name__}", "WARN")
+                                log("本轮没有入选视频，稍后重新筛选", "CANDIDATE")
+                                await asyncio.sleep(3)
                                 continue
                             self.videos_processed += 1
                             bvid = target.get('bvid', '')
@@ -797,9 +854,11 @@ class BrainLoopMixin:
                             log(f"锁定目标:《{title}》- @{up}", "SCAN")
 
                 # [SPEED] 锁定后立即后台预取推荐流 + 短暂休息并行
-                prefetch_task = asyncio.create_task(self._prefetch_recommendations())
-                prefetch_task.add_done_callback(_safe_task_callback("prefetch_recs"))
-                self.update_activity("准备分析视频", "已锁定目标，正在安排字幕、评论与弹幕读取", phase="prepare")
+                if not watch_queue.pending():
+                    prefetch_task = asyncio.create_task(self._prefetch_recommendations())
+                    prefetch_task.add_done_callback(_safe_task_callback("prefetch_recs"))
+                await sync_selected(watch_queue, self.credential, queue_preferences, log)
+                self.update_activity("准备分析视频", "标题封面 → 数据 → 内容 → 评论 → 评分与行动", phase="prepare")
                 await asyncio.sleep(random.uniform(0.3, 0.8))
 
                 # 提取标签、时长、分类（供心理画像引擎/避雷系统使用）
@@ -839,6 +898,7 @@ class BrainLoopMixin:
                 self._current_video_tags = tags
                 self._current_video_category = category
                 self._current_video_duration = duration
+                self._last_video_desc = str(target.get('desc') or target.get('description') or '')
                 video_stat = target.get('stat') if isinstance(target.get('stat'), dict) else {}
                 description = str(target.get('desc') or target.get('description') or '').strip()[:500]
                 self.update_video_observation(
@@ -852,7 +912,7 @@ class BrainLoopMixin:
                 )
 
                 # ── 视频过滤模式 ──
-                if VIDEO_FILTER_MODE == "watch_all":
+                if VIDEO_FILTER_MODE == "watch_all" and not queue_target:
                     vis_desc, vis_score = "全量模式，跳过封面分析", 0
                     log(f"[FAST] 全量模式：不看封面标题，直接看视频", "MODE")
                     interested = True
@@ -881,15 +941,21 @@ class BrainLoopMixin:
                                 source=history_source, result="避雷策略拦截",
                                 interest_reason="；".join(aversion_reasons),
                             )
+                            queue_outcome = 'skipped'
                             continue
                         elif aversion_score >= PSYCHO_AVERSION_WARN_SCORE:
                             log(f"[DEF] 避雷提示: {title[:30]}... | 反感度{aversion_score:.1%} | {'; '.join(aversion_reasons)} (仍继续判断)", "AVERSION")
                     
-                    interested, matched_interests, interest_reason = await self.judge_interest_with_ai(
-                        title, up, vis_desc, vis_score,
-                        tags=",".join(tags) if tags else "",
-                        category=category, desc=getattr(self, "_last_video_desc", "")
-                    )
+                    if target.get('_is_revisit'):
+                        interested, matched_interests, interest_reason = True, [], '按用户复习规则选中，不重复兴趣筛选'
+                    elif queue_target and not queue_preferences['review_interest_again']:
+                        interested, matched_interests, interest_reason = True, [], '批量筛选已通过，依次观看，不重复兴趣筛选'
+                    else:
+                        interested, matched_interests, interest_reason = await self.judge_interest_with_ai(
+                            title, up, vis_desc, vis_score,
+                            tags=",".join(tags) if tags else "",
+                            category=category, desc=getattr(self, "_last_video_desc", "")
+                        )
                     if not interested:
                         log(f"视频《{title}》与兴趣不匹配，跳过 | {interest_reason}", "INTEREST")
                         self.record_watched_video(
@@ -899,6 +965,7 @@ class BrainLoopMixin:
                         )
                         await self.watch_and_sync_history(bvid)
                         await self.check_notifications_after_video()
+                        queue_outcome = 'skipped'
                         continue
                     # 引擎已合并关键词匹配+AI匹配，直接使用
                     all_matched = list(dict.fromkeys(matched_interests or []))
@@ -919,6 +986,11 @@ class BrainLoopMixin:
                     interest_reason=interest_reason,
                 )
 
+                self.update_video_observation("查看点赞、评论、收藏与转发数据")
+                video_stat, statistics_text = await read_video_statistics(self, target, log)
+                aid = target.get('aid') or aid
+                log(f"视频数据: {statistics_text}", "BRAIN")
+                self.update_video_observation("视频数据读取完成", like_count=video_stat.get('like'), comment_count=video_stat.get('reply'), favorite_count=video_stat.get('favorite'), share_count=video_stat.get('share'))
                 subtitle_text = "[未读取字幕]"
                 comment_text = "[未读取评论]"
                 danmaku_text = ""
@@ -984,12 +1056,15 @@ class BrainLoopMixin:
                         log(f"评论区速览({len(c_list)}条): {preview}", "COMMENT")
 
                 await asyncio.sleep(random.uniform(0.2, 0.5))
-                await asyncio.gather(_read_subtitles_task(), _read_comments_task(), return_exceptions=True)
+                await read_content_then_comments(_read_subtitles_task, _read_comments_task, log)
 
                 self.update_video_observation("信息整合与 AI 判断")
                 _write_activity_state("AI决策", "正在整合信息")
                 log("信息整合，AI决策中...", "BRAIN")
                 sys_prompt = self.build_dynamic_brain_prompt(up)
+                if target.get("_is_revisit"):
+                    sys_prompt += "\n本次为复习：thought需总结核心知识、值得再次记住的要点和仍需验证的内容，不把评论当事实。不执行点赞、投币、收藏、评论或关注。"
+                sys_prompt += "\n先根据视频内容判断价值，再结合评论验证。最终给出0到10分及理由，分别判断是否学习、收藏、点赞、评论；JSON中增加learn_intention和like_intention布尔值，收藏继续用fav_intention，评论继续用replies，学习为真时提供learning_topic。统计数量不是事实证据，转发不可用时跳过，不编造。所有互动仍受功能开关、阈值和审核限制。"
                 # ── Phase 3: OB 画像注入到决策上下文 ──
                 ob_profile_block = await self._inject_ob_profile_to_prompt()
                 if ob_profile_block:
@@ -1000,6 +1075,7 @@ class BrainLoopMixin:
                 if any(kw in _st for kw in ["【无字幕无人声】", "无可用字幕", "无可用字幕/语音", "[未读取"]):
                     video_fallback_hint = "\n[WARN] 视频字幕/语音内容不可用，请主要根据评论区讨论、弹幕反应和标题来推断视频质量与价值。\n"
                 context = (f"视频标题: {title}\nUP主: {up}\n封面描述: {vis_desc}\n封面印象分: {vis_score}\n"
+                           f"【点赞、评论、收藏与转发数据】: {statistics_text}\n简介: {getattr(self, '_last_video_desc', description)}\n"
                            f"{video_fallback_hint}"
                            f"【视频内容字幕】: {subtitle_text}\n"
                            f"{comment_text}"
@@ -1030,6 +1106,7 @@ class BrainLoopMixin:
                         log(f"AI决策格式不可解析，已按内容质量本地评分 | 返回片段: {preview}", "WARN")
                 except Exception as e:
                     log(f"AI决策不可用，转为本地内容评分: {_mask_urls(str(e)[:160])}", "WARN")
+                    used_local_fallback = True
                     decision, _ = parse_video_decision(
                         "",
                         title=title,
@@ -1042,6 +1119,7 @@ class BrainLoopMixin:
                 mode = decision.get('mode', '普通')
                 thought = decision.get('thought', '...')
                 score = decision.get('score', 0)
+                queue_score = score
                 understanding_unavailable = str(subtitle_text).startswith("[视频理解不足:")
                 if understanding_unavailable:
                     # A mismatched subtitle is evidence against understanding,
@@ -1052,7 +1130,10 @@ class BrainLoopMixin:
                     for key in ("like", "coin", "favorite", "comment", "follow", "should_like", "should_coin", "should_favorite", "should_comment"):
                         decision[key] = False
                     log("[WARN] 视频理解不足，已禁用学习归档与平台互动", "BRAIN")
+                queue_score = score
                 self.update_video_observation("AI 判断完成", score=score, thought=thought)
+                queue_assessment = {key: decision.get(key) for key in ('thought', 'learn_intention', 'learning_topic', 'like_intention', 'fav_intention', 'coin_intention')}
+                queue_assessment['comment_intention'] = bool(decision.get('replies'))
 
                 engagement_signal = decision.get("engagement_signal", {})
                 engagement_cfg = config.get("engagement", {}) if isinstance(config, dict) else {}
@@ -1065,12 +1146,23 @@ class BrainLoopMixin:
                 self.record_watched_video(
                     bvid, title, up, aid, pic=pic_url, duration=duration,
                     source=history_source, result="AI 筛选通过",
-                    interest_reason=interest_reason, score=score,
+                    interest_reason=interest_reason, score=score, category=category,
                 )
+                if target.get("_is_revisit"):
+                    review_score = score
+                    review_note = thought
+                    review_success = not used_local_fallback and not bool(video_fallback_hint) and not understanding_unavailable
+                    if not review_success:
+                        review_note = "未完成可靠的内容理解与 AI 总结：" + str(thought)
+                    self.update_activity("复习完成" if review_success else "复习内容不足", thought, phase="review")
+                    await asyncio.sleep(3)
+                    continue
                 try:
                     from services.local_favorites import auto_collect_video
+                    from core.config import load_config as _live_favorites_config
+                    local_collection_config = _live_favorites_config()
                     local_favorite = auto_collect_video(
-                        config,
+                        local_collection_config if decision.get('fav_intention') else {**local_collection_config, 'local_favorites': {'auto_collect_enabled': False}},
                         {
                             "bvid": bvid,
                             "title": title,
@@ -1081,7 +1173,7 @@ class BrainLoopMixin:
                             "category": category,
                             "interest_reason": interest_reason,
                         },
-                        interested=bool(interested),
+                        interested=bool(interested) and bool(decision.get('fav_intention')),
                     )
                     if local_favorite.get("added"):
                         folder_name = local_favorite.get("folder", {}).get("name", "AI 精选")
@@ -1139,7 +1231,9 @@ class BrainLoopMixin:
                 
                 # 三层质量门槛：分数 + 时长 + 内容长度
                 skip_reason = None
-                if score < LEARN_MIN_SCORE:
+                if decision.get('learn_intention') is False:
+                    skip_reason = "AI 明确选择不学习"
+                elif score < LEARN_MIN_SCORE:
                     skip_reason = f"分数过低({score:.1f}<{LEARN_MIN_SCORE})"
                 elif duration > 0 and duration < LEARN_MIN_DURATION_SECONDS:
                     skip_reason = f"视频太短({duration}s<{LEARN_MIN_DURATION_SECONDS}s)"
@@ -1256,6 +1350,8 @@ class BrainLoopMixin:
                             up_name=up, duration=duration
                         )
                         await self._maybe_audit_report()
+                    queue_outcome = 'done'
+                    queue_actions = ['学习归档'] if learn_success else []
                     continue
 
                 action_log = []
@@ -1301,8 +1397,14 @@ class BrainLoopMixin:
                 
                 do_coin = ai_wants_coin and score >= COIN_THRESHOLD and self.coins_spent < MAX_COINS_DAILY and coin_check and coin_cooldown_ok and coin_hourly_ok
                 do_fav = ai_wants_fav and score >= FAV_THRESHOLD and fav_check
+                from core.config import load_config as _live_collection_config
+                collection_config = _live_collection_config()
+                from services.action_permissions import allowed as _action_allowed
+                do_fav = do_fav and collection_config.get('local_favorites', {}).get('destination', 'local') == 'platform' and _action_allowed('favorite', collection_config)
                 do_replies = decision.get('replies', []) if (ai_wants_reply and reply_check) else []
                 do_like_trigger = do_fav or do_coin or bool(do_replies) or (score >= 6.5 and like_solo_check)
+                if 'like_intention' in decision:
+                    do_like_trigger = bool(decision['like_intention']) and score >= 6.5 and like_solo_check
 
                 if RANDOM_ENABLED:
                     coin_limit_reason = ""
@@ -1495,7 +1597,11 @@ class BrainLoopMixin:
                         await asyncio.sleep(random.uniform(2, 4))
                         aid = v.get_aid()
                         await _bili_throttle()  # 全局节流
-                        await v.pay_coin(num=1, like=True)
+                        if queue_target and not watch_queue.reserve_action(bvid, 'coin'):
+                            raise RuntimeError('本队列视频已有投币尝试，为避免中断后重复扣币请手动核对')
+                        await v.pay_coin(num=1, like=do_like_trigger)
+                        if queue_target:
+                            watch_queue.complete_action(bvid, 'coin')
                         self.coins_spent += 1
                         try:
                             from services.coin_budget import add_coin
@@ -1553,6 +1659,9 @@ class BrainLoopMixin:
                                     log(f"[模拟] 拟回复视频评论 ID:{target_id}: {reply_content[:50]}...", "SIMULATE")
                                 else:
                                     await _bili_throttle()  # 全局节流
+                                    if queue_target and not watch_queue.reserve_action(bvid, f'comment:{target_id}'):
+                                        log(f"本队列已尝试回复评论 {target_id}，为避免重复发送已跳过", "WARN")
+                                        continue
                                     await comment.send_comment(
                                         text=reply_content,
                                         oid=aid,
@@ -1561,6 +1670,8 @@ class BrainLoopMixin:
                                         parent=None,
                                         credential=self.credential
                                     )
+                                    if queue_target:
+                                        watch_queue.complete_action(bvid, f'comment:{target_id}')
                                     log("回复评论成功！", "SUCCESS")
                                 action_log.append(f"回复评论({target_id})")
                                 self.mood_mgr.shift("成功参与评论区互动", 1)
@@ -1574,6 +1685,8 @@ class BrainLoopMixin:
                         except Exception as e:
                             log(f"回复评论失败: {e}", "ERROR")
 
+                queue_outcome = 'done'
+                queue_actions = list(action_log)
                 if action_log:
                     self.energy -= 3
                     self.mood_mgr.shift("主动互动完成", 1)
@@ -1662,6 +1775,8 @@ class BrainLoopMixin:
                 except Exception as engine_e:
                     log(f"兴趣引擎追踪异常(非致命): {str(engine_e)[:120]}", "DEBUG")
 
+                queue_outcome = 'done'
+                queue_actions = list(action_log)
                 # 知识库定期审查：每N个视频后随机抽查归档质量
                 if KNOWLEDGE_REVIEW_INTERVAL > 0 and not _smart_token:
                     self._knowledge_review_countdown -= 1
@@ -1673,15 +1788,41 @@ class BrainLoopMixin:
                             log(f"知识库定期审查异常: {review_e}", "WARN")
 
             except asyncio.CancelledError:
+                queue_interrupted = True
                 log("主循环被取消 (CancelledError)，正常退出", "WARN")
                 raise  # 重新抛出，让 asyncio.run() 正确处理
             except KeyboardInterrupt:
+                queue_interrupted = True
                 log("主循环收到中断信号，正常退出", "WARN")
                 raise
             except Exception as e:
+                from utils.display import redact_sensitive_text
+                queue_error = redact_sensitive_text(str(e))
                 log(f"主循环发生严重错误: {e}", "ERROR")
                 import traceback
                 traceback.print_exc()
                 await asyncio.sleep(3)
+            finally:
+                if review_target:
+                    try:
+                        video_review.finish(review_target["_review_id"], success=review_success, interrupted=queue_interrupted and not review_success, score=review_score, note=review_note)
+                        if review_success:
+                            self.mark_revisited(review_target["bvid"])
+                    except Exception as review_error:
+                        log(f"复习结果保存失败，下次启动恢复: {review_error}", "ERROR")
+                if queue_target:
+                    try:
+                        if queue_outcome:
+                            if queue_interrupted:
+                                watch_queue.finish(queue_target['bvid'], queue_outcome, score=queue_score, actions=queue_actions, assessment=queue_assessment, preferences=queue_preferences)
+                            else:
+                                await finish_selected(watch_queue, queue_target, queue_outcome, self.credential, score=queue_score, actions=queue_actions, assessment=queue_assessment, preferences=queue_preferences, log=log)
+                        else:
+                            watch_queue.fail(queue_target['bvid'], queue_error, interrupted=queue_interrupted, preferences=queue_preferences)
+                    except asyncio.CancelledError:
+                        watch_queue.fail(queue_target['bvid'], '关闭时中断，等待恢复', interrupted=True, preferences=queue_preferences)
+                        raise
+                    except Exception as queue_exception:
+                        log(f"观看队列结果保存失败，下次启动恢复: {queue_exception}", "ERROR")
 
         return completion_action

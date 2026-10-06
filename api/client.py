@@ -55,8 +55,8 @@ class BiliClient:
             return None
 
         try:
-            with open(COOKIE_FILE, 'r', encoding='utf-8-sig') as f:
-                cookies = json.load(f)
+            from utils.storage import JsonStore
+            cookies = JsonStore(COOKIE_FILE).read()
             self.raw_cookies = cookies
 
             sessdata = cookies.get('SESSDATA', '')
@@ -79,10 +79,9 @@ class BiliClient:
                 self.raw_cookies['buvid3'] = buvid3
                 try:
                     cookies['buvid3'] = buvid3
-                    tmp = COOKIE_FILE + '.tmp'
-                    with open(tmp, 'w', encoding='utf-8') as f:
-                        json.dump(cookies, f, ensure_ascii=False, indent=2)
-                    os.replace(tmp, COOKIE_FILE)
+                    from utils.storage import JsonStore
+                    if not JsonStore(COOKIE_FILE).write(cookies):
+                        raise OSError("账号数据库保存失败")
                     log(f"buvid3 已写入 cookie 文件: {buvid3}", "SUCCESS")
                 except Exception as e:
                     log(f"[WARN] buvid3写入失败: {e}", "WARN")
@@ -443,6 +442,8 @@ class BiliClient:
     # ── [*] UP主关注 / 取关 ──────────────────────────────────────────
     async def follow_up(self, uid: int):
         """关注UP主。uid: UP主的UID"""
+        from services.action_permissions import require
+        require('follow_up')
         await _bili_throttle("关注UP主")
         try:
             u = user.User(uid, credential=self.credential)
@@ -480,6 +481,8 @@ class BiliClient:
 
     async def unfollow_up(self, uid: int):
         """取关UP主。"""
+        from services.action_permissions import require
+        require('unfollow_user')
         await _bili_throttle("取关UP主")
         try:
             u = user.User(uid, credential=self.credential)
@@ -755,6 +758,8 @@ class BiliClient:
 
     async def like_danmaku(self, dmid: str, cid: int, bvid: str = ""):
         """点赞弹幕。dmid: 弹幕字符串ID (id_str), cid: 视频cid"""
+        from services.action_permissions import require
+        require('danmaku_like')
         await _bili_throttle("点赞弹幕")
         try:
             # 确保 credential 已加载
@@ -795,6 +800,8 @@ class BiliClient:
             return {"code": -1, "msg": f"弹幕点赞失败: {e}"}
 
     async def send_danmaku(self, bvid: str, text: str, dm_time: float = 0.0):
+        from services.action_permissions import require
+        require('send_danmaku')
         """发送弹幕到视频。"""
         await _bili_throttle("发送弹幕")
         try:

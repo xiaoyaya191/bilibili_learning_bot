@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
+from services.token_observability import observed_post
 
 from core.config import load_config
 from mcp_server.bili import fetch_material
@@ -51,7 +52,7 @@ async def _chat(messages: list[dict[str, str]], temperature: float = 0.8) -> str
     }
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
-            resp = await client.post(url, json=payload, headers=headers)
+            resp = await observed_post(client, url, source="mcp-script", model=settings["model"], json=payload, headers=headers)
             resp.raise_for_status()
             data = resp.json()
     except Exception as exc:  # noqa: BLE001

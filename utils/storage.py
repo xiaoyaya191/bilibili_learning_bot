@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-json_utils.py — 线程安全的 JSON 文件读写工具
-替换散落在各处的裸 json.load/json.dump，统一加锁防止并发写入文件损坏。
+账号数据统一存储：SQLite 文档数据库 + 旧 JSON 兼容镜像。
+Data 目录和已登记账号目录的共享读写使用事务、WAL及原始迁移快照；其他路径保持JSON行为。
 同时提供 API Key 脱敏工具函数。
 
 用法:
@@ -16,12 +16,13 @@ import json
 import os
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Optional
 
 
 class JsonStore:
-    """线程安全的 JSON 读写器。每个文件一个实例，自动管理路径和锁。"""
+    """兼容历史接口的账号数据读写器，管理目录内使用SQLite事务。"""
 
     def __init__(self, path: Path | str):
         if isinstance(path, str):
@@ -48,12 +49,26 @@ class JsonStore:
         return self._path
 
     def exists(self) -> bool:
+        from utils.database import DocumentDatabase, managed
+        if managed(self._path):
+            return DocumentDatabase(self._path.parent).exists(self._path.name)
         return self._path.exists()
+
+    @staticmethod
+    def _mirror(data, path):
+        temporary = path.with_name(path.name + '.' + uuid.uuid4().hex + '.tmp')
+        try:
+            JsonStore._atomic_dump(data, temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def read(self, default: Any = None) -> Any:
         """读取 JSON 文件。不存在或损坏时返回 default。"""
         with self._lock:
             try:
+                from utils.database import DocumentDatabase, managed
+                if managed(self._path):
+                    return DocumentDatabase(self._path.parent).read(self._path.name, default if default is not None else {})
                 if self._path.exists():
                     # utf-8-sig：兼容带 BOM 的文件（记事本/PowerShell 默认 UTF-8 BOM），
                     # 无 BOM 文件同样可读，避免用户手改配置后静默丢失。
@@ -68,7 +83,11 @@ class JsonStore:
         with self._lock:
             try:
                 self._path.parent.mkdir(parents=True, exist_ok=True)
-                self._atomic_dump(data, self._path.with_suffix(".tmp"), self._path)
+                from utils.database import DocumentDatabase, managed
+                if managed(self._path):
+                    DocumentDatabase(self._path.parent).write(self._path.name, data, self._mirror)
+                else:
+                    self._mirror(data, self._path)
                 return True
             except Exception as e:
                 import sys
@@ -80,6 +99,15 @@ class JsonStore:
         mutator 是一个接受 data dict 并就地修改的函数。
         """
         with self._lock:
+            from utils.database import DocumentDatabase, managed
+            if managed(self._path):
+                try:
+                    DocumentDatabase(self._path.parent).update(self._path.name, mutator, self._mirror)
+                    return True
+                except Exception as error:
+                    import sys
+                    print(f"[SQLite] update失败 {self._path.name}: {error}", file=sys.stderr, flush=True)
+                    return False
             data = {}
             try:
                 if self._path.exists():
@@ -118,7 +146,7 @@ class JsonStore:
 
 # ── API Key 脱敏 ──
 SENSITIVE_KEYS = {
-    "api_key", "unified_api_key", "vision_api_key",
+    "api_key", "unified_api_key", "vision_api_key", "headers",
     "password", "recovery_code", "recovery_answer", "access_token", "refresh_token",
     "sessdata", "bili_jct", "dedeuserid", "DedeUserID",
 }
@@ -179,7 +207,8 @@ def strip_hidden_placeholders(obj, existing=None):
                 result[key] = value
         return result
     if isinstance(obj, list):
-        return [strip_hidden_placeholders(item) for item in obj if item != "[已隐藏]"]
+        previous = {item.get("id"): item for item in existing or [] if isinstance(item, dict) and item.get("id")} if isinstance(existing, list) else {}
+        return [strip_hidden_placeholders(item, previous.get(item.get("id")) if isinstance(item, dict) else None) for item in obj if item != "[已隐藏]"]
     return obj
 
 
@@ -217,6 +246,8 @@ def get_backup_dir() -> Path:
     其他 → ~/bilibili_claw_backup
     """
     import sys
+    if os.getenv("BILI_ACCOUNT_ID"):
+        return Path(os.environ["BILI_USER_DATA_DIR"]) / "backups"
     custom_dir = os.getenv("BILI_BACKUP_DIR", "").strip()
     if custom_dir:
         return Path(custom_dir).expanduser()

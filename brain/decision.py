@@ -241,6 +241,7 @@ def _decode_mapping(raw: str) -> dict[str, Any] | None:
         "mode", "thought", "reason", "score", "remember_up", "follow_up", "remember",
         "coin_intention", "coin_intent", "coin", "fav_intention", "favorite_intention",
         "collect_intent", "favorite", "learning_topic", "replies", "engagement_signal",
+        "like_intention", "should_like", "like", "learn_intention", "should_learn",
     ))
 
 
@@ -256,6 +257,13 @@ def parse_video_decision(raw: str, **fallback_context: Any) -> tuple[dict[str, A
         "remember_up": ("remember_up", "follow_up", "remember"),
     }
     normalized = dict(data)
+    for target, names in {
+        "like_intention": ("like_intention", "should_like", "like"),
+        "learn_intention": ("learn_intention", "should_learn"),
+    }.items():
+        supplied = next((data[name] for name in names if name in data), None)
+        if supplied is not None:
+            normalized[target] = _as_bool(supplied)
     for target, names in aliases.items():
         normalized[target] = _as_bool(next((data[name] for name in names if name in data), False))
     normalized["score"] = _as_score(data.get("score"), fallback["score"])
@@ -263,6 +271,8 @@ def parse_video_decision(raw: str, **fallback_context: Any) -> tuple[dict[str, A
     normalized["thought"] = str(data.get("thought") or data.get("reason") or "AI已完成内容判断")[:500]
     topic = data.get("learning_topic", "")
     normalized["learning_topic"] = str(topic).strip()[:30] if topic is not None else ""
+    if normalized.get("learn_intention") is False:
+        normalized["learning_topic"] = ""
     replies = data.get("replies", [])
     normalized["replies"] = replies if isinstance(replies, list) else []
     signal = data.get("engagement_signal", {})
