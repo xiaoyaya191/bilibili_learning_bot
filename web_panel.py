@@ -523,19 +523,13 @@ def write_json(path: Path, data):
     return JsonStore(path).write(data)
 
 def _ensure_default_panel_account() -> bool:
-    """Seed the requested local-only account without replacing an existing one."""
-    config = read_json(CONFIG_FILE, {})
-    web_cfg = config.setdefault("web", {})
-    if web_cfg.get("username") and web_cfg.get("password"):
-        return False
-    web_cfg.update({
-        "username": "yaya",
-        "password": _hash_password("yaya"),
-        "onboarding_state": "pending",
-        "default_credentials": True,
-        "password_change_recommended": True,
-    })
-    return bool(write_json(CONFIG_FILE, config))
+    """Compatibility hook: accounts must only be created by explicit setup.
+
+    Legacy installations may contain a username without a password. Preserve
+    that identity and let the existing setup flow collect a new password.
+    """
+    return False
+
 
 def file_stat(path: Path):
     if not path.exists(): return {"exists": False, "size": 0, "mtime": None, "size_fmt": "0 B"}
@@ -8982,8 +8976,12 @@ def api_account_update_credentials():
             changed.append('密码')
         if not changed:
             return jsonify(dict(ok=True, message='没有需要修改的内容'))
+        web_cfg.pop('default_credentials', None)
+        web_cfg.pop('password_change_recommended', None)
         ok = save_config(cfg)
         if ok:
+            if not _rotate_recovery_code(cfg, web_cfg.get('username', '')):
+                return jsonify(dict(ok=False, message='账号已更新，但恢复文件更新失败，请检查数据目录权限')), 500
             import core.config as core_config
             core_config.config.clear()
             core_config.config.update(load_config())
@@ -12161,7 +12159,10 @@ applyTheme();applyI18n();
 
 # ── 首次设置页面（配置用户名和密码）──
 def _setup_html():
-    return r"""<!DOCTYPE html>
+    import html
+    web_cfg = read_json(CONFIG_FILE, {}).get("web", {})
+    legacy_username = web_cfg.get("username", "") if not web_cfg.get("password") else ""
+    page = r"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
@@ -12253,7 +12254,7 @@ var q=document.getElementById('setupQuestion').value,a=document.getElementById('
 var em=(document.getElementById('setupEmail').value||'').trim(),emc=(document.getElementById('setupEmailCode').value||'').trim();
 if(q==='custom')q=document.getElementById('setupCustomQuestion').value.trim();
 if(!u){msg.textContent='请输入用户名';msg.className='msg err';inpU.classList.add('error');setTimeout(function(){inpU.classList.remove('error')},400);return}
-if(u.length<2){msg.textContent='用户名至少2个字符';msg.className='msg err';return}
+if(u.length<2&&!inpU.readOnly){msg.textContent='用户名至少2个字符';msg.className='msg err';return}
 if(p.length<4){msg.textContent='密码至少4位';msg.className='msg err';inpP.classList.add('error');setTimeout(function(){inpP.classList.remove('error')},400);return}
 if(p!==p2){msg.textContent='两次输入的密码不一致';msg.className='msg err';inpP2.classList.add('error');setTimeout(function(){inpP2.classList.remove('error')},400);return}
 if((q&&!a)||(!q&&a)){msg.textContent='密保问题和答案需要同时填写';msg.className='msg err';return}
@@ -12303,6 +12304,13 @@ applyTheme();
 </script>
 </body>
 </html>"""
+    if legacy_username:
+        page = page.replace('id="setupUser" type="text"',
+                            'id="setupUser" type="text" readonly value="' + html.escape(str(legacy_username), quote=True) + '"')
+        page = page.replace('placeholder="设置密码（至少4位）"',
+                            'placeholder="旧账号升级：请设置新密码（至少4位）"')
+    return page
+
 
 # ── 登录页面 ──
 def _login_html():
@@ -12676,6 +12684,9 @@ def _record_login_failure(client_key: str) -> None:
 @app.route('/api/auth/setup', methods=['POST'])
 def api_auth_setup():
     """首次设置：保存用户名和密码到 config.json"""
+    config = read_json(CONFIG_FILE, {})
+    web_cfg = config.setdefault('web', {})
+    legacy_username = web_cfg.get('username') if not web_cfg.get('password') else None
     data = request.get_json(force=True) if request.is_json else {}
     username = (data.get('username') or '').strip()
     password = (data.get('password') or '')
@@ -12693,14 +12704,17 @@ def api_auth_setup():
                 return jsonify(dict(ok=False, message='邮箱验证失败：' + msg_code))
             email_verified = True
         # 未填验证码：允许保存（前端已二次确认），标记未验证
-    if len(username) < 2:
+    if len(username) < 2 and username != legacy_username:
         return jsonify(dict(ok=False, message='用户名至少2个字符'))
     if len(password) < 4:
         return jsonify(dict(ok=False, message='密码至少4位'))
     if bool(recovery_question) != bool(recovery_answer):
         return jsonify(dict(ok=False, message='密保问题和答案需要同时填写'))
-    config = read_json(CONFIG_FILE, {})
-    web_cfg = config.setdefault('web', {})
+    if legacy_username:
+        if username != web_cfg['username']:
+            return jsonify(dict(ok=False, message='请保留旧账号用户名并设置新密码')), 400
+    web_cfg.pop('default_credentials', None)
+    web_cfg.pop('password_change_recommended', None)
     web_cfg['username'] = username
     web_cfg['password'] = _hash_password(password)
     web_cfg['onboarding_state'] = 'pending'
@@ -13811,8 +13825,6 @@ def main():
     host = os.getenv('WEB_HOST', '127.0.0.1')
     account_label = ""
 
-    if _ensure_default_panel_account():
-        print("[Account] 已创建本地默认账号 yaya；首次登录后建议修改默认密码。", flush=True)
     if _ensure_recovery_file():
         print(f"[Account] 忘记账号或密码时，请查看: {_recovery_file_path()}", flush=True)
 

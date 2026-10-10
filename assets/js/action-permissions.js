@@ -2,6 +2,9 @@
   const byId = id => document.getElementById(id);
   let definitions = {};
   let busy = false;
+  let revision = 0;
+  let dirty = false;
+  let loaded = false;
   function status(text) { byId('permission-status').textContent = text; }
   async function call(url, payload) {
     const response = await fetch(url, payload === undefined ? {} : {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
@@ -9,10 +12,15 @@
     if (!response.ok || !body.ok) throw new Error(body.message || '操作失败');
     return body;
   }
-  async function load() {
+  async function load(force = false) {
+    if (busy && !force || dirty && !force) return;
+    const requestRevision = ++revision;
     try {
       const [permissions, favorites, switches] = await Promise.all([call('/api/ai-permissions'), call('/api/collection-settings'), call('/api/interaction-switches')]);
+      if (requestRevision !== revision || dirty && !force) return;
       definitions = permissions.definitions;
+      loaded = true;
+      dirty = false;
       byId('permission-master').checked = permissions.enabled;
       const grid = byId('permission-actions'); grid.replaceChildren();
       const groups = {};
@@ -42,7 +50,12 @@
   }
   async function save(lock = false) {
     if (busy) return;
+    if (!loaded) { status('权限尚未读取完成，请稍后再保存。'); return; }
+    ++revision;
     busy = true; byId('permission-save').disabled = true;
+    const controls = Array.from(document.querySelectorAll('[data-permission], #permission-master, #permission-destination, #permission-folder, #permission-score, #permission-collect, #permission-interest'));
+    const disabledBefore = controls.map(control => control.disabled);
+    controls.forEach(control => { control.disabled = true; });
     try {
       const actions = {};
       for (const input of document.querySelectorAll('[data-permission]')) {
@@ -50,12 +63,21 @@
         actions[key] = lock && definitions[key].scope === 'platform' ? false : input.checked;
       }
       const enabled = !lock && byId('permission-master').checked;
+      const favorites = {destination: byId('permission-destination').value, folder_name: byId('permission-folder').value, min_score: Number(byId('permission-score').value), auto_collect_enabled: byId('permission-collect').checked, require_interest_match: byId('permission-interest').checked};
       if (enabled && !await panelConfirm('授权平台操作', '仅授权已勾选的操作。B 站可能风控；投币与删除等操作存在风险。', '确认授权')) return;
       await call('/api/ai-permissions', {enabled, actions});
-      if (!lock) await call('/api/collection-settings', {destination: byId('permission-destination').value, folder_name: byId('permission-folder').value, min_score: Number(byId('permission-score').value), auto_collect_enabled: byId('permission-collect').checked, require_interest_match: byId('permission-interest').checked});
-      await load(); status(lock ? '平台总授权及所有平台权限已关闭。' : '当前账号设置已保存。');
+      dirty = false;
+      if (!lock) await call('/api/collection-settings', favorites);
+      const persisted = await call('/api/ai-permissions');
+      if (persisted.enabled !== enabled || Object.keys(actions).some(key => persisted.actions[key] !== actions[key])) {
+        dirty = true;
+        throw new Error('权限保存后核验不一致，请重新读取并保存。操作尚未获得确认授权。');
+      }
+      await load(true);
+      status(lock ? '平台总授权及所有平台权限已关闭。' : '当前账号设置已保存并核验。平台总开关：' + (enabled ? '已授权' : '关闭'));
+
     } catch (error) { status(error.message); }
-    finally { busy = false; byId('permission-save').disabled = false; }
+    finally { controls.forEach((control, index) => { control.disabled = disabledBefore[index]; }); busy = false; byId('permission-save').disabled = false; }
   }
   async function platformRead(content) {
     const result = byId('platform-result'); result.textContent = '正在读取…';
@@ -96,7 +118,15 @@
     operationFields();
     byId('permission-save').addEventListener('click', () => save());
     byId('permission-lock').addEventListener('click', () => save(true));
-    byId('permission-reload').addEventListener('click', load);
+    byId('permission-reload').addEventListener('click', () => { if (!busy) load(true); });
+    document.addEventListener('change', event => {
+      if (event.target.matches('[data-permission], #permission-master, #permission-destination, #permission-folder, #permission-score, #permission-collect, #permission-interest')) {
+        dirty = true; ++revision; status('设置已修改，请点击保存使授权生效。');
+      }
+    });
+    document.addEventListener('input', event => {
+      if (event.target.matches('#permission-folder, #permission-score')) { dirty = true; ++revision; }
+    });
     byId('platform-list').addEventListener('click', () => platformRead(false));
     byId('platform-content').addEventListener('click', () => platformRead(true));
     byId('platform-submit').addEventListener('click', platformSubmit);
