@@ -7,12 +7,11 @@ import shutil
 import sys
 from pathlib import Path
 
+from core import storage_location
+
 def _default_user_data_dir() -> Path:
     """Use a per-user writable location for releases, never the app folder."""
-    local_app_data = os.getenv("LOCALAPPDATA", "").strip()
-    if local_app_data:
-        return Path(local_app_data) / "BiliLearn"
-    return Path.home() / "AppData" / "Local" / "BiliLearn"
+    return storage_location.default_root()
 
 
 def _configured_user_data_dir() -> Path:
@@ -20,19 +19,10 @@ def _configured_user_data_dir() -> Path:
 
     The environment variable still wins for portable/EXE launches. The small
     pointer file lives in the default profile and contains no credentials.
+    Shared with the panel's "设置 → 数据目录" card via core.storage_location.
     """
     default = _default_user_data_dir()
-    pointer = default / "Data" / "storage_location.json"
-    try:
-        data = json.loads(pointer.read_text(encoding="utf-8-sig"))
-        target = str(data.get("path") or "").strip()
-        if target:
-            candidate = Path(target).expanduser().resolve()
-            if candidate != candidate.anchor and len(str(candidate)) > 3:
-                return candidate
-    except (OSError, ValueError, TypeError, AttributeError):
-        pass
-    return default
+    return storage_location.read_pointer() or default
 
 _EXPLICIT_USER_DATA_DIR = bool(os.getenv("BILI_USER_DATA_DIR", "").strip())
 USER_DATA_DIR = Path(os.getenv("BILI_USER_DATA_DIR", "")).expanduser() if _EXPLICIT_USER_DATA_DIR else _configured_user_data_dir()

@@ -109,6 +109,7 @@ from core.user_data import (
     USER_DATA_DIR,
     WORD_DIR,
 )
+from core import storage_location
 from core.factory_reset import DEFAULT_RESET_GROUP_IDS, RESET_GROUPS, erase_all_user_data, preview_reset_targets
 from xingye_bot.memory import MemoryBank
 
@@ -5266,32 +5267,115 @@ def _storage_groups_payload(root: Path) -> dict:
     return result
 
 
+def _storage_scope() -> dict:
+    """数据目录操作的作用域。
+
+    面板启动时会调用 configure_default_account()，进程因此总是带 BILI_ACCOUNT_ID，
+    真实生效目录是 ``<账号根>/accounts/<id>``。此时可更改的是「账号根」，
+    单个账号的工作空间不能单独搬走，否则账本和端口分配会对不上。
+    """
+    account_mode = bool(os.getenv('BILI_ACCOUNT_ID'))
+    if account_mode:
+        root = os.getenv('BILI_ACCOUNTS_ROOT', '').strip()
+        if not root:
+            from core.account_workspaces import account_root
+            root = str(account_root())
+        return {'account_mode': True, 'root': Path(root).expanduser(), 'workspace': Path(USER_DATA_DIR)}
+    return {'account_mode': False, 'root': Path(USER_DATA_DIR), 'workspace': Path(USER_DATA_DIR)}
+
+
 @app.route('/api/storage', methods=['GET', 'POST'])
 def api_storage():
-    """Show or persist the user-data root; a path change takes effect on restart."""
-    if request.method == 'POST' and os.getenv('BILI_ACCOUNT_ID'):
-        return jsonify(ok=False, message='多账号使用固定隔离工作空间，不能修改总数据目录'), 400
-    default_root = Path(os.getenv("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))) / "BiliLearn"
-    pointer = default_root / "Data" / "storage_location.json"
+    """查看 / 修改数据目录。
+
+    GET 返回当前作用域根目录、待生效目录、默认目录、磁盘余量与各分区占用。
+    POST 先校验再落盘：校验失败不写指针，避免下次启动指向不可用目录；
+    迁移只补充缺失文件、不覆盖也不删除原数据，因此重启前旧目录仍可用。
+    """
+    scope = _storage_scope()
+    root = scope['root']
+    workspace = scope['workspace']
+    default_path = storage_location.default_root()
+    pending = storage_location.read_pointer()
+    # 多账号模式下 BILI_USER_DATA_DIR 由程序自己写入，不算用户强制指定。
+    env_override = bool(os.getenv('BILI_USER_DATA_DIR', '').strip()) and not scope['account_mode']
+
     if request.method == 'GET':
-        return jsonify(ok=True, current_path=str(USER_DATA_DIR), configured_path=str(USER_DATA_DIR),
-                       restart_required=False, groups=_storage_groups_payload(Path(USER_DATA_DIR)))
-    body = request.get_json(silent=True) or {}
+        return jsonify(
+            ok=True,
+            current_path=str(root),
+            configured_path=str(pending or root),
+            workspace_path=str(workspace),
+            default_path=str(default_path),
+            account_mode=scope['account_mode'],
+            is_custom=root.resolve() != default_path.resolve(),
+            env_override=env_override,
+            restart_required=bool(pending and pending.resolve() != root.resolve()),
+            pointer_file=str(storage_location.pointer_path()),
+            disk=storage_location.disk_stats(root),
+            groups=_storage_groups_payload(workspace),
+        )
+
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify(ok=False, message='请求必须是 JSON 对象'), 400
     raw = str(body.get("path") or "").strip()
-    target = default_root.resolve() if not raw else Path(raw).expanduser().resolve()
-    if len(str(target)) < 4 or target == target.parent:
-        return jsonify(ok=False, message="存储目录过短或不能使用磁盘根目录"), 400
+    if env_override:
+        return jsonify(ok=False, message='当前由 BILI_USER_DATA_DIR 环境变量指定数据目录，请先取消该变量'), 400
+    if not raw:
+        return _storage_reset_payload()
+
     try:
-        target.mkdir(parents=True, exist_ok=True)
-        if body.get("migrate") is True and Path(USER_DATA_DIR).resolve() != target:
-            import shutil
-            shutil.copytree(Path(USER_DATA_DIR), target, dirs_exist_ok=True)
-        pointer.parent.mkdir(parents=True, exist_ok=True)
-        pointer.write_text(json.dumps({"path": str(target), "updated_at": datetime.now().isoformat(timespec="seconds")}, ensure_ascii=False, indent=2), encoding="utf-8")
-        return jsonify(ok=True, message="数据目录已保存，重启面板后生效", current_path=str(USER_DATA_DIR), configured_path=str(target), restart_required=True,
-                       groups=_storage_groups_payload(target))
+        target = storage_location.validate_target(raw, current_root=root)
+    except storage_location.StoragePathError as exc:
+        return jsonify(ok=False, message=str(exc)), 400
+
+    migrated = {}
+    if body.get("migrate") is True:
+        try:
+            migrated = storage_location.migrate_contents(root, target)
+        except storage_location.StoragePathError as exc:
+            return jsonify(ok=False, message=str(exc)), 400
+        except OSError as exc:
+            return jsonify(ok=False, message=f'迁移数据失败：{exc}'), 400
+    try:
+        storage_location.save_pointer(target)
     except OSError as exc:
-        return jsonify(ok=False, message=f"保存数据目录失败：{exc}"), 400
+        return jsonify(ok=False, message=f'保存数据目录失败：{exc}'), 400
+
+    log_line(f'[STORAGE] 数据目录切换为 {target}（迁移文件 {migrated.get("copied_files", 0)} 个）')
+    message = '数据目录已保存，重启面板后生效'
+    if migrated.get('copied_files'):
+        message += f'（已迁移 {migrated["copied_files"]} 个文件，跳过同名文件 {migrated.get("skipped_files", 0)} 个）'
+    return jsonify(ok=True, message=message, current_path=str(root),
+                   configured_path=str(target), restart_required=True,
+                   account_mode=scope['account_mode'], migrated=migrated,
+                   groups=_storage_groups_payload(workspace))
+
+
+def _storage_reset_payload():
+    """把数据目录恢复成默认位置（删除指针文件）。"""
+    try:
+        storage_location.clear_pointer()
+    except storage_location.StoragePathError as exc:
+        return jsonify(ok=False, message=str(exc)), 400
+    default_path = storage_location.default_root()
+    scope = _storage_scope()
+    log_line(f'[STORAGE] 数据目录恢复默认 {default_path}')
+    return jsonify(ok=True, message='已恢复默认数据目录，重启面板后生效',
+                   current_path=str(scope['root']), configured_path=str(default_path),
+                   default_path=str(default_path), restart_required=True,
+                   account_mode=scope['account_mode'],
+                   groups=_storage_groups_payload(scope['workspace']))
+
+
+@app.route('/api/storage/reset', methods=['POST'])
+def api_storage_reset():
+    """恢复默认数据目录（不删除旧目录里的数据）。"""
+    scope = _storage_scope()
+    if os.getenv('BILI_USER_DATA_DIR', '').strip() and not scope['account_mode']:
+        return jsonify(ok=False, message='当前由 BILI_USER_DATA_DIR 环境变量指定数据目录，请先取消该变量'), 400
+    return _storage_reset_payload()
 
 
 @app.route('/api/storage/open', methods=['POST'])

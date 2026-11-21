@@ -2,7 +2,7 @@
 
 > **B站 AI 学习互动机器人** — AI 自动刷视频、学知识、评论互动、私信回复、自我进化，内置 Web 管理面板，支持一键打包 Windows EXE。
 >
-> 版本: **3.1.6** | License: MIT | 项目文档: https://bxya.app/
+> 版本: **3.1.7** | License: MIT | 项目文档: https://bxya.app/
 
 ---
 

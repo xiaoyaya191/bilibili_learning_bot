@@ -111,3 +111,7 @@ AI_TASK_PROMPT.md
 .testdata/
 highlights/
 tests/_testdata/
+
+# ── build artifacts ──
+build/
+dist/
