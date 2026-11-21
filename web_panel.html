@@ -819,7 +819,7 @@ input[type=range]{accent-color:var(--accent)}
 .about-stat-card.collection-enter{animation:lane-enter .34s cubic-bezier(.22,1,.36,1) both;animation-delay:var(--enter-delay,0ms)}
 @media(max-width:900px){.about-layout{grid-template-columns:1fr}}
 @media(max-width:560px){.about-env{padding:4px 12px}.about-env-row{grid-template-columns:1fr;gap:4px;padding:10px 0}.about-env-row strong{text-align:left}.about-links,.about-links-secondary{grid-template-columns:1fr 1fr}.about-group-number{grid-column:auto}}
-#pg-about #aboutBox{min-height:180px}.storage-panel{margin-top:12px}.storage-grid{display:grid;gap:8px}.storage-root-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:10px 0 14px;border-bottom:1px solid var(--border)}.storage-root-row label:first-child{font-size:12px;color:var(--text-secondary)}.storage-root-row .search-input{flex:1;min-width:240px}.storage-rows{display:grid;gap:6px}.storage-row{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:10px;align-items:center;padding:9px 0;border-bottom:1px solid var(--border-light)}.storage-row strong,.storage-row small{display:block;min-width:0}.storage-row small{margin-top:3px;color:var(--text-tertiary);font:11px var(--font-mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.storage-row .form-hint{white-space:nowrap}
+#pg-about #aboutBox{min-height:180px}.storage-panel{margin-top:12px}.sys-storage-status{display:flex;gap:12px;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;padding:2px 0 8px}.sys-storage-path{display:inline-block;margin:0 8px 0 6px;font:12px var(--font-mono);color:var(--text-primary);word-break:break-all}.sys-storage-note{display:flex;gap:8px;align-items:flex-start;padding:9px 12px;margin:0 0 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg-secondary, rgba(127,127,127,.08));font-size:12px;color:var(--text-secondary);line-height:1.5}.sys-storage-note svg{width:14px;height:14px;flex:none;margin-top:1px}.sys-storage-note code{font:11px var(--font-mono);word-break:break-all}.storage-grid{display:grid;gap:8px}.storage-root-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:10px 0 14px;border-bottom:1px solid var(--border)}.storage-root-row label:first-child{font-size:12px;color:var(--text-secondary)}.storage-root-row .search-input{flex:1;min-width:240px}.storage-rows{display:grid;gap:6px}.storage-row{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:10px;align-items:center;padding:9px 0;border-bottom:1px solid var(--border-light)}.storage-row strong,.storage-row small{display:block;min-width:0}.storage-row small{margin-top:3px;color:var(--text-tertiary);font:11px var(--font-mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.storage-row .form-hint{white-space:nowrap}
 .sec-divider{width:40px;height:2px;background:var(--accent);border-radius:1px;margin:24px 0}
 
 /* ── MOBILE ── */
@@ -2624,6 +2624,16 @@ input,select,textarea{min-width:0;max-width:100%;width:auto}
   </div>
 </div>
 <div class="divider" style="margin:14px 0 12px"></div>
+<section class="pc storage-panel" id="sysStorageCard">
+  <div class="favorite-head">
+    <div>
+      <h3 style="margin:0"><i data-lucide="hard-drive"></i> 数据目录</h3>
+      <p class="form-hint" style="margin:4px 0 0">运行数据、知识库与导出产物的存放位置。改到大容量磁盘可避免占满系统盘；保存后需重启面板生效。</p>
+    </div>
+    <button class="btn btn-out btn-sm" onclick="loadSysStorage()"><i data-lucide="refresh-cw"></i>刷新</button>
+  </div>
+  <div id="sysStorageBox" class="storage-grid"><div class="form-hint">读取中…</div></div>
+</section>
 <div class="system-grid">
 <section class="pc"><h3>系统快捷入口</h3><p class="form-hint">常用的系统运维页面都在这里直达。</p><div class="sys-link-grid">
   <button type="button" class="sys-link" onclick="nav('backup',document.querySelector('.ni[data-pg=\'backup\']'))"><span class="sys-link-ic"><i data-lucide="archive"></i></span><span><strong>备份还原</strong><small>导出配置、从备份恢复</small></span></button>
@@ -2674,7 +2684,6 @@ input,select,textarea{min-width:0;max-width:100%;width:auto}
 </div>
 <div class="divider" style="margin:14px 0 12px"></div>
 <div class="pc" id="aboutBox"></div>
-<div class="pc storage-panel"><div class="favorite-head"><div><h3>项目存储数据</h3><p class="form-hint">查看各类数据位置；更改后重启面板生效。不会把 API Key、Cookie 或私信写入源码。</p></div><button class="btn btn-out btn-sm" onclick="loadStorageSettings()"><i data-lucide="refresh-cw"></i>刷新</button></div><div id="storageBox" class="storage-grid"></div></div>
 <div class="disclaimer">免责声明：本项目仅供学习参考，若因使用本项目产生的任何后果，本人一律概不负责。<button type="button" class="disclaimer-link" onclick="showDisclaimer()">查看完整免责声明</button></div>
 </div>
 
@@ -3254,8 +3263,8 @@ function setLang(code){
 }
 var _I18N={
   zh:{sidebar:'控制面板',dash:'仪表盘',ctrl:'机器人控制',monitor:'实时监听',observe:'学习实况',logs:'完整日志',login:'B站登录',reviews:'AI 行为审核',switches:'功能开关',conf:'配置编辑',psna:'人格管理',mood:'心情管理',behavior:'行为设置',interests:'兴趣偏好',upfu:'UP主关注',dm:'私聊管理',cmts:'评论日志',mem:'记忆知识库',kb:'记忆知识库','memory-manage':'长期记忆与 B 友画像','watch-history':'观看历史',watchlater:'稍后再看',todos:'待办与提醒',feeds:'动态发布中心',favorites:'本地收藏夹',acts:'操作日志',tutor:'知识辅导',tools:'功能中心',mindmap:'思维导图',uplearn:'UP批量学习',video2web:'视频转网页',customkb:'自定义知识','learn-tools':'学习工具',asr:'ASR 语音识别',agent:'Agent 工作台',sys:'系统管理',backup:'备份还原',about:'关于',usrs:'用户画像',diary:'AI 日记',timeline:'字幕时间轴'},
-  en:{"已前往 · 未配置":"Visited · not configured","新手教程":"Beginner's Tutorial","首次使用":"First run","首次使用？按以下 7 步完成起步配置；设置会持续保存，无需一次做完。":"First time here? Finish setup in 7 steps; settings keep saving — no need to finish in one go.","不再显示":"Don't show again","开始配置":"Start Setup","前往":"Go","已完成":"Done","连接 AI":"Connect AI","登录 B 站":"Log in to Bilibili","设置兴趣与避雷词":"Set Interests & Blocklist","决定互动审核":"Decide Interaction Review","设置刷视频方式":"Set Watch Mode","开始并观察过程":"Start & Observe",sidebar:'Dashboard',dash:'Dashboard',ctrl:'Bot Control',monitor:'Live Monitor',observe:'Learning Live',logs:'Full Logs',login:'Bilibili Login',reviews:'AI Review',switches:'Feature Switches',conf:'Settings',psna:'Personas',mood:'Mood',behavior:'Behavior',interests:'Interests',upfu:'Followed UPs',dm:'Private Chat',cmts:'Comments Log',mem:'Memory Base',kb:'Knowledge Base','memory-manage':'Memory & B-friends','watch-history':'Watch History',watchlater:'Watch Later',todos:'Todos & Reminders',feeds:'Dynamic Center',favorites:'Favorites',acts:'Action Log',tutor:'Tutor',tools:'Tool Center',mindmap:'Mind Maps',uplearn:'Batch Learn',video2web:'Video to Web',customkb:'Custom Knowledge','learn-tools':'Learning Tools',asr:'ASR Speech',agent:'Agent Workspace',sys:'System',backup:'Backup & Restore',about:'About',usrs:'User Profiles',diary:'Diary & Evolution',timeline:'Subtitle Timeline'},
-  ru:{"已前往 · 未配置":"Посещено · не настроено","新手教程":"Руководство для новичков","首次使用":"Первый запуск","首次使用？按以下 7 步完成起步配置；设置会持续保存，无需一次做完。":"Впервые здесь? Выполните 7 шагов настройки; всё сохраняется — можно не за один раз.","不再显示":"Больше не показывать","开始配置":"Начать настройку","前往":"Перейти","已完成":"Готово","连接 AI":"Подключить ИИ","登录 B 站":"Вход на Bilibili","设置兴趣与避雷词":"Интересы и стоп-слова","决定互动审核":"Проверка действий ИИ","设置刷视频方式":"Режим просмотра видео","开始并观察过程":"Запуск и наблюдение",sidebar:'Панель',dash:'Панель',ctrl:'Управление',monitor:'Мониторинг',observe:'Обучение',logs:'Логи',login:'Вход Bilibili',reviews:'Модерация AI',switches:'Переключатели',conf:'Настройки',psna:'Персоны',mood:'Настроение',behavior:'Поведение',interests:'Интересы',upfu:'Отслеживаемые UP',dm:'Личные сообщения',cmts:'Комментарии',mem:'База памяти',kb:'База знаний','memory-manage':'Память и друзья','watch-history':'История','watchlater':'Смотреть позже',todos:'Задачи',feeds:'Динамики',favorites:'Избранное',acts:'Журнал действий',tutor:'Репетитор',tools:'Инструменты',mindmap:'Интеллект-карты',uplearn:'Пакетное обучение',video2web:'Видео в веб',customkb:'Свои знания','learn-tools':'Инструменты обучения',asr:'ASR распознавание',agent:'Рабочий стол Agent',sys:'Система',backup:'Резервное копирование',about:'О проекте',usrs:'Профили',diary:'Дневник и развитие',timeline:'Таймлайн субтитров'}
+  en:{"数据目录":"Data folder","账号数据根目录":"Account data root","当前数据目录":"Current data folder","迁移现有数据":"Migrate existing data","恢复默认":"Reset to default","浏览…":"Browse…","打开位置":"Open location","环境变量指定":"Set by env var","自定义位置":"Custom location","默认位置":"Default location","当前账号工作目录":"Current account workspace","已前往 · 未配置":"Visited · not configured","新手教程":"Beginner's Tutorial","首次使用":"First run","首次使用？按以下 7 步完成起步配置；设置会持续保存，无需一次做完。":"First time here? Finish setup in 7 steps; settings keep saving — no need to finish in one go.","不再显示":"Don't show again","开始配置":"Start Setup","前往":"Go","已完成":"Done","连接 AI":"Connect AI","登录 B 站":"Log in to Bilibili","设置兴趣与避雷词":"Set Interests & Blocklist","决定互动审核":"Decide Interaction Review","设置刷视频方式":"Set Watch Mode","开始并观察过程":"Start & Observe",sidebar:'Dashboard',dash:'Dashboard',ctrl:'Bot Control',monitor:'Live Monitor',observe:'Learning Live',logs:'Full Logs',login:'Bilibili Login',reviews:'AI Review',switches:'Feature Switches',conf:'Settings',psna:'Personas',mood:'Mood',behavior:'Behavior',interests:'Interests',upfu:'Followed UPs',dm:'Private Chat',cmts:'Comments Log',mem:'Memory Base',kb:'Knowledge Base','memory-manage':'Memory & B-friends','watch-history':'Watch History',watchlater:'Watch Later',todos:'Todos & Reminders',feeds:'Dynamic Center',favorites:'Favorites',acts:'Action Log',tutor:'Tutor',tools:'Tool Center',mindmap:'Mind Maps',uplearn:'Batch Learn',video2web:'Video to Web',customkb:'Custom Knowledge','learn-tools':'Learning Tools',asr:'ASR Speech',agent:'Agent Workspace',sys:'System',backup:'Backup & Restore',about:'About',usrs:'User Profiles',diary:'Diary & Evolution',timeline:'Subtitle Timeline'},
+  ru:{"数据目录":"Каталог данных","账号数据根目录":"Корень данных аккаунтов","当前数据目录":"Текущий каталог данных","迁移现有数据":"Перенести данные","恢复默认":"Сбросить","浏览…":"Обзор…","打开位置":"Открыть","环境变量指定":"Задано переменной","自定义位置":"Своё расположение","默认位置":"По умолчанию","当前账号工作目录":"Рабочий каталог аккаунта","已前往 · 未配置":"Посещено · не настроено","新手教程":"Руководство для новичков","首次使用":"Первый запуск","首次使用？按以下 7 步完成起步配置；设置会持续保存，无需一次做完。":"Впервые здесь? Выполните 7 шагов настройки; всё сохраняется — можно не за один раз.","不再显示":"Больше не показывать","开始配置":"Начать настройку","前往":"Перейти","已完成":"Готово","连接 AI":"Подключить ИИ","登录 B 站":"Вход на Bilibili","设置兴趣与避雷词":"Интересы и стоп-слова","决定互动审核":"Проверка действий ИИ","设置刷视频方式":"Режим просмотра видео","开始并观察过程":"Запуск и наблюдение",sidebar:'Панель',dash:'Панель',ctrl:'Управление',monitor:'Мониторинг',observe:'Обучение',logs:'Логи',login:'Вход Bilibili',reviews:'Модерация AI',switches:'Переключатели',conf:'Настройки',psna:'Персоны',mood:'Настроение',behavior:'Поведение',interests:'Интересы',upfu:'Отслеживаемые UP',dm:'Личные сообщения',cmts:'Комментарии',mem:'База памяти',kb:'База знаний','memory-manage':'Память и друзья','watch-history':'История','watchlater':'Смотреть позже',todos:'Задачи',feeds:'Динамики',favorites:'Избранное',acts:'Журнал действий',tutor:'Репетитор',tools:'Инструменты',mindmap:'Интеллект-карты',uplearn:'Пакетное обучение',video2web:'Видео в веб',customkb:'Свои знания','learn-tools':'Инструменты обучения',asr:'ASR распознавание',agent:'Рабочий стол Agent',sys:'Система',backup:'Резервное копирование',about:'О проекте',usrs:'Профили',diary:'Дневник и развитие',timeline:'Таймлайн субтитров'}
 };
 var _PH={
   en:{dash:['Dashboard','Monitor · Visualize · Status'],monitor:['Live Monitor','Reply to DMs & comments in real time'],observe:['Learning Live','Videos being processed, subtitle timelines, recent records and raw logs'],logs:['Full Logs','Bot, monitor and review logs in one place'],ctrl:['Bot Control','Start / Stop / Restart'],login:['Bilibili Login','QR login / Logout / Status'],reviews:['AI Review','Decide every account action like an inbox'],conf:['Settings','User data / config.json'],cmts:['Comments Log','Recent comment interactions'],usrs:['User Profiles','Favorability & impressions'],mem:['Memory & Knowledge','Learned video knowledge and custom notes'],'memory-manage':['Long-term Memory','Manage long-term facts and relationships used in later decisions'],'watch-history':['Watch History','Videos the bot actually analyzed. Click a card to open in Bilibili'],favorites:['Favorites','Shared by AI and user. Does not touch real Bilibili favorites'],timeline:['Subtitle Timeline','Locate claims with real CC subtitle timestamps'],diary:['Diary & Evolution',''],acts:['Action Log',''],mood:['Mood','View / switch bot mood'],behavior:['Behavior','AI disclaimer · energy · comment mode'],interests:['Interests','What AI prioritizes and skips'],upfu:['Followed UPs','UP creators the AI follows'],asr:['ASR Speech','Engine, model, download progress and local storage'],agent:['Agent Workspace','Configure tools, skills and MCP services'],tutor:['Tutor','Pick a knowledge file → AI explain / Q&A / create / HTML'],sys:['System','Backup · Restore · Reset'],backup:['Backup & Restore','Export config & recoverable settings, or restore from a backup'],about:['About','A local Bilibili learning, interaction and knowledge workspace'],mindmap:['Mind Maps','Knowledge base → interactive mind map (collapse / zoom)'],uplearn:['Batch Learn','Enter a UP name/UID, pick videos, let AI learn and archive them'],video2web:['Video → Web / Export','Turn a video into a beautiful learning page (slides). Preview / download / export Word·PDF'],customkb:['Custom Knowledge','Manually maintain a dedicated knowledge base for AI learning'],'learn-tools':['Learning Tools','AI quizzes · deep-dive | One-shot / Agent / Multi-Agent'],switches:['Feature Switches','Controll all interaction features (take effect after save)'],'watch-later':['Watch Later','Sync the current account watch-later list'],todos:['Todos & Reminders','Manual todos and AI reminders share one local list'],dynamics:['Dynamic Center','Write drafts, or let AI generate and publish dynamics'],dm:['Private Chat','AI-user chat history (QQ style)'],'memory-manage':['Long-term Memory & B-friends','Manage long-term facts and interaction relationships used by AI in future DMs and sharing.'],'watch-history':['Watch History','Only videos the bot actually analyzed or interacted with. Click a card to open on Bilibili.'],'learn-tools':['Learning Tools','AI quizzes\u00b7 deep dives | one-shot / Agent / multi-Agent modes'],'watch-later':['Watch Later','Syncs the current Bilibili account watch-later list. Account writes are controlled by feature switches.'],psna:['Persona Studio','Shape the bot\'s identity, expression style and behavior boundaries'],tools:['Tool Center','Manual operations & task tools: analyze videos, maintain knowledge base, archive favorites, all local.']},
@@ -5273,12 +5282,60 @@ h+='</table>';document.getElementById('actTab').innerHTML=h;
 }catch(e){}
 }
 
-// ── ABOUT ──
-async function loadStorageSettings(){try{var r=await api('GET','/api/storage'),box=document.getElementById('storageBox');if(!box||!r.ok)return;var groups=r.groups||{},rows=Object.keys(groups).map(function(k){var g=groups[k];return '<div class="storage-row"><div><strong>'+esc(g.label)+'</strong><small>'+esc(g.path)+'</small></div><span class="form-hint">'+g.files+' 个文件</span><button class="btn btn-out btn-sm" onclick="openStorageGroup(\''+k+'\')"><i data-lucide="folder-open"></i>打开位置</button><button class="btn btn-out btn-sm" onclick="exportStorageGroup(\''+k+'\')"><i data-lucide="download"></i>导出</button></div>'}).join('');box.innerHTML='<div class="storage-root-row"><label>总数据目录</label><input id="storagePathInput" class="search-input" value="'+esc(r.current_path||'')+'"><label class="toggle-sw"><input id="storageMigrate" type="checkbox"><span class="toggle-track"></span><span class="toggle-label">迁移现有数据</span></label><button class="btn btn-pr btn-sm" onclick="saveStorageSettings()"><i data-lucide="save"></i>保存</button></div><div class="storage-rows">'+rows+'</div>';lucide.createIcons({attrs:{'stroke-width':1.5}})}catch(e){toast('读取存储位置失败：'+(e.message||e),'err')}}
-async function saveStorageSettings(){var path=(document.getElementById('storagePathInput')||{}).value||'',migrate=!!(document.getElementById('storageMigrate')||{}).checked;try{var r=await api('POST','/api/storage',{path:path,migrate:migrate});toast(r.message,r.ok?'ok':'err');if(r.ok)loadStorageSettings()}catch(e){toast('保存存储位置失败：'+(e.message||e),'err')}}
+// ── 数据目录（系统管理 → 系统设置） ──
+var _sysStorageState = null;
+function sysStorageBadge(r){if(r.env_override)return '<span class="tg tg-war">环境变量指定</span>';return r.is_custom?'<span class="tg tg-suc">自定义位置</span>':'<span class="tg">默认位置</span>'}
+async function loadSysStorage(){
+  var box=document.getElementById('sysStorageBox');if(!box)return;
+  try{
+    var r=await api('GET','/api/storage');if(!r.ok)throw Error(r.message||'读取失败');
+    _sysStorageState=r;
+    var disk=r.disk||{},groups=r.groups||{};
+    var rows=Object.keys(groups).map(function(k){var g=groups[k];return '<div class="storage-row"><div><strong>'+esc(g.label)+'</strong><small>'+esc(g.path)+'</small></div><span class="form-hint">'+g.files+' 个文件 · '+fmtBytes(g.bytes)+'</span><button class="btn btn-out btn-sm" onclick="openStorageGroup(\''+k+'\')"><i data-lucide="folder-open"></i>打开位置</button><button class="btn btn-out btn-sm" onclick="exportStorageGroup(\''+k+'\')"><i data-lucide="download"></i>导出</button></div>'}).join('');
+    var head='<div class="sys-storage-status"><div><span class="form-hint">'+(r.account_mode?'账号数据根目录':'当前数据目录')+'</span><strong class="sys-storage-path" title="'+esc(r.current_path||'')+'">'+esc(r.current_path||'')+'</strong>'+sysStorageBadge(r)+'</div>'
+      +'<div class="form-hint">'+(disk.total?('磁盘剩余 '+fmtBytes(disk.free)+' / 共 '+fmtBytes(disk.total)):'磁盘容量不可用')+'</div></div>';
+    if(r.account_mode&&r.workspace_path){head+='<div class="form-hint" style="margin:-4px 0 8px">当前账号工作目录：<code>'+esc(r.workspace_path)+'</code>（多账号模式下这里切换的是全部账号共用的数据根，各账号子目录会一起迁移）</div>'}
+    if(r.restart_required||r.env_override){head+='<div class="sys-storage-note"><i data-lucide="info"></i><span>'+(r.env_override?('当前由环境变量 BILI_USER_DATA_DIR 指定为 <code>'+esc(r.current_path||'')+'</code>，取消该变量后才能在这里修改。'):('已切换到 <code>'+esc(r.configured_path||'')+'</code>，重启面板后生效。'))+'</span></div>'}
+    var editor='<div class="storage-root-row"><label>数据目录</label><input id="sysStoragePath" class="search-input" value="'+esc(r.configured_path||r.current_path||'')+'" placeholder="例如 D:\\BiliLearnData" '+(r.env_override?'disabled':'')+'><button class="btn btn-out btn-sm" onclick="pickSysStorage()" '+(r.env_override?'disabled':'')+'><i data-lucide="folder-search"></i>浏览…</button><label class="toggle-sw"><input id="sysStorageMigrate" type="checkbox" '+(r.env_override?'disabled':'')+'><span class="toggle-track"></span><span class="toggle-label">迁移现有数据</span></label><button class="btn btn-pr btn-sm" onclick="saveSysStorage()" '+(r.env_override?'disabled':'')+'><i data-lucide="save"></i>保存</button><button class="btn btn-out btn-sm" onclick="resetSysStorage()" '+(r.is_custom&&!r.env_override?'':'disabled')+'><i data-lucide="undo-2"></i>恢复默认</button></div>';
+    box.innerHTML=head+editor+'<div class="storage-rows">'+rows+'</div>';
+    if(window.lucide)lucide.createIcons({attrs:{'stroke-width':1.5}});
+  }catch(e){box.innerHTML='<div class="form-hint">读取数据目录失败：'+esc(e.message||e)+'</div>'}
+}
+async function pickSysStorage(){
+  var input=document.getElementById('sysStoragePath');
+  try{
+    var r=await api('POST','/api/storage/pick',{mode:'directory',initial:(input&&input.value)||''});
+    if(r.cancelled)return;
+    if(!r.ok)throw Error(r.message||'选择失败');
+    if(input)input.value=r.path;
+  }catch(e){toast('选择目录失败：'+(e.message||e),'err')}
+}
+async function saveSysStorage(){
+  var input=document.getElementById('sysStoragePath');
+  var path=((input&&input.value)||'').trim();
+  var migrate=!!(document.getElementById('sysStorageMigrate')||{}).checked;
+  if(!path)return toast('请填写数据目录','err');
+  if(migrate&&!confirm('将把当前数据目录中的文件复制到新目录（同名文件跳过、旧数据不删除）。继续吗？'))return;
+  if(!migrate&&!confirm('不迁移数据的话，新目录是空的应用会看不到历史数据（旧目录仍保留）。继续吗？'))return;
+  try{
+    var r=await api('POST','/api/storage',{path:path,migrate:migrate});
+    toast(r.message,r.ok?'ok':'err');
+    if(r.ok)loadSysStorage();
+  }catch(e){toast('保存数据目录失败：'+(e.message||e),'err')}
+}
+async function resetSysStorage(){
+  if(!confirm('恢复默认数据目录？旧目录里的数据不会被删除。'))return;
+  try{
+    var r=await api('POST','/api/storage/reset',{});
+    toast(r.message,r.ok?'ok':'err');
+    if(r.ok)loadSysStorage();
+  }catch(e){toast('恢复默认失败：'+(e.message||e),'err')}
+}
 async function openStorageGroup(group){try{var r=await api('POST','/api/storage/open',{group:group});toast(r.message,r.ok?'ok':'err')}catch(e){toast('打开位置失败：'+(e.message||e),'err')}}
 async function exportStorageGroup(group){try{var r=await api('POST','/api/export',{groups:[group],sanitize:true});toast(r.message,r.ok?'ok':'err')}catch(e){toast('导出失败：'+(e.message||e),'err')}}
-async function rf_about(){loadStorageSettings();
+
+// ── ABOUT ──
+async function rf_about(){
 try{
 var d=await api('GET','/api/info');
 var project=d.project_info||{};
@@ -6371,7 +6428,7 @@ function renderAsrTestResult(res){
 }
 
 // ── SYSTEM / BACKUP ──
-function rf_sys(){}
+function rf_sys(){loadSysStorage()}
 function rf_backup(){listBackups()}
 async function exportConfig(){
 var r=await api("POST","/api/export");document.getElementById("exportMsg").innerHTML=r.ok?

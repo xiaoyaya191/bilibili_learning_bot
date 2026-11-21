@@ -1,8 +1,8 @@
 from pathlib import Path
 
 
-def test_release_version_is_316():
-    assert Path("VERSION").read_text(encoding="utf-8-sig").strip() == "3.1.6"
+def test_release_version_is_317():
+    assert Path("VERSION").read_text(encoding="utf-8-sig").strip() == "3.1.7"
 
 
 def test_info_and_about_render_release_version(monkeypatch):
@@ -15,7 +15,7 @@ def test_info_and_about_render_release_version(monkeypatch):
 
     info = client.get("/api/info")
     assert info.status_code == 200
-    assert info.get_json()["version"] == "3.1.6"
+    assert info.get_json()["version"] == "3.1.7"
 
     html = Path("web_panel.html").read_text(encoding="utf-8-sig")
     assert "d.version||'版本未知'" in html

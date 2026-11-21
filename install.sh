@@ -1,7 +1,7 @@
 #!/data/data/com.termux/files/usr/bin/bash
 set -Eeuo pipefail
 
-VERSION="3.1.6"
+VERSION="3.1.7"
 REPO_URL="${BILILEARN_REPO_URL:-https://github.com/xiaoyaya191/bilibili_learning_bot.git}"
 INSTALL_DIR="${BILILEARN_INSTALL_DIR:-${HOME}/bililearn}"
 BRANCH="${BILILEARN_BRANCH:-main}"
@@ -76,7 +76,7 @@ cat > start_termux.sh <<'LAUNCHER'
 set -e
 cd "$(dirname "$0")"
 export BILI_DISCLAIMER_SKIP=1 BILI_WEB_AUTO_OPEN=0 BILI_TRAY_DISABLED=1 WEB_HOST=127.0.0.1
-echo "[BiliLearn] 正在启动 3.1.6 网页面板，实际地址见下方启动信息。"
+echo "[BiliLearn] 正在启动 3.1.7 网页面板，实际地址见下方启动信息。"
 exec python web_panel.py
 LAUNCHER
 chmod +x start_termux.sh
